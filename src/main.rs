@@ -139,15 +139,21 @@ enum Commands {
         /// Deployment environment (devnet-amplifier, testnet, mainnet)
         #[arg(long)]
         env: String,
-        /// EVM address that will deploy the gateway (for address prediction)
-        #[arg(long)]
-        gateway_deployer: String,
         /// Salt for CosmWasm instantiation (e.g. "v1.0.11")
         #[arg(long)]
         salt: String,
         /// BIP39 mnemonic for the prover admin wallet (for update_verifier_set)
         #[arg(long)]
         admin_mnemonic: Option<String>,
+        /// EVM private key for ConstAddressDeployer and Create3Deployer
+        #[arg(long)]
+        deployer_private_key: Option<String>,
+        /// EVM private key for Gateway, Operators, RegisterOperators, and ownership transfers
+        #[arg(long)]
+        gateway_deployer_private_key: Option<String>,
+        /// EVM private key for AxelarGasService
+        #[arg(long)]
+        gas_service_deployer_private_key: Option<String>,
     },
 
     /// Run the next pending deployment step
@@ -1053,9 +1059,11 @@ async fn main() -> Result<()> {
             axelar_id,
             mnemonic,
             env,
-            gateway_deployer,
             salt,
             admin_mnemonic,
+            deployer_private_key,
+            gateway_deployer_private_key,
+            gas_service_deployer_private_key,
         } => {
             let mut state = read_state(&axelar_id)?;
 
@@ -1070,14 +1078,30 @@ async fn main() -> Result<()> {
                 state["adminMnemonic"] = json!(admin_mn);
             }
 
-            // Validate gateway deployer is a valid EVM address
-            let _: Address = gateway_deployer
-                .parse()
-                .map_err(|e| eyre::eyre!("invalid gateway deployer address: {e}"))?;
+            // Save EVM private keys if provided
+            if let Some(ref pk) = deployer_private_key {
+                let signer: PrivateKeySigner = pk.parse()
+                    .map_err(|e| eyre::eyre!("invalid deployer private key: {e}"))?;
+                println!("deployer address: {}", signer.address());
+                state["deployerPrivateKey"] = json!(pk);
+            }
+            if let Some(ref pk) = gateway_deployer_private_key {
+                let signer: PrivateKeySigner = pk.parse()
+                    .map_err(|e| eyre::eyre!("invalid gateway deployer private key: {e}"))?;
+                let gw_addr = signer.address();
+                println!("gateway deployer address: {gw_addr}");
+                state["gatewayDeployerPrivateKey"] = json!(pk);
+                state["gatewayDeployer"] = json!(format!("{gw_addr}"));
+            }
+            if let Some(ref pk) = gas_service_deployer_private_key {
+                let signer: PrivateKeySigner = pk.parse()
+                    .map_err(|e| eyre::eyre!("invalid gas service deployer private key: {e}"))?;
+                println!("gas service deployer address: {}", signer.address());
+                state["gasServiceDeployerPrivateKey"] = json!(pk);
+            }
 
             state["mnemonic"] = json!(mnemonic);
             state["env"] = json!(env);
-            state["gatewayDeployer"] = json!(gateway_deployer);
             state["cosmSalt"] = json!(salt);
 
             save_state(&axelar_id, &state)?;
@@ -1136,11 +1160,29 @@ async fn main() -> Result<()> {
 
             println!("running step: {step_name} ({step_kind})");
 
+            // Resolve EVM private key: --private-key flag > state key based on step
+            let resolve_evm_key = |step_name: &str| -> Result<String> {
+                if let Some(ref pk) = private_key {
+                    return Ok(pk.clone());
+                }
+                let state_key = match step_name {
+                    "ConstAddressDeployer" | "Create3Deployer" => "deployerPrivateKey",
+                    "AxelarGateway" => "gatewayDeployerPrivateKey",
+                    "Operators" | "RegisterOperators" |
+                    "TransferOperatorsOwnership" | "TransferGatewayOwnership" |
+                    "TransferGasServiceOwnership" => "gatewayDeployerPrivateKey",
+                    "AxelarGasService" => "gasServiceDeployerPrivateKey",
+                    _ => return Err(eyre::eyre!("--private-key required for step {step_name}")),
+                };
+                state[state_key]
+                    .as_str()
+                    .map(|s| s.to_string())
+                    .ok_or_else(|| eyre::eyre!("no {state_key} in state and --private-key not provided. Run cosmos-init with the key or pass --private-key"))
+            };
+
             match step_kind.as_str() {
                 "deploy-create" | "deploy-create2" => {
-                    let pk = private_key
-                        .as_ref()
-                        .ok_or_else(|| eyre::eyre!("--private-key required for deploy steps"))?;
+                    let pk = resolve_evm_key(&step_name)?;
                     let ap = artifact_path
                         .as_ref()
                         .ok_or_else(|| eyre::eyre!("--artifact-path required for deploy steps"))?;
@@ -1223,9 +1265,7 @@ async fn main() -> Result<()> {
                 }
 
                 "register-operators" => {
-                    let pk = private_key
-                        .as_ref()
-                        .ok_or_else(|| eyre::eyre!("--private-key required"))?;
+                    let pk = resolve_evm_key(&step_name)?;
                     let signer: PrivateKeySigner = pk.parse()?;
                     let provider = ProviderBuilder::new()
                         .wallet(signer)
@@ -1254,9 +1294,7 @@ async fn main() -> Result<()> {
                 }
 
                 "transfer-ownership" => {
-                    let pk = private_key
-                        .as_ref()
-                        .ok_or_else(|| eyre::eyre!("--private-key required"))?;
+                    let pk = resolve_evm_key(&step_name)?;
                     let signer: PrivateKeySigner = pk.parse()?;
                     let provider = ProviderBuilder::new()
                         .wallet(signer)
@@ -1294,9 +1332,7 @@ async fn main() -> Result<()> {
                 }
 
                 "deploy-gateway" => {
-                    let pk = private_key
-                        .as_ref()
-                        .ok_or_else(|| eyre::eyre!("--private-key required"))?;
+                    let pk = resolve_evm_key(&step_name)?;
                     let impl_artifact = artifact_path
                         .as_ref()
                         .ok_or_else(|| eyre::eyre!("--artifact-path required (implementation artifact)"))?;

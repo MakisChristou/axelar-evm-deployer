@@ -5,14 +5,14 @@ The deployer tracks progress in a state file (`~/.local/share/axelar-evm-deploye
 ```bash
 export CHAIN=arc-11
 export SALT=v1.0.13
-export GATEWAY_DEPLOYER=0x92ae7f0b761aC8CFAbe4B94D53d1CD343dF8E3C0
+export MNEMONIC="..."                          # axelar deployer (testnet: axelar1wxej3l9aczsns3harrtdzk7rct29jl47tvu8mp)
+export MULTISIG_PROVER_MNEMONIC="..."          # prover admin (testnet: axelar1w7y7v26rtnrj4vrx6q3qq4hfsmc68hhsxnadlf)
+export DEPLOYER_PRIVATE_KEY=0x...              # ConstAddressDeployer + Create3Deployer (testnet: 0x156372Cb2F8939d9705fdaa6C70e25825Ea9CAaF)
+export GATEWAY_DEPLOYER_PRIVATE_KEY=0x...      # Gateway + Operators + ownership transfers (testnet: 0x92ae7f0b761aC8CFAbe4B94D53d1CD343dF8E3C0)
+export GAS_SERVICE_DEPLOYER_PRIVATE_KEY=0x...  # AxelarGasService (testnet: 0x3b7E3351689b0fba2cE9f1F8d14Ae38e270d9eD4)
 ```
 
 ## Setup
-
-```bash
-cargo run -- status --axelar-id $CHAIN
-```
 
 ```bash
 cargo run -- init \
@@ -30,23 +30,29 @@ cargo run -- init \
 ```bash
 cargo run -- cosmos-init --axelar-id $CHAIN \
   --mnemonic "$MNEMONIC" \
-  --admin-mnemonic "$MULTISIG_PROVER_MNEMONIC"
+  --admin-mnemonic "$MULTISIG_PROVER_MNEMONIC" \
   --env testnet \
-  --gateway-deployer $GATEWAY_DEPLOYER \
-  --salt $SALT
+  --salt $SALT \
+  --deployer-private-key $DEPLOYER_PRIVATE_KEY \
+  --gateway-deployer-private-key $GATEWAY_DEPLOYER_PRIVATE_KEY \
+  --gas-service-deployer-private-key $GAS_SERVICE_DEPLOYER_PRIVATE_KEY
+```
+
+```bash
+cargo run -- status --axelar-id $CHAIN
 ```
 
 ## 1. Deploy ConstAddressDeployer
 
 ```bash
-cargo run -- deploy --axelar-id $CHAIN --private-key $PRIVATE_KEY \
+cargo run -- deploy --axelar-id $CHAIN \
   --artifact-path ../axelar-contract-deployments/evm/legacy/ConstAddressDeployer.json
 ```
 
 ## 2. Deploy Create3Deployer
 
 ```bash
-cargo run -- deploy --axelar-id $CHAIN --private-key $PRIVATE_KEY \
+cargo run -- deploy --axelar-id $CHAIN \
   --artifact-path ../axelar-contract-deployments/node_modules/@axelar-network/axelar-gmp-sdk-solidity/artifacts/contracts/deploy/Create3Deployer.sol/Create3Deployer.json \
   --salt $SALT
 ```
@@ -85,7 +91,7 @@ cargo run -- deploy --axelar-id $CHAIN
 Deploys implementation + proxy. Fetches the initial verifier set from the Axelar chain LCD endpoint automatically.
 
 ```bash
-cargo run -- deploy --axelar-id $CHAIN --private-key $GATEWAY_DEPLOYER_PRIVATE_KEY \
+cargo run -- deploy --axelar-id $CHAIN \
   --artifact-path ../axelar-contract-deployments/node_modules/@axelar-network/axelar-gmp-sdk-solidity/artifacts/contracts/gateway/AxelarAmplifierGateway.sol/AxelarAmplifierGateway.json \
   --proxy-artifact-path ../axelar-contract-deployments/node_modules/@axelar-network/axelar-gmp-sdk-solidity/artifacts/contracts/gateway/AxelarAmplifierGatewayProxy.sol/AxelarAmplifierGatewayProxy.json
 ```
@@ -93,14 +99,16 @@ cargo run -- deploy --axelar-id $CHAIN --private-key $GATEWAY_DEPLOYER_PRIVATE_K
 ## 15. Deploy Operators
 
 ```bash
-cargo run -- deploy --axelar-id $CHAIN --private-key $PRIVATE_KEY \
+cargo run -- deploy --axelar-id $CHAIN \
   --artifact-path ../axelar-contract-deployments/node_modules/@axelar-network/axelar-cgp-solidity/artifacts/contracts/auth/Operators.sol/Operators.json
 ```
 
 ## Steps 16–20: Registration and ownership transfers
 
+Each step auto-selects the correct key from state (gateway deployer for most, gas service deployer for AxelarGasService).
+
 ```bash
-cargo run -- deploy --axelar-id $CHAIN --private-key $PRIVATE_KEY
+cargo run -- deploy --axelar-id $CHAIN
 ```
 
 | Step | Name | Description |
