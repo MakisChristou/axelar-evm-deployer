@@ -4,7 +4,7 @@ The deployer tracks progress in a state file (`~/.local/share/axelar-evm-deploye
 
 ```bash
 export CHAIN=arc-10
-export SALT=v1.0.11
+export SALT=v1.0.12
 export GATEWAY_DEPLOYER=0x92ae7f0b761aC8CFAbe4B94D53d1CD343dF8E3C0
 ```
 
@@ -31,7 +31,8 @@ cargo run -- init \
 cargo run -- cosmos-init --axelar-id $CHAIN \
   --mnemonic "$MNEMONIC" \
   --env testnet \
-  --gateway-deployer $GATEWAY_DEPLOYER
+  --gateway-deployer $GATEWAY_DEPLOYER \
+  --salt $SALT
 ```
 
 ## 1. Deploy ConstAddressDeployer
@@ -46,7 +47,7 @@ cargo run -- deploy --axelar-id $CHAIN --private-key $PRIVATE_KEY \
 ```bash
 cargo run -- deploy --axelar-id $CHAIN --private-key $PRIVATE_KEY \
   --artifact-path ../axelar-contract-deployments/node_modules/@axelar-network/axelar-gmp-sdk-solidity/artifacts/contracts/deploy/Create3Deployer.sol/Create3Deployer.json \
-  --salt $SALT$
+  --salt $SALT
 ```
 
 ## Steps 3–11: CosmWasm setup

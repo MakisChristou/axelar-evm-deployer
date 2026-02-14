@@ -140,6 +140,9 @@ enum Commands {
         /// EVM address that will deploy the gateway (for address prediction)
         #[arg(long)]
         gateway_deployer: String,
+        /// Salt for CosmWasm instantiation (e.g. "v1.0.11")
+        #[arg(long)]
+        salt: String,
     },
 
     /// Run the next pending deployment step
@@ -1025,6 +1028,7 @@ async fn main() -> Result<()> {
             mnemonic,
             env,
             gateway_deployer,
+            salt,
         } => {
             let mut state = read_state(&axelar_id)?;
 
@@ -1040,6 +1044,7 @@ async fn main() -> Result<()> {
             state["mnemonic"] = json!(mnemonic);
             state["env"] = json!(env);
             state["gatewayDeployer"] = json!(gateway_deployer);
+            state["cosmSalt"] = json!(salt);
 
             save_state(&axelar_id, &state)?;
             println!("cosmos config saved for '{axelar_id}' (env={env})");
@@ -1527,9 +1532,9 @@ async fn main() -> Result<()> {
                                 .ok_or_else(|| eyre::eyre!("no MultisigProver.{chain_axelar_id} config"))?;
 
                             // Compute salt: keccak256(abi.encode(["string"], [salt_key]))
-                            let salt_key = state.get("cosmSalt")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("v1.0.10");
+                            let salt_key = state["cosmSalt"]
+                                .as_str()
+                                .ok_or_else(|| eyre::eyre!("no cosmSalt in state. Run cosmos-init with --salt first"))?;
                             let salt_bytes = get_salt_from_key(salt_key);
                             let salt_b64 = base64::engine::general_purpose::STANDARD.encode(salt_bytes.as_slice());
 
@@ -1923,24 +1928,16 @@ async fn main() -> Result<()> {
         }
 
         Commands::Reset { axelar_id } => {
-            let mut state = read_state(&axelar_id)?;
+            let state = read_state(&axelar_id)?;
             let target_json: PathBuf = state["targetJson"]
                 .as_str()
                 .ok_or_else(|| eyre::eyre!("no targetJson in state"))?
                 .into();
 
-            // --- Reset state file ---
-            let steps = state["steps"]
-                .as_array_mut()
-                .ok_or_else(|| eyre::eyre!("no steps in state"))?;
-            for step in steps.iter_mut() {
-                step["status"] = json!("pending");
-            }
-            state.as_object_mut().unwrap().remove("predictedGatewayAddress");
-            state.as_object_mut().unwrap().remove("proposals");
-
-            save_state(&axelar_id, &state)?;
-            println!("reset all steps to pending");
+            // --- Delete state file ---
+            let sf = state_path(&axelar_id)?;
+            fs::remove_file(&sf)?;
+            println!("deleted {}", sf.display());
 
             // --- Clean up target JSON ---
             if !target_json.exists() {
@@ -1951,16 +1948,11 @@ async fn main() -> Result<()> {
             let content = fs::read_to_string(&target_json)?;
             let mut root: Value = serde_json::from_str(&content)?;
 
-            // Remove per-chain EVM contracts (chains/{axelarId}/contracts/*)
-            if let Some(contracts) = root
-                .pointer_mut(&format!("/chains/{axelar_id}/contracts"))
-                .and_then(|v| v.as_object_mut())
-            {
-                let keys: Vec<String> = contracts.keys().cloned().collect();
-                for key in &keys {
-                    contracts.remove(key);
+            // Remove the entire chain entry (chains/{axelarId})
+            if let Some(chains) = root.get_mut("chains").and_then(|v| v.as_object_mut()) {
+                if chains.remove(&axelar_id).is_some() {
+                    println!("removed chains.{axelar_id}");
                 }
-                println!("cleared chains.{axelar_id}.contracts ({} entries)", keys.len());
             }
 
             // Remove axelar.contracts.VotingVerifier.{axelarId}
