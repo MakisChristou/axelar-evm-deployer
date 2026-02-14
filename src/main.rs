@@ -479,6 +479,67 @@ fn encode_gateway_setup_params(
     Bytes::from(encoded[4..].to_vec())
 }
 
+/// Decode EVM revert data into a human-readable error name.
+fn decode_revert_data(hex_str: &str) -> String {
+    let hex = hex_str.strip_prefix("0x").unwrap_or(hex_str);
+    if hex.len() < 8 {
+        return format!("unknown revert data: 0x{hex}");
+    }
+    let selector = &hex[..8];
+    match selector {
+        // AxelarAmplifierGatewayProxy errors
+        "68155f9a" => "InvalidImplementation() — implementation has no code".into(),
+        "97905dfb" => "SetupFailed() — gateway setup() reverted".into(),
+        "49e27cff" => "InvalidOwner() — owner is zero address".into(),
+        "0dc149f0" => "AlreadyInitialized() — proxy already initialized".into(),
+        "30cd7471" => "NotOwner() — caller is not owner".into(),
+        // AxelarAmplifierGateway errors (from setup delegatecall)
+        "5e231fff" => "InvalidSigners() — signers array invalid".into(),
+        "aabd5a09" => "InvalidThreshold() — threshold out of range".into(),
+        "84677ce8" => "InvalidWeights() — signer weights invalid".into(),
+        "bf10dd3a" => "NotProxy() — must be called via proxy delegatecall".into(),
+        "d924e5f4" => "InvalidOwnerAddress()".into(),
+        // Error(string)
+        "08c379a0" => {
+            if let Ok(bytes) = hex::decode(hex) {
+                if bytes.len() > 4 + 32 + 32 {
+                    let offset = 4 + 32;
+                    let len = u32::from_be_bytes(
+                        bytes[offset + 28..offset + 32].try_into().unwrap_or([0; 4]),
+                    ) as usize;
+                    let str_start = offset + 32;
+                    let str_end = (str_start + len).min(bytes.len());
+                    let msg = String::from_utf8_lossy(&bytes[str_start..str_end]);
+                    return format!("revert: \"{msg}\"");
+                }
+            }
+            format!("Error(string) — data: 0x{hex}")
+        }
+        _ => format!("unknown error selector 0x{selector} (data: 0x{hex})"),
+    }
+}
+
+/// Try to extract revert data hex from an alloy error's Debug representation.
+fn decode_evm_error(err: &dyn std::fmt::Debug) -> String {
+    let debug = format!("{err:?}");
+    // Look for "data: Some(RawValue(\"0x..."))" or similar patterns
+    // Also check for bare "0x" hex data in the error
+    for pattern in ["\"0x", "data: \"0x"] {
+        if let Some(pos) = debug.find(pattern) {
+            let start = debug[pos..].find("0x").map(|i| pos + i).unwrap_or(pos);
+            let hex_end = debug[start + 2..]
+                .find(|c: char| !c.is_ascii_hexdigit())
+                .map(|i| start + 2 + i)
+                .unwrap_or(debug.len());
+            let hex_data = &debug[start..hex_end];
+            if hex_data.len() >= 10 {
+                return decode_revert_data(hex_data);
+            }
+        }
+    }
+    format!("{debug}")
+}
+
 // --- cosmos wallet helpers ---
 
 fn derive_axelar_wallet(mnemonic_str: &str) -> Result<(SigningKey, String)> {
@@ -1353,27 +1414,44 @@ async fn main() -> Result<()> {
                     let previous_signers_retention = U256::from(15);
                     let minimum_rotation_delay = U256::from(3600);
 
-                    // --- Tx 1: Deploy implementation ---
-                    println!("deploying AxelarAmplifierGateway implementation...");
-                    let impl_bytecode = read_artifact_bytecode(impl_artifact)?;
-                    let mut impl_deploy_code = impl_bytecode.clone();
-                    // Append constructor args: (uint256, bytes32, uint256)
-                    impl_deploy_code.extend_from_slice(
-                        &(previous_signers_retention, domain_separator, minimum_rotation_delay)
-                            .abi_encode(),
-                    );
+                    // --- Tx 1: Deploy implementation (skip if already deployed on a previous attempt) ---
+                    let (impl_addr, impl_codehash) = if let Some(saved) = step.get("implementationAddress").and_then(|v| v.as_str()) {
+                        let addr: Address = saved.parse()?;
+                        let code = provider.get_code_at(addr).await?;
+                        if code.is_empty() {
+                            return Err(eyre::eyre!("saved implementation {addr} has no code on-chain"));
+                        }
+                        println!("reusing previously deployed implementation: {addr}");
+                        (addr, keccak256(&code))
+                    } else {
+                        println!("deploying AxelarAmplifierGateway implementation...");
+                        let impl_bytecode = read_artifact_bytecode(impl_artifact)?;
+                        let mut impl_deploy_code = impl_bytecode.clone();
+                        impl_deploy_code.extend_from_slice(
+                            &(previous_signers_retention, domain_separator, minimum_rotation_delay)
+                                .abi_encode(),
+                        );
 
-                    let tx = TransactionRequest::default()
-                        .with_deploy_code(Bytes::from(impl_deploy_code));
-                    let receipt = provider.send_transaction(tx).await?.get_receipt().await?;
-                    println!("implementation tx hash: {}", receipt.transaction_hash);
-                    let impl_addr = receipt
-                        .contract_address
-                        .ok_or_else(|| eyre::eyre!("no contract address in implementation receipt"))?;
-                    println!("implementation deployed at: {impl_addr}");
+                        let tx = TransactionRequest::default()
+                            .with_deploy_code(Bytes::from(impl_deploy_code));
+                        let receipt = provider.send_transaction(tx).await?.get_receipt().await?;
+                        println!("implementation tx hash: {}", receipt.transaction_hash);
+                        let addr = receipt
+                            .contract_address
+                            .ok_or_else(|| eyre::eyre!("no contract address in implementation receipt"))?;
+                        println!("implementation deployed at: {addr}");
 
-                    let impl_deployed_code = provider.get_code_at(impl_addr).await?;
-                    let impl_codehash = keccak256(&impl_deployed_code);
+                        let code = provider.get_code_at(addr).await?;
+                        let codehash = keccak256(&code);
+
+                        // Save implementation address to step so retries skip re-deployment
+                        if let Some(s) = state["steps"].as_array_mut().and_then(|a| a.get_mut(step_idx)) {
+                            s["implementationAddress"] = json!(format!("{addr}"));
+                        }
+                        save_state(&axelar_id, &state)?;
+
+                        (addr, codehash)
+                    };
 
                     // --- Fetch verifier set from Axelar chain ---
                     let chain_axelar_id = {
@@ -1401,10 +1479,29 @@ async fn main() -> Result<()> {
                     proxy_deploy_code
                         .extend_from_slice(&(impl_addr, owner, setup_params.clone()).abi_encode());
 
+                    let proxy_deploy_bytes = Bytes::from(proxy_deploy_code);
                     let tx = TransactionRequest::default()
-                        .with_deploy_code(Bytes::from(proxy_deploy_code));
+                        .with_deploy_code(proxy_deploy_bytes.clone());
+
+                    // Simulate via eth_call to catch revert reasons
+                    match provider.call(tx.clone()).await {
+                        Ok(_) => println!("  eth_call simulation passed"),
+                        Err(e) => {
+                            let reason = decode_evm_error(&e);
+                            return Err(eyre::eyre!("proxy deployment would revert: {reason}"));
+                        }
+                    }
+
                     let receipt = provider.send_transaction(tx).await?.get_receipt().await?;
                     println!("proxy tx hash: {}", receipt.transaction_hash);
+
+                    if !receipt.status() {
+                        return Err(eyre::eyre!(
+                            "proxy deployment tx {} reverted on-chain (status=0)",
+                            receipt.transaction_hash
+                        ));
+                    }
+
                     let proxy_addr = receipt
                         .contract_address
                         .ok_or_else(|| eyre::eyre!("no contract address in proxy receipt"))?;
@@ -1745,6 +1842,9 @@ async fn main() -> Result<()> {
                             if use_governance {
                                 let proposal_id = extract_proposal_id(&tx_resp)?;
                                 println!("  proposal submitted: {proposal_id}");
+                                println!();
+                                println!("  ACTION REQUIRED: vote on the proposal:");
+                                println!("  ./vote_{env}_proposal.sh {env}-nodes {proposal_id}");
                                 if state.get("proposals").is_none() {
                                     state["proposals"] = json!({});
                                 }
@@ -1791,6 +1891,9 @@ async fn main() -> Result<()> {
                             if use_governance {
                                 let proposal_id = extract_proposal_id(&tx_resp)?;
                                 println!("  proposal submitted: {proposal_id}");
+                                println!();
+                                println!("  ACTION REQUIRED: vote on the proposal:");
+                                println!("  ./vote_{env}_proposal.sh {env}-nodes {proposal_id}");
                                 if state.get("proposals").is_none() {
                                     state["proposals"] = json!({});
                                 }
@@ -1866,6 +1969,9 @@ async fn main() -> Result<()> {
                             if use_governance {
                                 let proposal_id = extract_proposal_id(&tx_resp)?;
                                 println!("  proposal submitted: {proposal_id}");
+                                println!();
+                                println!("  ACTION REQUIRED: vote on the proposal:");
+                                println!("  ./vote_{env}_proposal.sh {env}-nodes {proposal_id}");
                                 if state.get("proposals").is_none() {
                                     state["proposals"] = json!({});
                                 }
@@ -2060,9 +2166,15 @@ async fn main() -> Result<()> {
                         &target_json,
                         "/axelar/contracts/ServiceRegistry/address",
                     )?;
-                    let admin_addr = root.pointer("/axelar/multisigProverAdminAddress")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("<prover-admin>");
+                    let admin_addr = if let Some(admin_mn) = state["adminMnemonic"].as_str() {
+                        let (_, addr) = derive_axelar_wallet(admin_mn)?;
+                        addr
+                    } else {
+                        root.pointer("/axelar/multisigProverAdminAddress")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("<prover-admin>")
+                            .to_string()
+                    };
                     let axelar_chain_id = root.pointer("/axelar/chainId")
                         .and_then(|v| v.as_str())
                         .unwrap_or("<chain-id>");
