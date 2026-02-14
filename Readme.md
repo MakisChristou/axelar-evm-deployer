@@ -1,6 +1,11 @@
 ## Example
 
 ```bash
+cargo run status --axelar-id arc-9
+```
+
+
+```bash
 cargo run -- init \
   --chain-name "Arc Testnet" \
   --axelar-id arc-9 \
@@ -14,10 +19,17 @@ cargo run -- init \
 ```
 
 
+## Deploy ConstAddressSeployer
 ```bash
-cargo run -- deploy \
-  --axelar-id arc-9 \
-  --private-key $PRIVATE_KEY \
-  --artifact-path ../axelar-contract-deployments/evm/legacy/ConstAddressDeployer.json \
-  --contract-name ConstAddressDeployer
+cargo run -- deploy --axelar-id arc-9 --private-key $PRIVATE_KEY \
+  --artifact-path ../axelar-contract-deployments/evm/legacy/ConstAddressDeployer.json
 ```
+
+## Deploy Create3Deployer
+
+```bash
+cargo run -- deploy --axelar-id arc-9 --private-key $PRIVATE_KEY \
+  --artifact-path ../axelar-contract-deployments/node_modules/@axelar-network/axelar-gmp-sdk-solidity/artifacts/contracts/deploy/Create3Deployer.sol/Create3Deployer.json \
+  --salt "v1.0.10"
+
+``
