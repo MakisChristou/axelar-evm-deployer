@@ -3,8 +3,8 @@
 The deployer tracks progress in a state file (`~/.local/share/axelar-evm-deployer/<axelar-id>.json`). Each `cargo run -- deploy` invocation runs the **next pending step** and marks it completed. Steps that need extra arguments (private key, artifact paths) require them on the command line; steps that don't (CosmWasm steps, ownership transfers) just need `--axelar-id`. Use `status` to see where you are.
 
 ```bash
-export CHAIN=arc-10
-export SALT=v1.0.12
+export CHAIN=arc-11
+export SALT=v1.0.13
 export GATEWAY_DEPLOYER=0x92ae7f0b761aC8CFAbe4B94D53d1CD343dF8E3C0
 ```
 
@@ -30,6 +30,7 @@ cargo run -- init \
 ```bash
 cargo run -- cosmos-init --axelar-id $CHAIN \
   --mnemonic "$MNEMONIC" \
+  --admin-mnemonic "$MULTISIG_PROVER_MNEMONIC"
   --env testnet \
   --gateway-deployer $GATEWAY_DEPLOYER \
   --salt $SALT
@@ -50,7 +51,7 @@ cargo run -- deploy --axelar-id $CHAIN --private-key $PRIVATE_KEY \
   --salt $SALT
 ```
 
-## Steps 3–11: CosmWasm setup
+## Steps 3–12: CosmWasm setup
 
 Each `cargo run -- deploy` invocation runs the **next pending step** from the state file and advances automatically. Just repeat the same command to progress through the pipeline.
 
@@ -69,8 +70,17 @@ cargo run -- deploy --axelar-id $CHAIN
 | 9 | WaitRegisterProposal | Polls the governance proposal until it passes |
 | 10 | CreateRewardPools | Submits governance proposal to create reward pools for VotingVerifier and Multisig |
 | 11 | WaitRewardPoolsProposal | Polls the governance proposal until it passes |
+| 12 | AddRewards | Funds both reward pools (VotingVerifier + Multisig) with 1000000uaxl each |
 
-## 12. Deploy AxelarGateway
+## 13. WaitForVerifierSet
+
+Prints infrastructure PR instructions, polls ServiceRegistry for registered verifiers, then calls `update_verifier_set` on MultisigProver (requires `--admin-mnemonic` in cosmos-init).
+
+```bash
+cargo run -- deploy --axelar-id $CHAIN
+```
+
+## 14. Deploy AxelarGateway
 
 Deploys implementation + proxy. Fetches the initial verifier set from the Axelar chain LCD endpoint automatically.
 
@@ -80,14 +90,14 @@ cargo run -- deploy --axelar-id $CHAIN --private-key $GATEWAY_DEPLOYER_PRIVATE_K
   --proxy-artifact-path ../axelar-contract-deployments/node_modules/@axelar-network/axelar-gmp-sdk-solidity/artifacts/contracts/gateway/AxelarAmplifierGatewayProxy.sol/AxelarAmplifierGatewayProxy.json
 ```
 
-## 13. Deploy Operators
+## 15. Deploy Operators
 
 ```bash
 cargo run -- deploy --axelar-id $CHAIN --private-key $PRIVATE_KEY \
   --artifact-path ../axelar-contract-deployments/node_modules/@axelar-network/axelar-cgp-solidity/artifacts/contracts/auth/Operators.sol/Operators.json
 ```
 
-## Steps 14–18: Registration and ownership transfers
+## Steps 16–20: Registration and ownership transfers
 
 ```bash
 cargo run -- deploy --axelar-id $CHAIN --private-key $PRIVATE_KEY
@@ -95,8 +105,8 @@ cargo run -- deploy --axelar-id $CHAIN --private-key $PRIVATE_KEY
 
 | Step | Name | Description |
 |------|------|-------------|
-| 14 | RegisterOperators | Registers operator addresses on the Operators contract |
-| 15 | AxelarGasService | Deploys the gas service (not yet implemented) |
-| 16 | TransferOperatorsOwnership | Transfers Operators contract ownership |
-| 17 | TransferGatewayOwnership | Transfers Gateway contract ownership |
-| 18 | TransferGasServiceOwnership | Transfers GasService contract ownership |
+| 16 | RegisterOperators | Registers operator addresses on the Operators contract |
+| 17 | AxelarGasService | Deploys the gas service (not yet implemented) |
+| 18 | TransferOperatorsOwnership | Transfers Operators contract ownership |
+| 19 | TransferGatewayOwnership | Transfers Gateway contract ownership |
+| 20 | TransferGasServiceOwnership | Transfers GasService contract ownership |

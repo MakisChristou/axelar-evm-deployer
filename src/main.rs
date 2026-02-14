@@ -77,6 +77,7 @@ fn default_steps() -> Vec<Value> {
                 "proposalKey": "rewardPools" }),
         json!({ "name": "WaitRewardPoolsProposal", "kind": "cosmos-poll", "status": "pending",
                 "proposalKey": "rewardPools" }),
+        json!({ "name": "AddRewards", "kind": "cosmos-tx", "status": "pending" }),
         json!({ "name": "WaitForVerifierSet", "kind": "wait-verifier-set", "status": "pending" }),
         json!({ "name": "AxelarGateway", "kind": "deploy-gateway", "status": "pending" }),
         json!({ "name": "Operators", "kind": "deploy-create2", "status": "pending" }),
@@ -528,12 +529,24 @@ async fn lcd_simulate_tx(lcd: &str, tx_bytes: &[u8]) -> Result<u64> {
         .await?
         .json()
         .await?;
+    // Check for simulation error
+    if let Some(err) = resp.get("message").and_then(|v| v.as_str()) {
+        if !err.is_empty() {
+            return Err(eyre::eyre!("simulation failed: {err}"));
+        }
+    }
+
     let gas_used: u64 = resp
         .pointer("/gas_info/gas_used")
         .and_then(|v| v.as_str())
         .unwrap_or("0")
         .parse()
-        .unwrap_or(200_000);
+        .unwrap_or(0);
+
+    if gas_used == 0 {
+        return Err(eyre::eyre!("simulation returned 0 gas — response: {}", serde_json::to_string_pretty(&resp)?));
+    }
+
     Ok(gas_used)
 }
 
@@ -701,12 +714,21 @@ fn build_execute_msg_any(
     contract: &str,
     msg_json: &Value,
 ) -> Result<cosmrs::Any> {
+    build_execute_msg_any_with_funds(sender, contract, msg_json, vec![])
+}
+
+fn build_execute_msg_any_with_funds(
+    sender: &str,
+    contract: &str,
+    msg_json: &Value,
+    funds: Vec<ProtoCoin>,
+) -> Result<cosmrs::Any> {
     let msg_bytes = serde_json::to_vec(msg_json)?;
     let proto_msg = ProtoMsgExecuteContract {
         sender: sender.to_string(),
         contract: contract.to_string(),
         msg: msg_bytes,
-        funds: vec![],
+        funds,
     };
     let mut buf = Vec::new();
     proto_msg.encode(&mut buf)?;
@@ -1599,7 +1621,11 @@ async fn main() -> Result<()> {
                                                 "label": format!("MultisigProver-{chain_axelar_id}"),
                                                 "msg": {
                                                     "governance_address": mp_config["governanceAddress"],
-                                                    "admin_address": mp_config.get("adminAddress").and_then(|v| v.as_str()).unwrap_or(&governance_address),
+                                                    "admin_address": match env.as_str() {
+                                                        "testnet" => "axelar1w7y7v26rtnrj4vrx6q3qq4hfsmc68hhsxnadlf",
+                                                        _ => mp_config.get("adminAddress").and_then(|v| v.as_str())
+                                                            .ok_or_else(|| eyre::eyre!("no adminAddress in MultisigProver config for {env}"))?,
+                                                    },
                                                     "multisig_address": multisig_addr,
                                                     "signing_threshold": mp_config["signingThreshold"],
                                                     "service_name": mp_config["serviceName"],
@@ -1811,6 +1837,56 @@ async fn main() -> Result<()> {
                             } else {
                                 println!("  direct execution completed");
                             }
+                        }
+
+                        "AddRewards" => {
+                            println!("adding rewards for {chain_axelar_id}...");
+
+                            let rewards_addr = read_axelar_contract_field(&target_json, "/axelar/contracts/Rewards/address")?;
+                            let multisig_addr = read_axelar_contract_field(&target_json, "/axelar/contracts/Multisig/address")?;
+                            let voting_verifier_addr = read_axelar_contract_field(
+                                &target_json,
+                                &format!("/axelar/contracts/VotingVerifier/{chain_axelar_id}/address"),
+                            )?;
+
+                            let reward_amount = "1000000";
+                            let funds = vec![ProtoCoin {
+                                denom: fee_denom.to_string(),
+                                amount: reward_amount.to_string(),
+                            }];
+
+                            let msg1 = json!({
+                                "add_rewards": {
+                                    "pool_id": {
+                                        "chain_name": chain_axelar_id,
+                                        "contract": multisig_addr
+                                    }
+                                }
+                            });
+                            let msg2 = json!({
+                                "add_rewards": {
+                                    "pool_id": {
+                                        "chain_name": chain_axelar_id,
+                                        "contract": voting_verifier_addr
+                                    }
+                                }
+                            });
+
+                            // Direct execution (not governance-wrapped) — each msg carries funds
+                            let inner_msg1 = build_execute_msg_any_with_funds(&axelar_address, &rewards_addr, &msg1, funds.clone())?;
+                            let inner_msg2 = build_execute_msg_any_with_funds(&axelar_address, &rewards_addr, &msg2, funds)?;
+
+                            println!("  sending {reward_amount}{fee_denom} to each reward pool");
+                            let tx_resp = sign_and_broadcast_cosmos_tx(
+                                &signing_key, &axelar_address, &lcd, &chain_id, &fee_denom, gas_price, vec![inner_msg1, inner_msg2],
+                            ).await?;
+
+                            let code = tx_resp.pointer("/tx_response/code").and_then(|v| v.as_u64()).unwrap_or(0);
+                            if code != 0 {
+                                let raw_log = tx_resp.pointer("/tx_response/raw_log").and_then(|v| v.as_str()).unwrap_or("unknown");
+                                return Err(eyre::eyre!("add_rewards tx failed (code {code}): {raw_log}"));
+                            }
+                            println!("  rewards added to both pools");
                         }
 
                         _ => {
@@ -2025,7 +2101,12 @@ async fn main() -> Result<()> {
                             println!();
 
                             // Phase 1: poll ServiceRegistry for active verifiers
-                            println!("  polling ServiceRegistry for active verifiers...");
+                            let min_verifiers: usize = match env {
+                                "devnet-amplifier" => 3,
+                                "mainnet" => 25,
+                                _ => 22, // testnet
+                            };
+                            println!("  polling ServiceRegistry for active verifiers (need {min_verifiers})...");
                             loop {
                                 let verifier_query = json!({
                                     "active_verifiers": {
@@ -2036,8 +2117,12 @@ async fn main() -> Result<()> {
                                 match lcd_cosmwasm_smart_query(&lcd, &service_registry_addr, &verifier_query).await {
                                     Ok(data) if data.is_array() => {
                                         let count = data.as_array().map(|a| a.len()).unwrap_or(0);
-                                        println!("  {count} active verifiers registered for {chain_axelar_id}");
-                                        break;
+                                        if count >= min_verifiers {
+                                            println!("  {count} active verifiers registered for {chain_axelar_id} (>= {min_verifiers})");
+                                            break;
+                                        }
+                                        println!("  {count}/{min_verifiers} verifiers, retrying in 30s...");
+                                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                                     }
                                     _ => {
                                         println!("  not enough verifiers yet, retrying in 30s...");
@@ -2058,6 +2143,7 @@ async fn main() -> Result<()> {
                                 println!("  update_verifier_set tx succeeded!");
                             } else {
                                 println!("  no admin mnemonic provided, waiting for manual update_verifier_set...");
+                                println!("  (provide --admin-mnemonic in cosmos-init to automate this)");
                                 loop {
                                     let query_msg = json!("current_verifier_set");
                                     match lcd_cosmwasm_smart_query(&lcd, &prover_addr, &query_msg).await {
