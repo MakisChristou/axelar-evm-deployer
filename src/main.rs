@@ -77,6 +77,7 @@ fn default_steps() -> Vec<Value> {
                 "proposalKey": "rewardPools" }),
         json!({ "name": "WaitRewardPoolsProposal", "kind": "cosmos-poll", "status": "pending",
                 "proposalKey": "rewardPools" }),
+        json!({ "name": "WaitForVerifierSet", "kind": "wait-verifier-set", "status": "pending" }),
         json!({ "name": "AxelarGateway", "kind": "deploy-gateway", "status": "pending" }),
         json!({ "name": "Operators", "kind": "deploy-create2", "status": "pending" }),
         json!({ "name": "RegisterOperators", "kind": "register-operators", "status": "pending" }),
@@ -143,6 +144,9 @@ enum Commands {
         /// Salt for CosmWasm instantiation (e.g. "v1.0.11")
         #[arg(long)]
         salt: String,
+        /// BIP39 mnemonic for the prover admin wallet (for update_verifier_set)
+        #[arg(long)]
+        admin_mnemonic: Option<String>,
     },
 
     /// Run the next pending deployment step
@@ -1029,12 +1033,20 @@ async fn main() -> Result<()> {
             env,
             gateway_deployer,
             salt,
+            admin_mnemonic,
         } => {
             let mut state = read_state(&axelar_id)?;
 
             // Derive and display the Axelar address
             let (_, axelar_address) = derive_axelar_wallet(&mnemonic)?;
             println!("axelar deployer address: {axelar_address}");
+
+            // Validate and display admin address if provided
+            if let Some(ref admin_mn) = admin_mnemonic {
+                let (_, admin_address) = derive_axelar_wallet(admin_mn)?;
+                println!("prover admin address: {admin_address}");
+                state["adminMnemonic"] = json!(admin_mn);
+            }
 
             // Validate gateway deployer is a valid EVM address
             let _: Address = gateway_deployer
@@ -1909,6 +1921,159 @@ async fn main() -> Result<()> {
 
                     fs::write(&target_json, serde_json::to_string_pretty(&root)? + "\n")?;
                     println!("  updated {}", target_json.display());
+                }
+
+                "wait-verifier-set" => {
+                    let content = fs::read_to_string(&target_json)?;
+                    let root: Value = serde_json::from_str(&content)?;
+                    let chain_axelar_id = root.pointer(&format!("/chains/{axelar_id}/axelarId"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(&axelar_id)
+                        .to_string();
+                    let rpc_url = state["rpcUrl"].as_str().unwrap_or("").to_string();
+
+                    let prover_addr = read_axelar_contract_field(
+                        &target_json,
+                        &format!("/axelar/contracts/MultisigProver/{chain_axelar_id}/address"),
+                    )?;
+                    let verifier_addr = read_axelar_contract_field(
+                        &target_json,
+                        &format!("/axelar/contracts/VotingVerifier/{chain_axelar_id}/address"),
+                    )?;
+                    let multisig_addr = read_axelar_contract_field(
+                        &target_json,
+                        "/axelar/contracts/Multisig/address",
+                    )?;
+                    let service_registry_addr = read_axelar_contract_field(
+                        &target_json,
+                        "/axelar/contracts/ServiceRegistry/address",
+                    )?;
+                    let admin_addr = root.pointer("/axelar/multisigProverAdminAddress")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("<prover-admin>");
+                    let axelar_chain_id = root.pointer("/axelar/chainId")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("<chain-id>");
+                    let axelar_rpc = root.pointer("/axelar/rpc")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("<rpc>");
+
+                    let (lcd, chain_id, fee_denom, gas_price) = read_axelar_config(&target_json)?;
+                    let env = state["env"].as_str().unwrap_or("testnet");
+
+                    // Check if verifier set already exists
+                    let query_msg = json!("current_verifier_set");
+                    if let Ok(data) = lcd_cosmwasm_smart_query(&lcd, &prover_addr, &query_msg).await {
+                        if !data.is_null() && data.get("id").is_some() {
+                            let id = data["id"].as_str().unwrap_or("?");
+                            println!("verifier set already exists! id: {id}");
+                            // skip to step completion
+                        } else {
+                            // Print instructions and poll
+                            println!("waiting for verifier set on MultisigProver ({prover_addr})...");
+                            println!();
+                            println!("  ACTION REQUIRED: An admin must complete these steps in order:");
+                            println!();
+                            println!("  1. Open a PR in https://github.com/axelarnetwork/infrastructure");
+                            println!();
+                            println!("     File: infrastructure/{env}/apps/axelar-{env}/ampd/ampd-epsilon/helm-values.yaml");
+                            println!();
+                            println!("     Add to config_toml.chains:");
+                            println!();
+                            println!("        - chain_name: {chain_axelar_id}");
+                            println!("          multisig: {multisig_addr}");
+                            println!("          multisig_prover: {prover_addr}");
+                            println!("          voting_verifier: {verifier_addr}");
+                            println!();
+                            println!("     Add to handlers:");
+                            println!();
+                            println!("     {chain_axelar_id}:");
+                            println!("       handler_type: evm");
+                            println!("       enabled: true");
+                            println!("       image:");
+                            println!("         repository: axelarnet/axelar-ampd-evm-handler");
+                            println!("         tag: v0.1.0");
+                            println!("       rpc_url: {rpc_url}");
+                            println!();
+                            println!("     File: infrastructure/{env}/apps/axelar-{env}/ampd/ampd/helm-values.yaml");
+                            println!();
+                            println!("     Add to handlers:");
+                            println!();
+                            println!("       - type: MultisigSigner");
+                            println!("         cosmwasm_contract: {multisig_addr}");
+                            println!("         chain_name: {chain_axelar_id}");
+                            println!("       - type: EvmMsgVerifier");
+                            println!("         cosmwasm_contract: {verifier_addr}");
+                            println!("         chain_name: {chain_axelar_id}");
+                            println!("         chain_rpc_url: {rpc_url}");
+                            println!("         chain_finalization: RPCFinalizedBlock");
+                            println!("       - type: EvmVerifierSetVerifier");
+                            println!("         cosmwasm_contract: {verifier_addr}");
+                            println!("         chain_name: {chain_axelar_id}");
+                            println!("         chain_rpc_url: {rpc_url}");
+                            println!("         chain_finalization: RPCFinalizedBlock");
+                            println!();
+                            println!("  2. Wait for the PR to be merged and deployed.");
+                            println!();
+                            println!("  3. Register chain support:");
+                            println!("     ./register_chain_support.sh {chain_axelar_id}");
+                            println!();
+                            println!("  4. Update verifier set:");
+                            println!("     axelard tx wasm execute {prover_addr} '\"update_verifier_set\"' \\");
+                            println!("       --from {admin_addr} --chain-id {axelar_chain_id} --node {axelar_rpc} \\");
+                            println!("       --gas auto --gas-adjustment 1.3");
+                            println!();
+
+                            // Phase 1: poll ServiceRegistry for active verifiers
+                            println!("  polling ServiceRegistry for active verifiers...");
+                            loop {
+                                let verifier_query = json!({
+                                    "active_verifiers": {
+                                        "service_name": "amplifier",
+                                        "chain_name": chain_axelar_id
+                                    }
+                                });
+                                match lcd_cosmwasm_smart_query(&lcd, &service_registry_addr, &verifier_query).await {
+                                    Ok(data) if data.is_array() => {
+                                        let count = data.as_array().map(|a| a.len()).unwrap_or(0);
+                                        println!("  {count} active verifiers registered for {chain_axelar_id}");
+                                        break;
+                                    }
+                                    _ => {
+                                        println!("  not enough verifiers yet, retrying in 30s...");
+                                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                                    }
+                                }
+                            }
+
+                            // Phase 2: call update_verifier_set
+                            if let Some(admin_mn) = state["adminMnemonic"].as_str() {
+                                println!("  calling update_verifier_set with admin key...");
+                                let (admin_key, admin_address) = derive_axelar_wallet(admin_mn)?;
+                                let execute_msg = json!("update_verifier_set");
+                                let msg_any = build_execute_msg_any(&admin_address, &prover_addr, &execute_msg)?;
+                                sign_and_broadcast_cosmos_tx(
+                                    &admin_key, &admin_address, &lcd, &chain_id, &fee_denom, gas_price, vec![msg_any],
+                                ).await?;
+                                println!("  update_verifier_set tx succeeded!");
+                            } else {
+                                println!("  no admin mnemonic provided, waiting for manual update_verifier_set...");
+                                loop {
+                                    let query_msg = json!("current_verifier_set");
+                                    match lcd_cosmwasm_smart_query(&lcd, &prover_addr, &query_msg).await {
+                                        Ok(data) if !data.is_null() && data.get("id").is_some() => {
+                                            let id = data["id"].as_str().unwrap_or("?");
+                                            println!("  verifier set found! id: {id}");
+                                            break;
+                                        }
+                                        _ => {
+                                            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
 
                 "deploy-upgradable" => {
