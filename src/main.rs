@@ -998,7 +998,14 @@ async fn main() -> Result<()> {
                 .as_array()
                 .ok_or_else(|| eyre::eyre!("no steps in state"))?;
 
+            let init_done = state.get("rpcUrl").is_some();
+            let cosmos_done = state.get("mnemonic").is_some() && state.get("env").is_some();
+            let init_marker = if init_done { "[x]" } else { "[ ]" };
+            let cosmos_marker = if cosmos_done { "[x]" } else { "[ ]" };
+
             println!("deployment progress for '{axelar_id}':");
+            println!("  {init_marker} Init");
+            println!("  {cosmos_marker} CosmosInit");
             for step in steps {
                 let name = step["name"].as_str().unwrap_or("?");
                 let kind = step["kind"].as_str().unwrap_or("?");
@@ -1036,6 +1043,32 @@ async fn main() -> Result<()> {
 
             save_state(&axelar_id, &state)?;
             println!("cosmos config saved for '{axelar_id}' (env={env})");
+
+            // Query and display the deployer balance
+            let target_json: PathBuf = state["targetJson"]
+                .as_str()
+                .ok_or_else(|| eyre::eyre!("no targetJson in state"))?
+                .into();
+            if target_json.exists() {
+                let (lcd, _, fee_denom, _) = read_axelar_config(&target_json)?;
+                let url = format!("{lcd}/cosmos/bank/v1beta1/balances/{axelar_address}");
+                match reqwest::get(&url).await {
+                    Ok(resp) => {
+                        let data: Value = resp.json().await?;
+                        if let Some(balances) = data["balances"].as_array() {
+                            let bal = balances
+                                .iter()
+                                .find(|b| b["denom"].as_str() == Some(&fee_denom))
+                                .and_then(|b| b["amount"].as_str())
+                                .unwrap_or("0");
+                            let display_denom = fee_denom.strip_prefix('u').unwrap_or(&fee_denom);
+                            let bal_major: f64 = bal.parse::<f64>().unwrap_or(0.0) / 1_000_000.0;
+                            println!("balance: {bal_major:.6} {display_denom}");
+                        }
+                    }
+                    Err(e) => println!("could not query balance: {e}"),
+                }
+            }
         }
 
         Commands::Deploy {

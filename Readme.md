@@ -2,16 +2,22 @@
 
 The deployer tracks progress in a state file (`~/.local/share/axelar-evm-deployer/<axelar-id>.json`). Each `cargo run -- deploy` invocation runs the **next pending step** and marks it completed. Steps that need extra arguments (private key, artifact paths) require them on the command line; steps that don't (CosmWasm steps, ownership transfers) just need `--axelar-id`. Use `status` to see where you are.
 
+```bash
+export CHAIN=arc-10
+export SALT=v1.0.11
+export GATEWAY_DEPLOYER=0x92ae7f0b761aC8CFAbe4B94D53d1CD343dF8E3C0
+```
+
 ## Setup
 
 ```bash
-cargo run -- status --axelar-id arc-9
+cargo run -- status --axelar-id $CHAIN
 ```
 
 ```bash
 cargo run -- init \
   --chain-name "Arc Testnet" \
-  --axelar-id arc-9 \
+  --axelar-id $CHAIN \
   --chain-id 5042002 \
   --rpc-url https://rpc.testnet.arc.network \
   --token-symbol USDC \
@@ -22,25 +28,25 @@ cargo run -- init \
 ```
 
 ```bash
-cargo run -- cosmos-init --axelar-id arc-9 \
+cargo run -- cosmos-init --axelar-id $CHAIN \
   --mnemonic "$MNEMONIC" \
   --env testnet \
-  --gateway-deployer 0x92ae7f0b761aC8CFAbe4B94D53d1CD343dF8E3C0
+  --gateway-deployer $GATEWAY_DEPLOYER
 ```
 
 ## 1. Deploy ConstAddressDeployer
 
 ```bash
-cargo run -- deploy --axelar-id arc-9 --private-key $PRIVATE_KEY \
+cargo run -- deploy --axelar-id $CHAIN --private-key $PRIVATE_KEY \
   --artifact-path ../axelar-contract-deployments/evm/legacy/ConstAddressDeployer.json
 ```
 
 ## 2. Deploy Create3Deployer
 
 ```bash
-cargo run -- deploy --axelar-id arc-9 --private-key $PRIVATE_KEY \
+cargo run -- deploy --axelar-id $CHAIN --private-key $PRIVATE_KEY \
   --artifact-path ../axelar-contract-deployments/node_modules/@axelar-network/axelar-gmp-sdk-solidity/artifacts/contracts/deploy/Create3Deployer.sol/Create3Deployer.json \
-  --salt "v1.0.10"
+  --salt $SALT$
 ```
 
 ## Steps 3–11: CosmWasm setup
@@ -48,7 +54,7 @@ cargo run -- deploy --axelar-id arc-9 --private-key $PRIVATE_KEY \
 Each `cargo run -- deploy` invocation runs the **next pending step** from the state file and advances automatically. Just repeat the same command to progress through the pipeline.
 
 ```bash
-cargo run -- deploy --axelar-id arc-9
+cargo run -- deploy --axelar-id $CHAIN
 ```
 
 | Step | Name | Description |
@@ -68,7 +74,7 @@ cargo run -- deploy --axelar-id arc-9
 Deploys implementation + proxy. Fetches the initial verifier set from the Axelar chain LCD endpoint automatically.
 
 ```bash
-cargo run -- deploy --axelar-id arc-9 --private-key $GATEWAY_DEPLOYER_PRIVATE_KEY \
+cargo run -- deploy --axelar-id $CHAIN --private-key $GATEWAY_DEPLOYER_PRIVATE_KEY \
   --artifact-path ../axelar-contract-deployments/node_modules/@axelar-network/axelar-gmp-sdk-solidity/artifacts/contracts/gateway/AxelarAmplifierGateway.sol/AxelarAmplifierGateway.json \
   --proxy-artifact-path ../axelar-contract-deployments/node_modules/@axelar-network/axelar-gmp-sdk-solidity/artifacts/contracts/gateway/AxelarAmplifierGatewayProxy.sol/AxelarAmplifierGatewayProxy.json
 ```
@@ -76,14 +82,14 @@ cargo run -- deploy --axelar-id arc-9 --private-key $GATEWAY_DEPLOYER_PRIVATE_KE
 ## 13. Deploy Operators
 
 ```bash
-cargo run -- deploy --axelar-id arc-9 --private-key $PRIVATE_KEY \
+cargo run -- deploy --axelar-id $CHAIN --private-key $PRIVATE_KEY \
   --artifact-path ../axelar-contract-deployments/node_modules/@axelar-network/axelar-cgp-solidity/artifacts/contracts/auth/Operators.sol/Operators.json
 ```
 
 ## Steps 14–18: Registration and ownership transfers
 
 ```bash
-cargo run -- deploy --axelar-id arc-9 --private-key $PRIVATE_KEY
+cargo run -- deploy --axelar-id $CHAIN --private-key $PRIVATE_KEY
 ```
 
 | Step | Name | Description |
