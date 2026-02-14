@@ -5,9 +5,16 @@ edition = "2024"
 
 [dependencies]
 alloy = { version = "1.6.3", features = ["provider-http", "signer-local", "network", "rpc-types", "contract"] }
+base64 = "0.22"
 clap = { version = "4.5.58", features = ["derive"] }
 dirs = "6"
 eyre = "0.6"
+bip32 = { version = "0.5", features = ["bip39"] }
+cosmrs = { version = "0.22", features = ["cosmwasm", "bip32"] }
+cosmos-sdk-proto = { version = "0.27", features = ["cosmwasm"] }
+prost = "0.13"
+tendermint-proto = "0.40"
+reqwest = { version = "0.12", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 tokio = { version = "1", features = ["full"] }
