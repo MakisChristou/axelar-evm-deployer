@@ -114,23 +114,23 @@ enum Commands {
     /// Show deployment progress
     Status {
         #[arg(long)]
-        axelar_id: String,
+        axelar_id: Option<String>,
     },
 
-    /// Run the next pending deployment step
+    /// Run all pending deployment steps
     Deploy {
         #[arg(long)]
-        axelar_id: String,
-        /// Private key (required for on-chain steps)
+        axelar_id: Option<String>,
+        /// Private key override (auto-resolved per step by default)
         #[arg(long)]
         private_key: Option<String>,
-        /// Path to Hardhat artifact JSON (required for deploy steps)
+        /// Path to implementation artifact JSON (auto-resolved by default)
         #[arg(long)]
         artifact_path: Option<String>,
-        /// Salt for create2 deployments (defaults to step name)
+        /// Salt for create2 deployments (read from state by default)
         #[arg(long)]
         salt: Option<String>,
-        /// Path to proxy artifact JSON (required for gateway deploy)
+        /// Path to proxy artifact JSON (auto-resolved by default)
         #[arg(long)]
         proxy_artifact_path: Option<String>,
     },
@@ -138,8 +138,13 @@ enum Commands {
     /// Reset all steps to pending and remove all changes from target JSON
     Reset {
         #[arg(long)]
-        axelar_id: String,
+        axelar_id: Option<String>,
     },
+}
+
+fn resolve_axelar_id(opt: Option<String>) -> Result<String> {
+    opt.or_else(|| std::env::var("CHAIN").ok())
+        .ok_or_else(|| eyre::eyre!("--axelar-id not provided and CHAIN env var not set"))
 }
 
 // --- state helpers ---
@@ -1169,18 +1174,49 @@ async fn main() -> Result<()> {
         }
 
         Commands::Status { axelar_id } => {
+            let axelar_id = resolve_axelar_id(axelar_id)?;
             let state = read_state(&axelar_id)?;
             let steps = state["steps"]
                 .as_array()
                 .ok_or_else(|| eyre::eyre!("no steps in state"))?;
 
-            println!("deployment progress for '{axelar_id}':");
+            let env = state["env"].as_str().unwrap_or("?");
+            println!("deployment: {axelar_id} (env: {env})\n");
+
+            // Try to read contract addresses from target json
+            let target_json = state["targetJson"].as_str().map(PathBuf::from);
+            let read_addr = |contract_name: &str| -> Option<String> {
+                let tj = target_json.as_ref()?;
+                let content = fs::read_to_string(tj).ok()?;
+                let root: Value = serde_json::from_str(&content).ok()?;
+                root.pointer(&format!("/chains/{axelar_id}/contracts/{contract_name}/address"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            };
+
             for step in steps {
                 let name = step["name"].as_str().unwrap_or("?");
-                let kind = step["kind"].as_str().unwrap_or("?");
                 let status = step["status"].as_str().unwrap_or("?");
                 let marker = if status == "completed" { "[x]" } else { "[ ]" };
-                println!("  {marker} {name} ({kind})");
+
+                // Show contract address for completed deploy steps
+                let addr = if status == "completed" {
+                    match name {
+                        "ConstAddressDeployer" | "Create3Deployer" |
+                        "AxelarGateway" | "Operators" | "AxelarGasService" => read_addr(name),
+                        "PredictGatewayAddress" => state["predictedGatewayAddress"]
+                            .as_str().map(|s| s.to_string()),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+
+                if let Some(a) = addr {
+                    println!("  {marker} {name} -> {a}");
+                } else {
+                    println!("  {marker} {name}");
+                }
             }
 
             match next_pending_step(&state) {
@@ -1196,6 +1232,7 @@ async fn main() -> Result<()> {
             salt,
             proxy_artifact_path,
         } => {
+            let axelar_id = resolve_axelar_id(axelar_id)?;
             let mut state = read_state(&axelar_id)?;
             let rpc_url = state["rpcUrl"]
                 .as_str()
@@ -1207,6 +1244,7 @@ async fn main() -> Result<()> {
                     .ok_or_else(|| eyre::eyre!("no targetJson in state"))?,
             );
 
+            loop {
             let (step_idx, step) = match next_pending_step(&state) {
                 Some(s) => s,
                 None => {
@@ -1225,7 +1263,7 @@ async fn main() -> Result<()> {
                     println!("     ts-node evm/gateway.js -n {axelar_id} --action isContractCallApproved \\");
                     println!("       --commandID [id] --sourceChain [chain] --sourceAddress [addr] \\");
                     println!("       --destination [addr] --payloadHash [hash]");
-                    return Ok(());
+                    break;
                 }
             };
 
@@ -2503,10 +2541,12 @@ async fn main() -> Result<()> {
 
             mark_step_completed(&mut state, step_idx);
             save_state(&axelar_id, &state)?;
-            println!("step '{step_name}' completed");
+            println!("step '{step_name}' completed\n");
+            } // loop
         }
 
         Commands::Reset { axelar_id } => {
+            let axelar_id = resolve_axelar_id(axelar_id)?;
             let state = read_state(&axelar_id)?;
             let target_json: PathBuf = state["targetJson"]
                 .as_str()

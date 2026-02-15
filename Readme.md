@@ -1,6 +1,6 @@
 ## How it works
 
-The deployer tracks progress in a state file (`~/.local/share/axelar-evm-deployer/<axelar-id>.json`). Each `cargo run -- deploy` invocation runs the **next pending step** and marks it completed. Artifact paths and private keys are resolved automatically. Use `status` to see where you are.
+The deployer tracks progress in a state file (`~/.local/share/axelar-evm-deployer/<chain>.json`). A single `cargo run -- deploy` runs **all** steps sequentially, blocking on polls (governance proposals, verifier registration) until they complete. Artifact paths and private keys are resolved automatically. Use `status` to see progress and deployed addresses.
 
 ## Configuration
 
@@ -30,97 +30,42 @@ EXPLORER_URL="https://testnet.arcscan.app/"
 TARGET_JSON=../axelar-contract-deployments/axelar-chains-config/info/testnet.json
 ```
 
-## Setup
+## Usage
 
 ```bash
-cargo run -- init
-cargo run -- status --axelar-id $CHAIN
+cargo run -- init      # reads .env, creates state file + chain entry in target json
+cargo run -- status    # shows progress with deployed addresses
+cargo run -- deploy    # runs all pending steps, blocks on polls
 ```
 
 ## Steps
 
-Every step is just `cargo run -- deploy --axelar-id $CHAIN`.
+All 20 steps run automatically via `cargo run -- deploy`. Steps that submit governance proposals are followed by polling steps that block until the proposal passes. Manual actions (voting, infrastructure PRs) are prompted inline.
 
-### 1. ConstAddressDeployer
+| # | Step | Description |
+|---|------|-------------|
+| 1 | ConstAddressDeployer | Deploys via CREATE |
+| 2 | Create3Deployer | Deploys via CREATE2 |
+| 3 | PredictGatewayAddress | Predicts gateway proxy address from deployer nonce |
+| 4 | AddCosmWasmConfig | Writes VotingVerifier + MultisigProver config to target json |
+| 5 | InstantiateChainContracts | Governance proposal to instantiate via Coordinator |
+| 6 | WaitInstantiateProposal | Polls until proposal passes |
+| 7 | SaveDeployedContracts | Queries Coordinator for deployed addresses |
+| 8 | RegisterDeployment | Governance proposal to register deployment |
+| 9 | WaitRegisterProposal | Polls until proposal passes |
+| 10 | CreateRewardPools | Governance proposal to create reward pools |
+| 11 | WaitRewardPoolsProposal | Polls until proposal passes |
+| 12 | AddRewards | Funds both reward pools with 1000000uaxl each |
+| 13 | WaitForVerifierSet | Prints infra PR instructions, polls for verifiers, calls `update_verifier_set` |
+| 14 | AxelarGateway | Deploys implementation + proxy with initial verifier set |
+| 15 | Operators | Deploys via CREATE2 |
+| 16 | RegisterOperators | Registers operator addresses |
+| 17 | AxelarGasService | Deploys implementation + proxy (legacy init pattern) |
+| 18 | TransferOperatorsOwnership | Transfers to governance address |
+| 19 | TransferGatewayOwnership | Transfers to governance address |
+| 20 | TransferGasServiceOwnership | Transfers to governance address |
 
-### 2. Create3Deployer
+### Manual actions during deploy
 
-### 3. PredictGatewayAddress
-
-Predicts EVM gateway proxy address using CREATE formula based on gateway deployer nonce.
-
-### 4. AddCosmWasmConfig
-
-Adds VotingVerifier and MultisigProver per-chain config entries to testnet.json.
-
-### 5. InstantiateChainContracts
-
-Submits governance proposal to instantiate Gateway, VotingVerifier, and MultisigProver via the Coordinator.
-
-> **ACTION REQUIRED:** Vote on the governance proposal after this step.
-
-### 6. WaitInstantiateProposal
-
-Polls the governance proposal until it passes.
-
-### 7. SaveDeployedContracts
-
-Queries the Coordinator for deployed contract addresses and saves them to testnet.json.
-
-### 8. RegisterDeployment
-
-Submits governance proposal to register the deployment on the Coordinator.
-
-> **ACTION REQUIRED:** Vote on the governance proposal after this step.
-
-### 9. WaitRegisterProposal
-
-Polls the governance proposal until it passes.
-
-### 10. CreateRewardPools
-
-Submits governance proposal to create reward pools for VotingVerifier and Multisig.
-
-> **ACTION REQUIRED:** Vote on the governance proposal after this step.
-
-### 11. WaitRewardPoolsProposal
-
-Polls the governance proposal until it passes.
-
-### 12. AddRewards
-
-Funds both reward pools (VotingVerifier + Multisig) with 1000000uaxl each.
-
-### 13. WaitForVerifierSet
-
-Prints infrastructure PR instructions, polls ServiceRegistry for registered verifiers, then calls `update_verifier_set` on MultisigProver using the admin mnemonic.
-
-> **ACTION REQUIRED:** Merge the infrastructure PR and wait for verifiers to register chain support before this step can complete.
-
-### 14. AxelarGateway
-
-Deploys implementation + proxy. Fetches the initial verifier set from the Axelar chain LCD endpoint automatically. Reuses a previously deployed implementation on retry.
-
-### 15. Operators
-
-Deploys the Operators contract via CREATE2 (through ConstAddressDeployer). Constructor arg `owner` is set to the gateway deployer address.
-
-### 16. RegisterOperators
-
-Registers operator addresses on the Operators contract.
-
-### 17. AxelarGasService
-
-Deploys the AxelarGasService implementation + proxy using the legacy init-based proxy pattern. The gas collector is set to the Operators contract address. Three transactions: deploy implementation, deploy proxy, call `proxy.init()`.
-
-### 18. TransferOperatorsOwnership
-
-Transfers Operators contract ownership to the governance address.
-
-### 19. TransferGatewayOwnership
-
-Transfers AxelarGateway contract ownership to the governance address.
-
-### 20. TransferGasServiceOwnership
-
-Transfers AxelarGasService contract ownership to the governance address.
+- **Steps 5, 8, 10:** Vote on governance proposals after they're submitted
+- **Step 13:** Merge infrastructure PR and register chain support for verifiers
