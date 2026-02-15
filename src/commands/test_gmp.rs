@@ -184,10 +184,47 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
     let poll_id = extract_poll_id(&verify_resp)?;
     println!("  poll_id: {poll_id}");
 
-    // Step 2: Poll VotingVerifier until poll passes
-    println!("\nstep 2: waiting for poll to pass...");
-    wait_for_poll(&lcd, &voting_verifier, &poll_id).await?;
-    println!("  poll passed!");
+    // Step 2: Wait for enough votes, then end the poll
+    println!("\nstep 2: waiting for poll votes...");
+    wait_for_poll_votes(&lcd, &voting_verifier, &poll_id).await?;
+    println!("  sufficient votes received, ending poll...");
+
+    // End the poll — retry if it hasn't expired yet (blockExpiry not reached)
+    println!("  ending poll (waiting for block expiry)...");
+    for attempt in 0..60 {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+        let end_poll_msg = json!({ "end_poll": { "poll_id": poll_id } });
+        let end_poll_any =
+            build_execute_msg_any(&axelar_address, &voting_verifier, &end_poll_msg)?;
+        match sign_and_broadcast_cosmos_tx(
+            &signing_key,
+            &axelar_address,
+            &lcd,
+            &chain_id,
+            &fee_denom,
+            gas_price,
+            vec![end_poll_any],
+        )
+        .await
+        {
+            Ok(_) => {
+                println!("  poll ended!");
+                break;
+            }
+            Err(e) => {
+                let msg = format!("{e}");
+                if msg.contains("cannot tally before poll end") {
+                    if attempt % 6 == 0 {
+                        println!("  poll not expired yet, waiting... (attempt {})", attempt + 1);
+                    }
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    }
 
     // Step 3: route_messages
     println!("\nstep 3: route_messages...");
@@ -227,6 +264,8 @@ fn extract_poll_id(tx_resp: &serde_json::Value) -> Result<String> {
                         let val = attr["value"]
                             .as_str()
                             .ok_or_else(|| eyre::eyre!("poll_id attribute has no value"))?;
+                        // Strip surrounding quotes if present (cosmwasm events may include them)
+                        let val = val.trim_matches('"');
                         return Ok(val.to_string());
                     }
                 }
@@ -250,44 +289,76 @@ fn extract_poll_id(tx_resp: &serde_json::Value) -> Result<String> {
     Err(eyre::eyre!("poll_id not found in verify_messages tx events"))
 }
 
-/// Poll the VotingVerifier until the poll passes or times out.
-async fn wait_for_poll(lcd: &str, voting_verifier: &str, poll_id: &str) -> Result<()> {
+/// Wait until the poll has enough SucceededOnChain votes to meet quorum,
+/// and the poll has expired (blockExpiry reached) so EndPoll can be called.
+async fn wait_for_poll_votes(lcd: &str, voting_verifier: &str, poll_id: &str) -> Result<()> {
     let query = json!({ "poll": { "poll_id": poll_id } });
+    let mut quorum_reached = false;
 
-    for i in 0..60 {
-        // 60 * 5s = 5 minutes
+    for i in 0..120 {
+        // 120 * 5s = 10 minutes
         if i > 0 {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
 
         let resp = lcd_cosmwasm_smart_query(lcd, voting_verifier, &query).await?;
 
-        // The poll response contains status info — check for completion
-        let resp_str = serde_json::to_string(&resp)?;
+        let poll = &resp["poll"];
+        let quorum: u64 = poll["quorum"]
+            .as_str()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let finished = poll["finished"].as_bool().unwrap_or(false);
+        let expires_at: u64 = poll["expires_at"]
+            .as_u64()
+            .unwrap_or(0);
 
-        if resp_str.contains("succeeded_on_source_chain")
-            || resp_str.contains("SucceededOnSourceChain")
-        {
+        if let Some(tallies) = poll["tallies"].as_array() {
+            if let Some(tally) = tallies.first() {
+                let succeeded: u64 = tally["SucceededOnChain"]
+                    .as_str()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                let failed: u64 = tally["FailedOnChain"]
+                    .as_str()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                let not_found: u64 = tally["NotFound"]
+                    .as_str()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+
+                if i % 6 == 0 || (!quorum_reached && quorum > 0 && succeeded >= quorum) {
+                    println!(
+                        "  votes: succeeded={succeeded}, failed={failed}, not_found={not_found} (quorum={quorum}, expires_at={expires_at}, finished={finished})"
+                    );
+                }
+
+                if quorum > 0 && failed >= quorum {
+                    return Err(eyre::eyre!("poll failed: {failed} FailedOnChain votes"));
+                }
+                if quorum > 0 && not_found >= quorum {
+                    return Err(eyre::eyre!("poll failed: {not_found} NotFound votes"));
+                }
+                if quorum > 0 && succeeded >= quorum {
+                    if !quorum_reached {
+                        quorum_reached = true;
+                        println!("  quorum reached! waiting for poll to expire (block {expires_at})...");
+                    }
+                }
+            }
+        }
+
+        // Poll is ready to be ended when it's past expiry
+        // We check "finished" or try to detect expiry by querying current block
+        if quorum_reached {
+            // Try to end the poll — if it fails with "cannot tally before poll end",
+            // the poll hasn't expired yet, so we keep waiting
             return Ok(());
-        }
-
-        if resp_str.contains("failed_on_source_chain")
-            || resp_str.contains("FailedOnSourceChain")
-            || resp_str.contains("not_found_on_source_chain")
-            || resp_str.contains("NotFoundOnSourceChain")
-            || resp_str.contains("failed_to_verify")
-            || resp_str.contains("FailedToVerify")
-        {
-            return Err(eyre::eyre!("poll failed: {resp_str}"));
-        }
-
-        if i % 6 == 0 {
-            // Print status every 30s
-            println!("  still waiting... (attempt {}/60)", i + 1);
         }
     }
 
-    Err(eyre::eyre!("poll {poll_id} timed out after 5 minutes"))
+    Err(eyre::eyre!("poll {poll_id} timed out after 10 minutes"))
 }
 
 async fn deploy_sender_receiver<P: Provider>(
