@@ -65,7 +65,7 @@ pub fn run(ctx: &DeployContext) -> Result<()> {
         "sourceGatewayAddress": predicted_addr,
         "votingThreshold": voting_threshold,
         "blockExpiry": 50,
-        "confirmationHeight": 1000000,
+        "confirmationHeight": 1,
         "msgIdFormat": "hex_tx_hash_and_event_index",
         "addressFormat": "eip55"
     });

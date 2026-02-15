@@ -64,6 +64,15 @@ sol! {
 
     // Gateway setup params: abi.encode(address operator, WeightedSigners[] signers)
     function setupParams(address operator, WeightedSigners[] signers);
+
+    // AxelarGateway ContractCall event (emitted by callContract)
+    event ContractCall(
+        address indexed sender,
+        string destinationChain,
+        string destinationContractAddress,
+        bytes32 indexed payloadHash,
+        bytes payload
+    );
 }
 
 /// Compute salt: keccak256(abi.encode(key)) — matches JS getSaltFromKey
