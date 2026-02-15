@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 
 use eyre::Result;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::cli::resolve_axelar_id;
-use crate::state::{mark_step_completed, next_pending_step, read_state, save_state};
+use crate::state::{mark_step_completed, migrate_steps, next_pending_step, read_state, save_state};
 use crate::steps;
 use crate::utils::{artifact_paths_for_step, deployments_root};
 
@@ -23,7 +23,33 @@ pub async fn run(
     proxy_artifact_path: Option<String>,
 ) -> Result<()> {
     let axelar_id = resolve_axelar_id(axelar_id)?;
-    let state = read_state(&axelar_id)?;
+    let mut state = read_state(&axelar_id)?;
+
+    // Migrate: append any new steps added since this state was created
+    migrate_steps(&mut state);
+
+    // Load ITS config from env vars if not already in state
+    if state.get("itsDeployerPrivateKey").and_then(|v| v.as_str()).is_none() {
+        if let Ok(pk) = std::env::var("ITS_DEPLOYER_PRIVATE_KEY") {
+            state["itsDeployerPrivateKey"] = json!(pk);
+            println!("loaded ITS_DEPLOYER_PRIVATE_KEY from env");
+        }
+    }
+    if state.get("itsSalt").and_then(|v| v.as_str()).is_none() {
+        if let Ok(s) = std::env::var("ITS_SALT") {
+            state["itsSalt"] = json!(s);
+            println!("loaded ITS_SALT from env: {s}");
+        }
+    }
+    if state.get("itsProxySalt").and_then(|v| v.as_str()).is_none() {
+        if let Ok(s) = std::env::var("ITS_PROXY_SALT") {
+            state["itsProxySalt"] = json!(s);
+            println!("loaded ITS_PROXY_SALT from env: {s}");
+        }
+    }
+
+    save_state(&axelar_id, &state)?;
+
     let rpc_url = state["rpcUrl"]
         .as_str()
         .ok_or_else(|| eyre::eyre!("no rpcUrl in state"))?
@@ -75,6 +101,7 @@ pub async fn run(
             }
             let state_key = match step_name {
                 "ConstAddressDeployer" | "Create3Deployer" => "deployerPrivateKey",
+                "DeployInterchainTokenService" => "itsDeployerPrivateKey",
                 "AxelarGateway" => "gatewayDeployerPrivateKey",
                 "Operators" | "RegisterOperators" | "TransferOperatorsOwnership"
                 | "TransferGatewayOwnership" => "gatewayDeployerPrivateKey",
@@ -173,6 +200,11 @@ pub async fn run(
                     &mut ctx, step_idx, &step, &step_name, &pk, impl_art, proxy_art,
                 )
                 .await?;
+            }
+
+            "deploy-its" => {
+                let pk = resolve_evm_key(&step_name)?;
+                steps::deploy_its::run(&mut ctx, step_idx, &step, &pk).await?;
             }
 
             other => {

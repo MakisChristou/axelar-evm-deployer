@@ -74,6 +74,13 @@ pub async fn run(
             )
             .await?;
         }
+        "RegisterItsOnHub" => {
+            run_register_its_on_hub(
+                ctx, &signing_key, &axelar_address, &lcd, &chain_id, &fee_denom, gas_price,
+                use_governance, &chain_axelar_id, &env, &proposal_key,
+            )
+            .await?;
+        }
         _ => {
             return Err(eyre::eyre!("unknown cosmos-tx step: {step_name}"));
         }
@@ -626,6 +633,127 @@ async fn run_add_rewards(
         ));
     }
     println!("  rewards added to both pools");
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_register_its_on_hub(
+    ctx: &mut DeployContext,
+    signing_key: &cosmrs::crypto::secp256k1::SigningKey,
+    axelar_address: &str,
+    lcd: &str,
+    chain_id: &str,
+    fee_denom: &str,
+    gas_price: f64,
+    use_governance: bool,
+    chain_axelar_id: &str,
+    env: &str,
+    proposal_key: &str,
+) -> Result<()> {
+    println!("registering {chain_axelar_id} on ITS Hub...");
+
+    let its_hub_addr = read_axelar_contract_field(
+        &ctx.target_json,
+        "/axelar/contracts/InterchainTokenService/address",
+    )?;
+    let governance_address =
+        read_axelar_contract_field(&ctx.target_json, "/axelar/governanceAddress")?;
+
+    // Read the ITS edge contract (EVM proxy address) from target JSON
+    let content = fs::read_to_string(&ctx.target_json)?;
+    let root: Value = serde_json::from_str(&content)?;
+    let its_edge_contract = root
+        .pointer(&format!(
+            "/chains/{}/contracts/InterchainTokenService/address",
+            ctx.axelar_id
+        ))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            eyre::eyre!("no InterchainTokenService address for {} — run DeployInterchainTokenService first", ctx.axelar_id)
+        })?
+        .to_string();
+
+    // Read msg_translator (ItsAbiTranslator address)
+    let msg_translator = root
+        .pointer("/axelar/contracts/ItsAbiTranslator/address")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| eyre::eyre!("no axelar.contracts.ItsAbiTranslator.address in target JSON"))?
+        .to_string();
+
+    let execute_msg = json!({
+        "register_chains": {
+            "chains": [{
+                "chain": chain_axelar_id,
+                "its_edge_contract": its_edge_contract,
+                "msg_translator": msg_translator,
+                "truncation": {
+                    "max_uint_bits": 256,
+                    "max_decimals_when_truncating": 255
+                }
+            }]
+        }
+    });
+
+    println!(
+        "  execute msg: {}",
+        serde_json::to_string_pretty(&execute_msg)?
+    );
+
+    let sender = if use_governance {
+        &governance_address
+    } else {
+        axelar_address
+    };
+    let inner_msg = build_execute_msg_any(sender, &its_hub_addr, &execute_msg)?;
+
+    let messages = if use_governance {
+        let deposit_amount = read_axelar_contract_field(
+            &ctx.target_json,
+            "/axelar/govProposalExpeditedDepositAmount",
+        )
+        .unwrap_or_else(|_| "3000000000".to_string());
+        let title = format!("Register {chain_axelar_id} on ITS Hub");
+        let summary = format!(
+            "Register {chain_axelar_id} ITS edge contract ({its_edge_contract}) on InterchainTokenService Hub"
+        );
+        vec![build_submit_proposal_any(
+            axelar_address,
+            vec![inner_msg],
+            &title,
+            &summary,
+            &deposit_amount,
+            fee_denom,
+            true,
+        )?]
+    } else {
+        vec![inner_msg]
+    };
+
+    let tx_resp = sign_and_broadcast_cosmos_tx(
+        signing_key,
+        axelar_address,
+        lcd,
+        chain_id,
+        fee_denom,
+        gas_price,
+        messages,
+    )
+    .await?;
+
+    if use_governance {
+        let proposal_id = extract_proposal_id(&tx_resp)?;
+        println!("  proposal submitted: {proposal_id}");
+        println!();
+        println!("  ACTION REQUIRED: vote on the proposal:");
+        println!("  ./vote_{env}_proposal.sh {env}-nodes {proposal_id}");
+        if ctx.state.get("proposals").is_none() {
+            ctx.state["proposals"] = json!({});
+        }
+        ctx.state["proposals"][proposal_key] = json!(proposal_id);
+    } else {
+        println!("  direct execution completed");
+    }
 
     Ok(())
 }

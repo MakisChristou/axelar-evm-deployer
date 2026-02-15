@@ -69,13 +69,13 @@ pub async fn run(
             .await?;
         println!("predicted address: {addr}");
 
-        let tx_hash = const_deployer
+        let pending = const_deployer
             .deploy_call(deploy_bytes, salt_bytes)
             .send()
-            .await?
-            .watch()
             .await?;
-        println!("tx hash: {tx_hash}");
+        let tx_hash = *pending.tx_hash();
+        println!("tx submitted: {tx_hash} (waiting for confirmation...)");
+        pending.get_receipt().await?;
 
         (addr, "create2", Some(salt_string))
     };

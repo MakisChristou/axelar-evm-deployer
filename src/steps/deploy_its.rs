@@ -1,0 +1,440 @@
+use std::fs;
+
+use alloy::{
+    primitives::{Address, Bytes, FixedBytes, keccak256},
+    providers::{Provider, ProviderBuilder},
+    signers::local::PrivateKeySigner,
+    sol_types::SolValue,
+};
+use eyre::Result;
+use serde_json::{Value, json};
+
+use crate::commands::deploy::DeployContext;
+use crate::evm::{ConstAddressDeployer, Create3Deployer, get_salt_from_key, read_artifact_bytecode};
+use crate::state::save_state;
+use crate::utils::{deployments_root, read_contract_address, update_target_json};
+
+/// Deploy all ITS contracts (9 total) in a single step.
+pub async fn run(
+    ctx: &mut DeployContext,
+    step_idx: usize,
+    step: &Value,
+    private_key: &str,
+) -> Result<()> {
+    let signer: PrivateKeySigner = private_key.parse()?;
+    let deployer_addr = signer.address();
+    let provider = ProviderBuilder::new()
+        .wallet(signer)
+        .connect_http(ctx.rpc_url.parse()?);
+
+    // --- Detect deployer change and clear stale helper addresses ---
+    let deployer_key = "itsDeployerAddress";
+    let saved_deployer = step.get(deployer_key).and_then(|v| v.as_str()).map(String::from);
+    let current_deployer = format!("{deployer_addr}");
+    if let Some(ref prev) = saved_deployer {
+        if prev != &current_deployer {
+            println!("WARNING: ITS deployer changed from {prev} to {current_deployer}");
+            println!("  clearing stale helper addresses from step state...");
+            let stale_keys = [
+                "TokenManagerDeployerAddress", "InterchainTokenAddress",
+                "InterchainTokenDeployerAddress", "TokenManagerAddress",
+                "TokenHandlerAddress", "InterchainTokenServiceImplAddress",
+                "InterchainTokenFactoryImplAddress",
+            ];
+            if let Some(s) = ctx.state["steps"]
+                .as_array_mut()
+                .and_then(|a| a.get_mut(step_idx))
+            {
+                for key in &stale_keys {
+                    s.as_object_mut().map(|m| m.remove(*key));
+                }
+                s[deployer_key] = json!(current_deployer);
+            }
+            save_state(&ctx.axelar_id, &ctx.state)?;
+        }
+    } else {
+        // First run — save deployer address
+        if let Some(s) = ctx.state["steps"]
+            .as_array_mut()
+            .and_then(|a| a.get_mut(step_idx))
+        {
+            s[deployer_key] = json!(current_deployer);
+        }
+        save_state(&ctx.axelar_id, &ctx.state)?;
+    }
+    // Re-read step after potential mutation
+    let step = ctx.state["steps"][step_idx].clone();
+
+    // --- Read prerequisites ---
+    let const_deployer_addr =
+        read_contract_address(&ctx.target_json, &ctx.axelar_id, "ConstAddressDeployer")?;
+    let create3_deployer_addr =
+        read_contract_address(&ctx.target_json, &ctx.axelar_id, "Create3Deployer")?;
+    let gateway_addr =
+        read_contract_address(&ctx.target_json, &ctx.axelar_id, "AxelarGateway")?;
+    let gas_service_addr =
+        read_contract_address(&ctx.target_json, &ctx.axelar_id, "AxelarGasService")?;
+
+    let content = fs::read_to_string(&ctx.target_json)?;
+    let root: Value = serde_json::from_str(&content)?;
+    let chain_axelar_id = root
+        .pointer(&format!("/chains/{}/axelarId", ctx.axelar_id))
+        .and_then(|v| v.as_str())
+        .unwrap_or(&ctx.axelar_id)
+        .to_string();
+
+    let its_hub_address = root
+        .pointer("/axelar/contracts/InterchainTokenService/address")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            eyre::eyre!("no axelar.contracts.InterchainTokenService.address in target JSON")
+        })?
+        .to_string();
+
+    // --- Compute salts ---
+    let its_salt = ctx.state["itsSalt"]
+        .as_str()
+        .ok_or_else(|| eyre::eyre!("no itsSalt in state. Set ITS_SALT in .env and re-run init"))?
+        .to_string();
+    let its_proxy_salt = ctx.state["itsProxySalt"]
+        .as_str()
+        .ok_or_else(|| {
+            eyre::eyre!("no itsProxySalt in state. Set ITS_PROXY_SALT in .env and re-run init")
+        })?
+        .to_string();
+
+    let helper_salt = get_salt_from_key(&format!("ITS {its_salt}"));
+    let impl_salt = get_salt_from_key(&format!("ITS {its_salt} Implementation"));
+    let proxy_salt = get_salt_from_key(&format!("ITS {its_proxy_salt}"));
+    let factory_salt = get_salt_from_key(&format!("ITS Factory {its_proxy_salt}"));
+
+    println!("ITS salt: 'ITS {its_salt}', proxy salt: 'ITS {its_proxy_salt}'");
+
+    // --- Resolve artifact paths ---
+    let repo_root = deployments_root(&ctx.target_json)?;
+    let its_base = repo_root
+        .join("node_modules/@axelar-network/interchain-token-service/artifacts/contracts");
+    let artifact = |rel: &str| its_base.join(rel).to_string_lossy().into_owned();
+
+    // --- Predict proxy addresses via CREATE3 (before deploying anything) ---
+    let create3 = Create3Deployer::new(create3_deployer_addr, &provider);
+    let its_proxy_addr = create3
+        .deployedAddress(Bytes::new(), deployer_addr, proxy_salt)
+        .call()
+        .await?;
+    let factory_proxy_addr = create3
+        .deployedAddress(Bytes::new(), deployer_addr, factory_salt)
+        .call()
+        .await?;
+    println!("predicted ITS proxy: {its_proxy_addr}");
+    println!("predicted Factory proxy: {factory_proxy_addr}");
+
+    let const_deployer = ConstAddressDeployer::new(const_deployer_addr, &provider);
+
+    // ========= 1. Deploy helper contracts via CREATE2 =========
+
+    println!("\n--- deploying ITS helper contracts ---");
+
+    let tmdeployer_bytecode = read_artifact_bytecode(
+        &artifact("utils/TokenManagerDeployer.sol/TokenManagerDeployer.json"),
+    )?;
+    let token_manager_deployer_addr = deploy_via_create2(
+        &const_deployer, &provider, deployer_addr,
+        "TokenManagerDeployer", tmdeployer_bytecode, None, helper_salt, &step,
+    ).await?;
+    save_its_address(ctx, step_idx, "TokenManagerDeployer", token_manager_deployer_addr)?;
+
+    let it_bytecode = read_artifact_bytecode(
+        &artifact("interchain-token/InterchainToken.sol/InterchainToken.json"),
+    )?;
+    let interchain_token_addr = deploy_via_create2(
+        &const_deployer, &provider, deployer_addr,
+        "InterchainToken", it_bytecode, Some(its_proxy_addr.abi_encode()), helper_salt, &step,
+    ).await?;
+    save_its_address(ctx, step_idx, "InterchainToken", interchain_token_addr)?;
+
+    let itd_bytecode = read_artifact_bytecode(
+        &artifact("utils/InterchainTokenDeployer.sol/InterchainTokenDeployer.json"),
+    )?;
+    let interchain_token_deployer_addr = deploy_via_create2(
+        &const_deployer, &provider, deployer_addr,
+        "InterchainTokenDeployer", itd_bytecode,
+        Some(interchain_token_addr.abi_encode()), helper_salt, &step,
+    ).await?;
+    save_its_address(ctx, step_idx, "InterchainTokenDeployer", interchain_token_deployer_addr)?;
+
+    let tm_bytecode = read_artifact_bytecode(
+        &artifact("token-manager/TokenManager.sol/TokenManager.json"),
+    )?;
+    let token_manager_addr = deploy_via_create2(
+        &const_deployer, &provider, deployer_addr,
+        "TokenManager", tm_bytecode, Some(its_proxy_addr.abi_encode()), helper_salt, &step,
+    ).await?;
+    save_its_address(ctx, step_idx, "TokenManager", token_manager_addr)?;
+
+    let th_bytecode =
+        read_artifact_bytecode(&artifact("TokenHandler.sol/TokenHandler.json"))?;
+    let token_handler_addr = deploy_via_create2(
+        &const_deployer, &provider, deployer_addr,
+        "TokenHandler", th_bytecode, None, helper_salt, &step,
+    ).await?;
+    save_its_address(ctx, step_idx, "TokenHandler", token_handler_addr)?;
+
+    // ========= 2. Deploy ITS Implementation via CREATE2 =========
+
+    println!("\n--- deploying InterchainTokenService implementation ---");
+
+    let its_impl_bytecode = read_artifact_bytecode(
+        &artifact("InterchainTokenService.sol/InterchainTokenService.json"),
+    )?;
+    let its_impl_constructor_args = (
+        token_manager_deployer_addr,
+        interchain_token_deployer_addr,
+        gateway_addr,
+        gas_service_addr,
+        factory_proxy_addr,
+        chain_axelar_id.clone(),
+        its_hub_address,
+        token_manager_addr,
+        token_handler_addr,
+    )
+        .abi_encode_params();
+
+    let its_impl_addr = deploy_via_create2(
+        &const_deployer, &provider, deployer_addr,
+        "InterchainTokenServiceImpl", its_impl_bytecode,
+        Some(its_impl_constructor_args), impl_salt, &step,
+    ).await?;
+    save_its_address(ctx, step_idx, "InterchainTokenServiceImpl", its_impl_addr)?;
+
+    // ========= 3. Deploy ITS Proxy via CREATE3 =========
+
+    println!("\n--- deploying InterchainTokenService proxy ---");
+
+    let proxy_bytecode = read_artifact_bytecode(
+        &artifact("proxies/InterchainProxy.sol/InterchainProxy.json"),
+    )?;
+
+    // setupParams = abi.encode(operator, chainAxelarId, trustedChains[])
+    let setup_params: Bytes = Bytes::from(
+        (deployer_addr, chain_axelar_id.clone(), Vec::<String>::new()).abi_encode_params(),
+    );
+    let its_proxy_constructor_args =
+        (its_impl_addr, deployer_addr, setup_params).abi_encode_params();
+
+    let its_proxy_deployed = deploy_via_create3(
+        &create3, &provider,
+        "InterchainTokenServiceProxy", proxy_bytecode.clone(),
+        its_proxy_constructor_args, proxy_salt, its_proxy_addr,
+    ).await?;
+    assert_eq!(its_proxy_deployed, its_proxy_addr);
+
+    // ========= 4. Deploy Factory Implementation via CREATE2 =========
+
+    println!("\n--- deploying InterchainTokenFactory implementation ---");
+
+    let factory_impl_bytecode = read_artifact_bytecode(
+        &artifact("InterchainTokenFactory.sol/InterchainTokenFactory.json"),
+    )?;
+    let factory_impl_addr = deploy_via_create2(
+        &const_deployer, &provider, deployer_addr,
+        "InterchainTokenFactoryImpl", factory_impl_bytecode,
+        Some(its_proxy_addr.abi_encode()), impl_salt, &step,
+    ).await?;
+    save_its_address(ctx, step_idx, "InterchainTokenFactoryImpl", factory_impl_addr)?;
+
+    // ========= 5. Deploy Factory Proxy via CREATE3 =========
+
+    println!("\n--- deploying InterchainTokenFactory proxy ---");
+
+    let factory_proxy_constructor_args =
+        (factory_impl_addr, deployer_addr, Bytes::new()).abi_encode_params();
+
+    let factory_proxy_deployed = deploy_via_create3(
+        &create3, &provider,
+        "InterchainTokenFactoryProxy", proxy_bytecode,
+        factory_proxy_constructor_args, factory_salt, factory_proxy_addr,
+    ).await?;
+    assert_eq!(factory_proxy_deployed, factory_proxy_addr);
+
+    // ========= 6. Write to target JSON =========
+
+    println!("\n--- saving ITS contract data to target JSON ---");
+
+    let its_bytecode_raw = read_artifact_bytecode(
+        &artifact("InterchainTokenService.sol/InterchainTokenService.json"),
+    )?;
+    let predeploy_codehash = keccak256(&its_bytecode_raw);
+
+    let its_data = json!({
+        "salt": format!("ITS {its_salt}"),
+        "proxySalt": format!("ITS {its_proxy_salt}"),
+        "deployer": format!("{deployer_addr}"),
+        "tokenManagerDeployer": format!("{token_manager_deployer_addr}"),
+        "interchainToken": format!("{interchain_token_addr}"),
+        "interchainTokenDeployer": format!("{interchain_token_deployer_addr}"),
+        "tokenManager": format!("{token_manager_addr}"),
+        "tokenHandler": format!("{token_handler_addr}"),
+        "implementation": format!("{its_impl_addr}"),
+        "address": format!("{its_proxy_addr}"),
+        "predeployCodehash": format!("{predeploy_codehash}"),
+        "owner": format!("{deployer_addr}"),
+    });
+
+    update_target_json(
+        &ctx.target_json,
+        &ctx.axelar_id,
+        "InterchainTokenService",
+        its_data,
+    )?;
+
+    let factory_data = json!({
+        "salt": format!("ITS Factory {its_proxy_salt}"),
+        "deployer": format!("{deployer_addr}"),
+        "implementation": format!("{factory_impl_addr}"),
+        "address": format!("{factory_proxy_addr}"),
+    });
+
+    update_target_json(
+        &ctx.target_json,
+        &ctx.axelar_id,
+        "InterchainTokenFactory",
+        factory_data,
+    )?;
+
+    println!("ITS deployment complete!");
+    println!("  InterchainTokenService: {its_proxy_addr}");
+    println!("  InterchainTokenFactory: {factory_proxy_addr}");
+
+    Ok(())
+}
+
+/// Deploy a contract via CREATE2 using ConstAddressDeployer.
+/// Checks step state and on-chain code to skip already-deployed contracts.
+async fn deploy_via_create2<P: Provider>(
+    const_deployer: &ConstAddressDeployer::ConstAddressDeployerInstance<P>,
+    provider: P,
+    deployer_addr: Address,
+    name: &str,
+    bytecode: Vec<u8>,
+    constructor_args: Option<Vec<u8>>,
+    salt: FixedBytes<32>,
+    step: &Value,
+) -> Result<Address> {
+    let mut deploy_code = bytecode;
+    if let Some(args) = constructor_args {
+        deploy_code.extend_from_slice(&args);
+    }
+    let deploy_bytes = Bytes::from(deploy_code);
+
+    // Compute the correct predicted address for the current deployer + bytecode + salt
+    let predicted = const_deployer
+        .deployedAddress(deploy_bytes.clone(), deployer_addr, salt)
+        .call()
+        .await?;
+
+    // Check step state — only trust it if the saved address matches the predicted one
+    let saved_key = format!("{name}Address");
+    if let Some(addr_str) = step.get(&saved_key).and_then(|v| v.as_str()) {
+        let saved: Address = addr_str.parse()?;
+        if saved != predicted {
+            println!("  {name}: stale address {saved} in step state (predicted {predicted}), ignoring");
+        }
+    }
+
+    // Check if already deployed at the correct predicted address
+    let existing_code = provider.get_code_at(predicted).await?;
+    if !existing_code.is_empty() {
+        println!("  {name}: already deployed at {predicted}");
+        return Ok(predicted);
+    }
+
+    println!("  {name}: deploying via CREATE2...");
+    let pending = const_deployer
+        .deploy_call(deploy_bytes, salt)
+        .send()
+        .await
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("0x4102e83a") {
+                eyre::eyre!("{name}: ConstAddressDeployer.FailedDeploy() — constructor reverted. \
+                    This usually means the constructor args are invalid or stale (e.g. deployer key changed). \
+                    Try resetting the ITS step state.")
+            } else {
+                eyre::eyre!("{name}: send failed: {e}")
+            }
+        })?;
+    let tx_hash = *pending.tx_hash();
+    println!("  {name}: tx {tx_hash} (waiting for confirmation...)");
+    let receipt = tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        pending.get_receipt(),
+    )
+    .await
+    .map_err(|_| eyre::eyre!("{name}: tx {tx_hash} timed out after 120s — check explorer and re-run"))??;
+    println!("  {name}: confirmed in block {} -> {predicted}", receipt.block_number.unwrap_or(0));
+    Ok(predicted)
+}
+
+/// Deploy a contract via CREATE3 using Create3Deployer.
+/// Checks on-chain code at the predicted address to skip if already deployed.
+async fn deploy_via_create3<P: Provider>(
+    create3: &Create3Deployer::Create3DeployerInstance<P>,
+    provider: P,
+    name: &str,
+    proxy_bytecode: Vec<u8>,
+    constructor_args: Vec<u8>,
+    salt: FixedBytes<32>,
+    predicted: Address,
+) -> Result<Address> {
+    let existing_code = provider.get_code_at(predicted).await?;
+    if !existing_code.is_empty() {
+        println!("  {name}: already deployed at {predicted}");
+        return Ok(predicted);
+    }
+
+    let mut deploy_code = proxy_bytecode;
+    deploy_code.extend_from_slice(&constructor_args);
+
+    println!("  {name}: deploying via CREATE3...");
+    let pending = create3
+        .deploy_call(Bytes::from(deploy_code), salt)
+        .send()
+        .await
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("0x4102e83a") {
+                eyre::eyre!("{name}: FailedDeploy() — constructor reverted")
+            } else {
+                eyre::eyre!("{name}: send failed: {e}")
+            }
+        })?;
+    let tx_hash = *pending.tx_hash();
+    println!("  {name}: tx {tx_hash} (waiting for confirmation...)");
+    let receipt = tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        pending.get_receipt(),
+    )
+    .await
+    .map_err(|_| eyre::eyre!("{name}: tx {tx_hash} timed out after 120s — check explorer and re-run"))??;
+    println!("  {name}: confirmed in block {} -> {predicted}", receipt.block_number.unwrap_or(0));
+    Ok(predicted)
+}
+
+/// Save an intermediate address to the step state for idempotent retries.
+fn save_its_address(
+    ctx: &mut DeployContext,
+    step_idx: usize,
+    name: &str,
+    addr: Address,
+) -> Result<()> {
+    let key = format!("{name}Address");
+    if let Some(s) = ctx.state["steps"]
+        .as_array_mut()
+        .and_then(|a| a.get_mut(step_idx))
+    {
+        s[&key] = json!(format!("{addr}"));
+    }
+    save_state(&ctx.axelar_id, &ctx.state)?;
+    Ok(())
+}

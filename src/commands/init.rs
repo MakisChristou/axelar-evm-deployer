@@ -35,6 +35,9 @@ pub async fn run() -> Result<()> {
     let deployer_private_key = std::env::var("DEPLOYER_PRIVATE_KEY").ok();
     let gateway_deployer_private_key = std::env::var("GATEWAY_DEPLOYER_PRIVATE_KEY").ok();
     let gas_service_deployer_private_key = std::env::var("GAS_SERVICE_DEPLOYER_PRIVATE_KEY").ok();
+    let its_deployer_private_key = std::env::var("ITS_DEPLOYER_PRIVATE_KEY").ok();
+    let its_salt = std::env::var("ITS_SALT").ok();
+    let its_proxy_salt = std::env::var("ITS_PROXY_SALT").ok();
 
     // --- Chain config → target json ---
     let mut chain_entry = json!({
@@ -117,6 +120,21 @@ pub async fn run() -> Result<()> {
             .map_err(|e| eyre::eyre!("invalid gas service deployer private key: {e}"))?;
         println!("gas service deployer address: {}", signer.address());
         state["gasServiceDeployerPrivateKey"] = json!(pk);
+    }
+    if let Some(ref pk) = its_deployer_private_key {
+        let signer: PrivateKeySigner = pk
+            .parse()
+            .map_err(|e| eyre::eyre!("invalid ITS deployer private key: {e}"))?;
+        println!("ITS deployer address: {}", signer.address());
+        state["itsDeployerPrivateKey"] = json!(pk);
+    }
+    if let Some(ref s) = its_salt {
+        state["itsSalt"] = json!(s);
+        println!("ITS salt: {s}");
+    }
+    if let Some(ref s) = its_proxy_salt {
+        state["itsProxySalt"] = json!(s);
+        println!("ITS proxy salt: {s}");
     }
 
     let state_file = state_path(&axelar_id)?;

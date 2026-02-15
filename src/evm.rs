@@ -17,6 +17,12 @@ sol! {
     }
 
     #[sol(rpc)]
+    contract Create3Deployer {
+        function deploy(bytes bytecode, bytes32 salt) external returns (address deployedAddress_);
+        function deployedAddress(bytes bytecode, address sender, bytes32 salt) external view returns (address deployedAddress_);
+    }
+
+    #[sol(rpc)]
     contract Ownable {
         function transferOwnership(address newOwner) external;
         function owner() external view returns (address);

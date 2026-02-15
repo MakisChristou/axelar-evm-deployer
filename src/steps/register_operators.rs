@@ -38,8 +38,18 @@ pub async fn run(ctx: &DeployContext, private_key: &str) -> Result<()> {
             continue;
         }
         println!("adding operator: {op}");
-        let tx_hash = operators.addOperator(*op).send().await?.watch().await?;
-        println!("  tx hash: {tx_hash}");
+        let pending = operators.addOperator(*op).send().await?;
+        let tx_hash = *pending.tx_hash();
+        println!("  tx submitted: {tx_hash}");
+        println!("  waiting for confirmation (timeout 120s)...");
+        let receipt = tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            pending.get_receipt(),
+        )
+        .await
+        .map_err(|_| eyre::eyre!("tx {tx_hash} timed out after 120s — check the explorer and re-run deploy to retry"))?
+        ?;
+        println!("  confirmed in block {}", receipt.block_number.unwrap_or(0));
     }
 
     Ok(())

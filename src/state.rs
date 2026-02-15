@@ -44,6 +44,36 @@ pub fn mark_step_completed(state: &mut Value, idx: usize) {
     }
 }
 
+/// Append any new steps from default_steps() that aren't in the current state.
+/// This allows existing deployments to pick up newly added steps (e.g. ITS).
+pub fn migrate_steps(state: &mut Value) {
+    let defaults = default_steps();
+    let existing: std::collections::HashSet<String> = state["steps"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|s| s["name"].as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let steps = state["steps"]
+        .as_array_mut()
+        .expect("steps must be an array");
+
+    let mut added = 0;
+    for default_step in &defaults {
+        let name = default_step["name"].as_str().unwrap_or("");
+        if !existing.contains(name) {
+            steps.push(default_step.clone());
+            added += 1;
+        }
+    }
+    if added > 0 {
+        println!("migrated state: added {added} new step(s)");
+    }
+}
+
 pub fn default_steps() -> Vec<Value> {
     vec![
         json!({ "name": "ConstAddressDeployer", "kind": "deploy-create", "status": "pending" }),
@@ -75,5 +105,11 @@ pub fn default_steps() -> Vec<Value> {
                 "contract": "AxelarGateway", "newOwner": "0x49845e5d9985d8dc941462293ed38EEfF18B0eAE" }),
         json!({ "name": "TransferGasServiceOwnership", "kind": "transfer-ownership", "status": "pending",
                 "contract": "AxelarGasService", "newOwner": "0x49845e5d9985d8dc941462293ed38EEfF18B0eAE" }),
+        // --- ITS ---
+        json!({ "name": "DeployInterchainTokenService", "kind": "deploy-its", "status": "pending" }),
+        json!({ "name": "RegisterItsOnHub", "kind": "cosmos-tx", "status": "pending",
+                "proposalKey": "itsHubRegister" }),
+        json!({ "name": "WaitItsHubRegistration", "kind": "cosmos-poll", "status": "pending",
+                "proposalKey": "itsHubRegister" }),
     ]
 }

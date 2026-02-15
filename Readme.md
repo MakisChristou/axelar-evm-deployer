@@ -16,6 +16,11 @@ DEPLOYER_PRIVATE_KEY=0x...              # ConstAddressDeployer + Create3Deployer
 GATEWAY_DEPLOYER_PRIVATE_KEY=0x...      # Gateway + Operators + ownership transfers (testnet: 0x92ae7f0b761aC8CFAbe4B94D53d1CD343dF8E3C0)
 GAS_SERVICE_DEPLOYER_PRIVATE_KEY=0x...  # AxelarGasService (testnet: 0x3b7E3351689b0fba2cE9f1F8d14Ae38e270d9eD4)
 
+# ITS 
+ITS_DEPLOYER_PRIVATE_KEY=0x...          # ITS deployer (testnet: 0x49845e5d9985d8dc941462293ed38EEfF18B0eAE). Required for ITS steps.
+ITS_SALT=v2.2.0
+ITS_PROXY_SALT=v1.0.0
+
 # Environment: devnet-amplifier, testnet, mainnet
 ENV=testnet
 
@@ -40,7 +45,9 @@ cargo run -- deploy    # runs all pending steps, blocks on polls
 
 ## Steps
 
-All 20 steps run automatically via `cargo run -- deploy`. Steps that submit governance proposals are followed by polling steps that block until the proposal passes. Manual actions (voting, infrastructure PRs) are prompted inline.
+All 23 steps run automatically via `cargo run -- deploy`. Steps that submit governance proposals are followed by polling steps that block until the proposal passes. Manual actions (voting, infrastructure PRs) are prompted inline.
+
+### GMP (steps 1-20)
 
 | # | Step | Description |
 |---|------|-------------|
@@ -65,7 +72,17 @@ All 20 steps run automatically via `cargo run -- deploy`. Steps that submit gove
 | 19 | TransferGatewayOwnership | Transfers to governance address |
 | 20 | TransferGasServiceOwnership | Transfers to governance address |
 
+### ITS (steps 21-23)
+
+| # | Step | Description |
+|---|------|-------------|
+| 21 | DeployInterchainTokenService | Deploys 9 ITS contracts (5 helpers + impl/proxy + factory impl/proxy) via CREATE2/CREATE3 |
+| 22 | RegisterItsOnHub | Governance proposal to register chain on the ITS Hub |
+| 23 | WaitItsHubRegistration | Polls until proposal passes |
+
+ITS requires `ITS_SALT`, `ITS_PROXY_SALT`, and optionally `ITS_DEPLOYER_PRIVATE_KEY` (falls back to `DEPLOYER_PRIVATE_KEY`). These can be set at init time or as env vars at deploy time.
+
 ### Manual actions during deploy
 
-- **Steps 5, 8, 10:** Vote on governance proposals after they're submitted
+- **Steps 5, 8, 10, 22:** Vote on governance proposals after they're submitted
 - **Step 13:** Merge infrastructure PR and register chain support for verifiers
