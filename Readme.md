@@ -184,10 +184,12 @@ cargo run -- deploy --axelar-id $CHAIN
 
 ## 17. AxelarGasService
 
-Deploys the AxelarGasService contract. **Not yet implemented.**
+Deploys the AxelarGasService implementation + proxy using the legacy init-based proxy pattern. The gas collector is set to the Operators contract address. Three transactions: deploy implementation, deploy proxy, call `proxy.init()`.
 
 ```bash
-cargo run -- deploy --axelar-id $CHAIN
+cargo run -- deploy --axelar-id $CHAIN \
+  --artifact-path ../axelar-contract-deployments/node_modules/@axelar-network/axelar-cgp-solidity/artifacts/contracts/gas-service/AxelarGasService.sol/AxelarGasService.json \
+  --proxy-artifact-path ../axelar-contract-deployments/node_modules/@axelar-network/axelar-cgp-solidity/artifacts/contracts/gas-service/AxelarGasServiceProxy.sol/AxelarGasServiceProxy.json
 ```
 
 ## 18. TransferOperatorsOwnership

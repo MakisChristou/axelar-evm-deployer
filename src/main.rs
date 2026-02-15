@@ -43,6 +43,12 @@ sol! {
         function isOperator(address account) external view returns (bool);
     }
 
+    /// Legacy init-based proxy (AxelarGasServiceProxy, AxelarDepositServiceProxy)
+    #[sol(rpc)]
+    contract LegacyProxy {
+        function init(address implementationAddress, address newOwner, bytes memory params) external;
+    }
+
     // WeightedSigners type for gateway setup params encoding
     struct WeightedSigner {
         address signer;
@@ -1214,8 +1220,27 @@ async fn main() -> Result<()> {
                     .ok_or_else(|| eyre::eyre!("no targetJson in state"))?,
             );
 
-            let (step_idx, step) =
-                next_pending_step(&state).ok_or_else(|| eyre::eyre!("all steps already completed"))?;
+            let (step_idx, step) = match next_pending_step(&state) {
+                Some(s) => s,
+                None => {
+                    println!("All steps completed! {axelar_id} EVM deployment is fully done.\n");
+                    println!("To test GMP (EVM -> {axelar_id}):\n");
+                    println!("  1. Send a GMP call from another chain:");
+                    println!("     ts-node evm/gateway.js -n [source-chain] --action callContract \\");
+                    println!("       --destinationChain {axelar_id} \\");
+                    println!("       --destination 0xba76c6980428A0b10CFC5d8ccb61949677A61233 --payload 0x1234\n");
+                    println!("  2. Route via Amplifier:");
+                    println!("     https://docs.axelar.dev/dev/amplifier/chain-integration/relay-messages\n");
+                    println!("  3. Submit proof:");
+                    println!("     ts-node evm/gateway.js -n {axelar_id} --action submitProof \\");
+                    println!("       --multisigSessionId [session-id]\n");
+                    println!("  4. Verify approval:");
+                    println!("     ts-node evm/gateway.js -n {axelar_id} --action isContractCallApproved \\");
+                    println!("       --commandID [id] --sourceChain [chain] --sourceAddress [addr] \\");
+                    println!("       --destination [addr] --payloadHash [hash]");
+                    return Ok(());
+                }
+            };
 
             let step_name = step["name"].as_str().unwrap_or("?").to_string();
             let step_kind = step["kind"].as_str().unwrap_or("?").to_string();
@@ -1231,8 +1256,8 @@ async fn main() -> Result<()> {
                     "ConstAddressDeployer" | "Create3Deployer" => "deployerPrivateKey",
                     "AxelarGateway" => "gatewayDeployerPrivateKey",
                     "Operators" | "RegisterOperators" |
-                    "TransferOperatorsOwnership" | "TransferGatewayOwnership" |
-                    "TransferGasServiceOwnership" => "gatewayDeployerPrivateKey",
+                    "TransferOperatorsOwnership" | "TransferGatewayOwnership" => "gatewayDeployerPrivateKey",
+                    "TransferGasServiceOwnership" => "gasServiceDeployerPrivateKey",
                     "AxelarGasService" => "gasServiceDeployerPrivateKey",
                     _ => return Err(eyre::eyre!("--private-key required for step {step_name}")),
                 };
@@ -2332,9 +2357,143 @@ async fn main() -> Result<()> {
                 }
 
                 "deploy-upgradable" => {
-                    return Err(eyre::eyre!(
-                        "step kind 'deploy-upgradable' not yet implemented — coming in next phase"
-                    ));
+                    // Currently only AxelarGasService uses this step kind.
+                    // Flow: deploy implementation (CREATE) → deploy proxy (CREATE) → proxy.init()
+                    let pk = resolve_evm_key(&step_name)?;
+                    let impl_artifact = artifact_path
+                        .as_ref()
+                        .ok_or_else(|| eyre::eyre!("--artifact-path required (implementation artifact)"))?;
+                    let proxy_artifact = proxy_artifact_path
+                        .as_ref()
+                        .ok_or_else(|| eyre::eyre!("--proxy-artifact-path required (proxy artifact)"))?;
+
+                    let signer: PrivateKeySigner = pk.parse()?;
+                    let deployer_addr = signer.address();
+                    let provider = ProviderBuilder::new()
+                        .wallet(signer)
+                        .connect_http(rpc_url.parse()?);
+
+                    // Read the gas collector address (= Operators contract)
+                    let gas_collector = read_contract_address(&target_json, &axelar_id, "Operators")?;
+                    println!("gas collector (Operators): {gas_collector}");
+
+                    // --- Tx 1: Deploy implementation (skip if already deployed on a previous attempt) ---
+                    let impl_addr = if let Some(saved) = step.get("implementationAddress").and_then(|v| v.as_str()) {
+                        let addr: Address = saved.parse()?;
+                        let code = provider.get_code_at(addr).await?;
+                        if code.is_empty() {
+                            return Err(eyre::eyre!("saved implementation {addr} has no code on-chain"));
+                        }
+                        println!("reusing previously deployed implementation: {addr}");
+                        addr
+                    } else {
+                        println!("deploying AxelarGasService implementation...");
+                        let impl_bytecode = read_artifact_bytecode(impl_artifact)?;
+                        let mut impl_deploy_code = impl_bytecode.clone();
+                        // Constructor: constructor(address gasCollector_) — single static arg
+                        impl_deploy_code.extend_from_slice(&gas_collector.abi_encode());
+
+                        let tx = TransactionRequest::default()
+                            .with_deploy_code(Bytes::from(impl_deploy_code));
+                        let receipt = provider.send_transaction(tx).await?.get_receipt().await?;
+                        println!("  implementation tx hash: {}", receipt.transaction_hash);
+
+                        if !receipt.status() {
+                            return Err(eyre::eyre!(
+                                "implementation deployment tx {} reverted on-chain",
+                                receipt.transaction_hash
+                            ));
+                        }
+
+                        let addr = receipt
+                            .contract_address
+                            .ok_or_else(|| eyre::eyre!("no contract address in implementation receipt"))?;
+                        println!("  implementation deployed at: {addr}");
+
+                        // Save to state so retries skip re-deployment
+                        if let Some(s) = state["steps"].as_array_mut().and_then(|a| a.get_mut(step_idx)) {
+                            s["implementationAddress"] = json!(format!("{addr}"));
+                        }
+                        save_state(&axelar_id, &state)?;
+                        addr
+                    };
+
+                    // --- Tx 2: Deploy proxy (skip if already deployed on a previous attempt) ---
+                    let proxy_addr = if let Some(saved) = step.get("proxyAddress").and_then(|v| v.as_str()) {
+                        let addr: Address = saved.parse()?;
+                        let code = provider.get_code_at(addr).await?;
+                        if code.is_empty() {
+                            return Err(eyre::eyre!("saved proxy {addr} has no code on-chain"));
+                        }
+                        println!("reusing previously deployed proxy: {addr}");
+                        addr
+                    } else {
+                        println!("deploying AxelarGasServiceProxy...");
+                        let proxy_bytecode = read_artifact_bytecode(proxy_artifact)?;
+                        // Legacy proxy has no constructor args — constructor just sets owner = msg.sender
+
+                        let tx = TransactionRequest::default()
+                            .with_deploy_code(Bytes::from(proxy_bytecode));
+                        let receipt = provider.send_transaction(tx).await?.get_receipt().await?;
+                        println!("  proxy tx hash: {}", receipt.transaction_hash);
+
+                        if !receipt.status() {
+                            return Err(eyre::eyre!(
+                                "proxy deployment tx {} reverted on-chain",
+                                receipt.transaction_hash
+                            ));
+                        }
+
+                        let addr = receipt
+                            .contract_address
+                            .ok_or_else(|| eyre::eyre!("no contract address in proxy receipt"))?;
+                        println!("  proxy deployed at: {addr}");
+
+                        // Save to state so retries skip re-deployment
+                        if let Some(s) = state["steps"].as_array_mut().and_then(|a| a.get_mut(step_idx)) {
+                            s["proxyAddress"] = json!(format!("{addr}"));
+                        }
+                        save_state(&axelar_id, &state)?;
+                        addr
+                    };
+
+                    // --- Tx 3: Call proxy.init(implementation, owner, setupParams) ---
+                    // Check if already initialized by reading the implementation slot
+                    // EIP-1967 implementation slot: keccak256('eip1967.proxy.implementation') - 1
+                    let eip1967_impl_slot: U256 = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc".parse()?;
+                    let impl_slot = provider
+                        .get_storage_at(proxy_addr, eip1967_impl_slot)
+                        .await?;
+
+                    if impl_slot != U256::ZERO {
+                        let stored_impl = Address::from_word(impl_slot.into());
+                        println!("proxy already initialized with implementation: {stored_impl}");
+                    } else {
+                        println!("calling proxy.init({impl_addr}, {deployer_addr}, 0x)...");
+                        let proxy = LegacyProxy::new(proxy_addr, &provider);
+                        let init_tx = proxy.init(impl_addr, deployer_addr, Bytes::new());
+
+                        let receipt = init_tx.send().await?.get_receipt().await?;
+                        println!("  init tx hash: {}", receipt.transaction_hash);
+
+                        if !receipt.status() {
+                            return Err(eyre::eyre!(
+                                "proxy init tx {} reverted on-chain",
+                                receipt.transaction_hash
+                            ));
+                        }
+                        println!("  proxy initialized successfully");
+                    }
+
+                    // --- Write to target JSON ---
+                    let mut contract_data = Map::new();
+                    contract_data.insert("address".into(), json!(format!("{proxy_addr}")));
+                    contract_data.insert("implementation".into(), json!(format!("{impl_addr}")));
+                    contract_data.insert("deployer".into(), json!(format!("{deployer_addr}")));
+                    contract_data.insert("deploymentMethod".into(), json!("create"));
+                    contract_data.insert("collector".into(), json!(format!("{gas_collector}")));
+
+                    update_target_json(&target_json, &axelar_id, "AxelarGasService", Value::Object(contract_data))?;
                 }
 
                 other => {
