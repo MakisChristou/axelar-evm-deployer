@@ -1476,23 +1476,33 @@ async fn main() -> Result<()> {
                     let proxy_bytecode = read_artifact_bytecode(proxy_artifact)?;
                     let mut proxy_deploy_code = proxy_bytecode.clone();
                     // Append constructor args: (address implementation, address owner, bytes setupParams)
+                    // Must use abi_encode_params (not abi_encode) — abi_encode wraps dynamic tuples
+                    // with an extra offset prefix that corrupts the constructor args.
                     proxy_deploy_code
-                        .extend_from_slice(&(impl_addr, owner, setup_params.clone()).abi_encode());
+                        .extend_from_slice(&(impl_addr, owner, setup_params.clone()).abi_encode_params());
 
                     let proxy_deploy_bytes = Bytes::from(proxy_deploy_code);
                     let tx = TransactionRequest::default()
-                        .with_deploy_code(proxy_deploy_bytes.clone());
+                        .with_deploy_code(proxy_deploy_bytes.clone())
+                        .with_gas_limit(5_000_000); // explicit limit — proxy+setup uses ~2.7M gas
 
-                    // Simulate via eth_call to catch revert reasons
+                    // Simulate via eth_call (non-fatal — some RPCs don't support contract creation simulation)
                     match provider.call(tx.clone()).await {
                         Ok(_) => println!("  eth_call simulation passed"),
                         Err(e) => {
                             let reason = decode_evm_error(&e);
-                            return Err(eyre::eyre!("proxy deployment would revert: {reason}"));
+                            eprintln!("  WARNING: eth_call simulation failed: {reason}");
+                            eprintln!("  proceeding with send_transaction anyway...");
                         }
                     }
 
-                    let receipt = provider.send_transaction(tx).await?.get_receipt().await?;
+                    let receipt = match provider.send_transaction(tx).await {
+                        Ok(pending) => pending.get_receipt().await?,
+                        Err(e) => {
+                            let reason = decode_evm_error(&e);
+                            return Err(eyre::eyre!("proxy deployment failed: {reason}"));
+                        }
+                    };
                     println!("proxy tx hash: {}", receipt.transaction_hash);
 
                     if !receipt.status() {
