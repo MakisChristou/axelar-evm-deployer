@@ -42,6 +42,30 @@ sol! {
             string calldata message_
         ) external payable;
         function message() external view returns (string);
+        function execute(
+            bytes32 commandId,
+            string calldata sourceChain,
+            string calldata sourceAddress,
+            bytes calldata payload
+        ) external;
+    }
+
+    #[sol(rpc)]
+    contract AxelarAmplifierGateway {
+        function isContractCallApproved(
+            bytes32 commandId,
+            string calldata sourceChain,
+            string calldata sourceAddress,
+            address contractAddress,
+            bytes32 payloadHash
+        ) external view returns (bool);
+        function isMessageApproved(
+            string calldata sourceChain,
+            string calldata messageId,
+            string calldata sourceAddress,
+            address contractAddress,
+            bytes32 payloadHash
+        ) external view returns (bool);
     }
 
     /// Legacy init-based proxy (AxelarGasServiceProxy, AxelarDepositServiceProxy)

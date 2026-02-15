@@ -16,7 +16,7 @@ use crate::cosmos::{
     build_execute_msg_any, derive_axelar_wallet, lcd_cosmwasm_smart_query, read_axelar_config,
     read_axelar_contract_field, sign_and_broadcast_cosmos_tx,
 };
-use crate::evm::{ContractCall, SenderReceiver, read_artifact_bytecode};
+use crate::evm::{AxelarAmplifierGateway, ContractCall, SenderReceiver, read_artifact_bytecode};
 use crate::state::{read_state, save_state};
 use crate::utils::read_contract_address;
 
@@ -241,7 +241,135 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
     )
     .await?;
 
-    println!("\nGMP message routed successfully!");
+    println!("  message routed!");
+
+    // Step 4: construct_proof on MultisigProver
+    println!("\nstep 4: construct_proof...");
+    let multisig_prover = read_axelar_contract_field(
+        &target_json,
+        &format!("/axelar/contracts/MultisigProver/{axelar_id}/address"),
+    )?;
+    println!("  multisig prover: {multisig_prover}");
+
+    let construct_proof_msg = json!({
+        "construct_proof": [{
+            "source_chain": axelar_id,
+            "message_id": message_id,
+        }]
+    });
+    let construct_any =
+        build_execute_msg_any(&axelar_address, &multisig_prover, &construct_proof_msg)?;
+    let construct_resp = sign_and_broadcast_cosmos_tx(
+        &signing_key,
+        &axelar_address,
+        &lcd,
+        &chain_id,
+        &fee_denom,
+        gas_price,
+        vec![construct_any],
+    )
+    .await?;
+
+    let session_id = extract_event_attr(&construct_resp, "multisig_session_id")?;
+    println!("  multisig_session_id: {session_id}");
+
+    // Step 5: Poll proof until signed
+    println!("\nstep 5: waiting for proof...");
+    let proof = wait_for_proof(&lcd, &multisig_prover, &session_id).await?;
+    println!("  proof ready!");
+
+    // Step 6: Submit execute_data to EVM gateway
+    println!("\nstep 6: submitting proof to EVM gateway...");
+    let execute_data_hex = proof["status"]["completed"]["execute_data"]
+        .as_str()
+        .ok_or_else(|| eyre::eyre!("no execute_data in proof response"))?;
+    let execute_data = alloy::hex::decode(execute_data_hex)?;
+
+    let approve_tx = TransactionRequest::default()
+        .to(gateway_addr)
+        .input(Bytes::from(execute_data).into());
+    let pending_approve = provider.send_transaction(approve_tx).await?;
+    let approve_hash = *pending_approve.tx_hash();
+    println!("  tx: {approve_hash} (waiting for confirmation...)");
+
+    let approve_receipt = tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        pending_approve.get_receipt(),
+    )
+    .await
+    .map_err(|_| eyre::eyre!("approve tx timed out after 120s"))??;
+
+    println!(
+        "  confirmed in block {}",
+        approve_receipt.block_number.unwrap_or(0)
+    );
+
+    // Step 7: Extract commandId from approve receipt and check approval
+    println!("\nstep 7: checking message approval...");
+
+    // The gateway emits a ContractCallApproved event with commandId as topic[1].
+    // Event signature: 0xcda53a26... (4 topics: sig, commandId, contractAddress, payloadHash)
+    let command_id = approve_receipt
+        .inner
+        .logs()
+        .iter()
+        .find_map(|log| {
+            if log.topics().len() >= 2 && log.address() == gateway_addr {
+                Some(log.topics()[1])
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| eyre::eyre!("commandId not found in approve tx logs"))?;
+    println!("  commandId: {command_id}");
+
+    let gw_contract = AxelarAmplifierGateway::new(gateway_addr, &provider);
+    let approved = gw_contract
+        .isContractCallApproved(
+            command_id,
+            axelar_id.clone(),
+            format!("{sender_receiver_addr}"),
+            sender_receiver_addr,
+            payload_hash,
+        )
+        .call()
+        .await?;
+    println!("  isContractCallApproved: {approved}");
+
+    if !approved {
+        return Err(eyre::eyre!("message not approved on EVM gateway"));
+    }
+
+    // Step 8: Execute on SenderReceiver
+    println!("\nstep 8: executing on SenderReceiver...");
+    let sr_contract = SenderReceiver::new(sender_receiver_addr, &provider);
+    let exec_call = sr_contract.execute(
+        command_id,
+        axelar_id.clone(),
+        format!("{sender_receiver_addr}"),
+        Bytes::from(payload_bytes.clone()),
+    );
+    let pending_exec = exec_call.send().await?;
+    let exec_hash = *pending_exec.tx_hash();
+    println!("  tx: {exec_hash} (waiting for confirmation...)");
+
+    let exec_receipt = tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        pending_exec.get_receipt(),
+    )
+    .await
+    .map_err(|_| eyre::eyre!("execute tx timed out after 120s"))??;
+
+    println!(
+        "  confirmed in block {}",
+        exec_receipt.block_number.unwrap_or(0)
+    );
+
+    // Verify the message was stored
+    let stored_message = sr_contract.message().call().await?;
+    println!("  stored message: \"{stored_message}\"");
+
+    println!("\nGMP flow complete!");
 
     Ok(())
 }
@@ -287,6 +415,66 @@ fn extract_poll_id(tx_resp: &serde_json::Value) -> Result<String> {
     }
 
     Err(eyre::eyre!("poll_id not found in verify_messages tx events"))
+}
+
+/// Extract a named attribute from wasm events in a tx response.
+fn extract_event_attr(tx_resp: &serde_json::Value, attr_name: &str) -> Result<String> {
+    let events = tx_resp
+        .pointer("/tx_response/events")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| eyre::eyre!("no events in tx response"))?;
+
+    for event in events {
+        let event_type = event["type"].as_str().unwrap_or("");
+        if event_type == "wasm" || event_type.starts_with("wasm-") {
+            if let Some(attrs) = event["attributes"].as_array() {
+                for attr in attrs {
+                    let key = attr["key"].as_str().unwrap_or("");
+                    if key == attr_name {
+                        let val = attr["value"]
+                            .as_str()
+                            .ok_or_else(|| eyre::eyre!("{attr_name} attribute has no value"))?;
+                        return Ok(val.trim_matches('"').to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    Err(eyre::eyre!("{attr_name} not found in tx events"))
+}
+
+/// Poll the MultisigProver for a proof until it's signed.
+async fn wait_for_proof(
+    lcd: &str,
+    multisig_prover: &str,
+    session_id: &str,
+) -> Result<serde_json::Value> {
+    let query = json!({ "proof": { "multisig_session_id": session_id } });
+
+    for i in 0..120 {
+        // 120 * 5s = 10 minutes
+        if i > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+
+        let resp = lcd_cosmwasm_smart_query(lcd, multisig_prover, &query).await?;
+        let resp_str = serde_json::to_string(&resp)?;
+
+        // Check if proof status indicates completion
+        if resp_str.contains("completed") || resp_str.contains("Completed") {
+            return Ok(resp);
+        }
+
+        if i % 6 == 0 {
+            let status = resp["status"].as_str().unwrap_or("unknown");
+            println!("  proof status: {status} (attempt {}/120)", i + 1);
+        }
+    }
+
+    Err(eyre::eyre!(
+        "proof for session {session_id} timed out after 10 minutes"
+    ))
 }
 
 /// Wait until the poll has enough SucceededOnChain votes to meet quorum,
