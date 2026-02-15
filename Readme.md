@@ -86,3 +86,23 @@ ITS requires `ITS_SALT`, `ITS_PROXY_SALT`, and optionally `ITS_DEPLOYER_PRIVATE_
 
 - **Steps 5, 8, 10, 22:** Vote on governance proposals after they're submitted
 - **Step 13:** Merge infrastructure PR and register chain support for verifiers
+
+## Testing GMP
+
+After deployment, run a full end-to-end GMP loopback test:
+
+```bash
+cargo run -- test gmp --axelar-id arc-13
+```
+
+This sends a GMP message from the chain back to itself and relays it through the entire Amplifier pipeline:
+
+1. Deploy a `SenderReceiver` contract (or reuse existing)
+2. Send a `callContract` GMP message on the EVM chain
+3. `verify_messages` on the cosmwasm Gateway (starts a verification poll)
+4. Wait for verifier votes on the VotingVerifier, then `end_poll`
+5. `route_messages` on the cosmwasm Gateway
+6. `construct_proof` on the MultisigProver, wait for multisig signing
+7. Submit the signed proof (`execute_data`) to the EVM Gateway
+8. Verify `isContractCallApproved`, then call `execute` on SenderReceiver
+9. Confirm the message was stored on-chain
