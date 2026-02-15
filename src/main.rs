@@ -108,59 +108,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Initialize a new chain deployment
-    Init {
-        #[arg(long)]
-        chain_name: String,
-        #[arg(long)]
-        axelar_id: String,
-        #[arg(long)]
-        chain_id: u64,
-        #[arg(long)]
-        rpc_url: String,
-        #[arg(long)]
-        token_symbol: String,
-        #[arg(long)]
-        decimals: u8,
-        #[arg(long)]
-        explorer_name: Option<String>,
-        #[arg(long)]
-        explorer_url: Option<String>,
-        #[arg(long)]
-        target_json: PathBuf,
-    },
+    /// Initialize a new chain deployment (reads all config from .env / environment)
+    Init,
 
     /// Show deployment progress
     Status {
         #[arg(long)]
         axelar_id: String,
-    },
-
-    /// Initialize Cosmos deployment config (mnemonic, env, gateway deployer)
-    CosmosInit {
-        #[arg(long)]
-        axelar_id: String,
-        /// BIP39 mnemonic for the Axelar deployer wallet
-        #[arg(long)]
-        mnemonic: String,
-        /// Deployment environment (devnet-amplifier, testnet, mainnet)
-        #[arg(long)]
-        env: String,
-        /// Salt for CosmWasm instantiation (e.g. "v1.0.11")
-        #[arg(long)]
-        salt: String,
-        /// BIP39 mnemonic for the prover admin wallet (for update_verifier_set)
-        #[arg(long)]
-        admin_mnemonic: Option<String>,
-        /// EVM private key for ConstAddressDeployer and Create3Deployer
-        #[arg(long)]
-        deployer_private_key: Option<String>,
-        /// EVM private key for Gateway, Operators, RegisterOperators, and ownership transfers
-        #[arg(long)]
-        gateway_deployer_private_key: Option<String>,
-        /// EVM private key for AxelarGasService
-        #[arg(long)]
-        gas_service_deployer_private_key: Option<String>,
     },
 
     /// Run the next pending deployment step
@@ -1074,20 +1028,39 @@ fn compute_create_address(sender: Address, nonce: u64) -> Address {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Load .env file if present (.env values override existing shell variables)
+    dotenvy::dotenv_override().ok();
+
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Init {
-            chain_name,
-            axelar_id,
-            chain_id,
-            rpc_url,
-            token_symbol,
-            decimals,
-            explorer_name,
-            explorer_url,
-            target_json,
-        } => {
+        Commands::Init => {
+            // Read required env vars
+            let require = |name: &str| -> Result<String> {
+                std::env::var(name).map_err(|_| eyre::eyre!("missing required env var: {name}"))
+            };
+
+            let axelar_id = require("CHAIN")?;
+            let chain_name = require("CHAIN_NAME")?;
+            let chain_id: u64 = require("CHAIN_ID")?.parse()
+                .map_err(|_| eyre::eyre!("CHAIN_ID must be a number"))?;
+            let rpc_url = require("RPC_URL")?;
+            let token_symbol = require("TOKEN_SYMBOL")?;
+            let decimals: u8 = require("DECIMALS")?.parse()
+                .map_err(|_| eyre::eyre!("DECIMALS must be a number"))?;
+            let target_json = PathBuf::from(require("TARGET_JSON")?);
+            let mnemonic = require("MNEMONIC")?;
+            let env = require("ENV")?;
+            let salt = require("SALT")?;
+
+            // Optional env vars
+            let explorer_name = std::env::var("EXPLORER_NAME").ok();
+            let explorer_url = std::env::var("EXPLORER_URL").ok();
+            let admin_mnemonic = std::env::var("MULTISIG_PROVER_MNEMONIC").ok();
+            let deployer_private_key = std::env::var("DEPLOYER_PRIVATE_KEY").ok();
+            let gateway_deployer_private_key = std::env::var("GATEWAY_DEPLOYER_PRIVATE_KEY").ok();
+            let gas_service_deployer_private_key = std::env::var("GAS_SERVICE_DEPLOYER_PRIVATE_KEY").ok();
+            // --- Chain config → testnet.json ---
             let mut chain_entry = json!({
                 "name": chain_name,
                 "axelarId": axelar_id,
@@ -1121,58 +1094,18 @@ async fn main() -> Result<()> {
             fs::write(&target_json, serde_json::to_string_pretty(&root)? + "\n")?;
             println!("added chain '{axelar_id}' to {}", target_json.display());
 
+            // --- State file ---
             let dir = data_dir()?;
             fs::create_dir_all(&dir)?;
-            let state = json!({
+            let mut state = json!({
                 "axelarId": axelar_id,
                 "rpcUrl": rpc_url,
                 "targetJson": target_json.to_string_lossy(),
                 "steps": default_steps(),
+                "mnemonic": mnemonic,
+                "env": env,
+                "cosmSalt": salt,
             });
-            let state_file = state_path(&axelar_id)?;
-            fs::write(&state_file, serde_json::to_string_pretty(&state)? + "\n")?;
-            println!("saved state to {}", state_file.display());
-        }
-
-        Commands::Status { axelar_id } => {
-            let state = read_state(&axelar_id)?;
-            let steps = state["steps"]
-                .as_array()
-                .ok_or_else(|| eyre::eyre!("no steps in state"))?;
-
-            let init_done = state.get("rpcUrl").is_some();
-            let cosmos_done = state.get("mnemonic").is_some() && state.get("env").is_some();
-            let init_marker = if init_done { "[x]" } else { "[ ]" };
-            let cosmos_marker = if cosmos_done { "[x]" } else { "[ ]" };
-
-            println!("deployment progress for '{axelar_id}':");
-            println!("  {init_marker} Init");
-            println!("  {cosmos_marker} CosmosInit");
-            for step in steps {
-                let name = step["name"].as_str().unwrap_or("?");
-                let kind = step["kind"].as_str().unwrap_or("?");
-                let status = step["status"].as_str().unwrap_or("?");
-                let marker = if status == "completed" { "[x]" } else { "[ ]" };
-                println!("  {marker} {name} ({kind})");
-            }
-
-            match next_pending_step(&state) {
-                Some((_, step)) => println!("\nnext: {}", step["name"].as_str().unwrap_or("?")),
-                None => println!("\nall steps completed!"),
-            }
-        }
-
-        Commands::CosmosInit {
-            axelar_id,
-            mnemonic,
-            env,
-            salt,
-            admin_mnemonic,
-            deployer_private_key,
-            gateway_deployer_private_key,
-            gas_service_deployer_private_key,
-        } => {
-            let mut state = read_state(&axelar_id)?;
 
             // Derive and display the Axelar address
             let (_, axelar_address) = derive_axelar_wallet(&mnemonic)?;
@@ -1207,18 +1140,12 @@ async fn main() -> Result<()> {
                 state["gasServiceDeployerPrivateKey"] = json!(pk);
             }
 
-            state["mnemonic"] = json!(mnemonic);
-            state["env"] = json!(env);
-            state["cosmSalt"] = json!(salt);
-
-            save_state(&axelar_id, &state)?;
-            println!("cosmos config saved for '{axelar_id}' (env={env})");
+            let state_file = state_path(&axelar_id)?;
+            fs::write(&state_file, serde_json::to_string_pretty(&state)? + "\n")?;
+            println!("saved state to {}", state_file.display());
+            println!("init complete for '{axelar_id}' (env={env})");
 
             // Query and display the deployer balance
-            let target_json: PathBuf = state["targetJson"]
-                .as_str()
-                .ok_or_else(|| eyre::eyre!("no targetJson in state"))?
-                .into();
             if target_json.exists() {
                 let (lcd, _, fee_denom, _) = read_axelar_config(&target_json)?;
                 let url = format!("{lcd}/cosmos/bank/v1beta1/balances/{axelar_address}");
@@ -1238,6 +1165,27 @@ async fn main() -> Result<()> {
                     }
                     Err(e) => println!("could not query balance: {e}"),
                 }
+            }
+        }
+
+        Commands::Status { axelar_id } => {
+            let state = read_state(&axelar_id)?;
+            let steps = state["steps"]
+                .as_array()
+                .ok_or_else(|| eyre::eyre!("no steps in state"))?;
+
+            println!("deployment progress for '{axelar_id}':");
+            for step in steps {
+                let name = step["name"].as_str().unwrap_or("?");
+                let kind = step["kind"].as_str().unwrap_or("?");
+                let status = step["status"].as_str().unwrap_or("?");
+                let marker = if status == "completed" { "[x]" } else { "[ ]" };
+                println!("  {marker} {name} ({kind})");
+            }
+
+            match next_pending_step(&state) {
+                Some((_, step)) => println!("\nnext: {}", step["name"].as_str().unwrap_or("?")),
+                None => println!("\nall steps completed!"),
             }
         }
 

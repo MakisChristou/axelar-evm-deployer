@@ -1,52 +1,45 @@
 ## How it works
 
-The deployer tracks progress in a state file (`~/.local/share/axelar-evm-deployer/<axelar-id>.json`). Each `cargo run -- deploy` invocation runs the **next pending step** and marks it completed. Artifact paths are built-in — every step just needs `--axelar-id` (and `--salt` for Create3Deployer). Use `status` to see where you are.
+The deployer tracks progress in a state file (`~/.local/share/axelar-evm-deployer/<axelar-id>.json`). Each `cargo run -- deploy` invocation runs the **next pending step** and marks it completed. Artifact paths and private keys are resolved automatically. Use `status` to see where you are.
 
-EVM private keys are stored during `cosmos-init` and auto-selected per step — no need to pass `--private-key` on each deploy.
+## Configuration
+
+Create a `.env` file (or export these variables). All config is read from the environment.
 
 ```bash
-export CHAIN=arc-11
-export SALT=v1.0.13
-export MNEMONIC="..."                          # axelar deployer (testnet: axelar1wxej3l9aczsns3harrtdzk7rct29jl47tvu8mp)
-export MULTISIG_PROVER_MNEMONIC="..."          # prover admin (testnet: axelar1w7y7v26rtnrj4vrx6q3qq4hfsmc68hhsxnadlf)
-export DEPLOYER_PRIVATE_KEY=0x...              # ConstAddressDeployer + Create3Deployer (testnet: 0x156372Cb2F8939d9705fdaa6C70e25825Ea9CAaF)
-export GATEWAY_DEPLOYER_PRIVATE_KEY=0x...      # Gateway + Operators + ownership transfers (testnet: 0x92ae7f0b761aC8CFAbe4B94D53d1CD343dF8E3C0)
-export GAS_SERVICE_DEPLOYER_PRIVATE_KEY=0x...  # AxelarGasService (testnet: 0x3b7E3351689b0fba2cE9f1F8d14Ae38e270d9eD4)
+# Keys
+CHAIN=arc-11
+SALT=v1.0.13
+MNEMONIC="..."                          # axelar deployer (testnet: axelar1wxej3l9aczsns3harrtdzk7rct29jl47tvu8mp)
+MULTISIG_PROVER_MNEMONIC="..."          # prover admin (testnet: axelar1w7y7v26rtnrj4vrx6q3qq4hfsmc68hhsxnadlf)
+DEPLOYER_PRIVATE_KEY=0x...              # ConstAddressDeployer + Create3Deployer (testnet: 0x156372Cb2F8939d9705fdaa6C70e25825Ea9CAaF)
+GATEWAY_DEPLOYER_PRIVATE_KEY=0x...      # Gateway + Operators + ownership transfers (testnet: 0x92ae7f0b761aC8CFAbe4B94D53d1CD343dF8E3C0)
+GAS_SERVICE_DEPLOYER_PRIVATE_KEY=0x...  # AxelarGasService (testnet: 0x3b7E3351689b0fba2cE9f1F8d14Ae38e270d9eD4)
+
+# Environment: devnet-amplifier, testnet, mainnet
+ENV=testnet
+
+# Chain config
+CHAIN_NAME="Arc Testnet"
+CHAIN_ID=5042002
+RPC_URL=https://rpc.testnet.arc.network
+TOKEN_SYMBOL=USDC
+DECIMALS=18
+EXPLORER_NAME="Arc Testnet Explorer"
+EXPLORER_URL="https://testnet.arcscan.app/"
+TARGET_JSON=../axelar-contract-deployments/axelar-chains-config/info/testnet.json
 ```
 
 ## Setup
 
 ```bash
-cargo run -- init \
-  --chain-name "Arc Testnet" \
-  --axelar-id $CHAIN \
-  --chain-id 5042002 \
-  --rpc-url https://rpc.testnet.arc.network \
-  --token-symbol USDC \
-  --decimals 18 \
-  --explorer-name "Arc Testnet Explorer" \
-  --explorer-url "https://testnet.arcscan.app/" \
-  --target-json ../axelar-contract-deployments/axelar-chains-config/info/testnet.json
-```
-
-```bash
-cargo run -- cosmos-init --axelar-id $CHAIN \
-  --mnemonic "$MNEMONIC" \
-  --admin-mnemonic "$MULTISIG_PROVER_MNEMONIC" \
-  --env testnet \
-  --salt $SALT \
-  --deployer-private-key $DEPLOYER_PRIVATE_KEY \
-  --gateway-deployer-private-key $GATEWAY_DEPLOYER_PRIVATE_KEY \
-  --gas-service-deployer-private-key $GAS_SERVICE_DEPLOYER_PRIVATE_KEY
-```
-
-```bash
+cargo run -- init
 cargo run -- status --axelar-id $CHAIN
 ```
 
 ## Steps
 
-Every step below is just `cargo run -- deploy --axelar-id $CHAIN` unless noted otherwise.
+Every step is just `cargo run -- deploy --axelar-id $CHAIN`.
 
 ### 1. ConstAddressDeployer
 
@@ -100,7 +93,7 @@ Funds both reward pools (VotingVerifier + Multisig) with 1000000uaxl each.
 
 ### 13. WaitForVerifierSet
 
-Prints infrastructure PR instructions, polls ServiceRegistry for registered verifiers, then calls `update_verifier_set` on MultisigProver using the admin mnemonic from `cosmos-init`.
+Prints infrastructure PR instructions, polls ServiceRegistry for registered verifiers, then calls `update_verifier_set` on MultisigProver using the admin mnemonic.
 
 > **ACTION REQUIRED:** Merge the infrastructure PR and wait for verifiers to register chain support before this step can complete.
 
