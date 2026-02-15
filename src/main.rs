@@ -298,6 +298,45 @@ fn get_salt_from_key(key: &str) -> FixedBytes<32> {
 
 // --- artifact helpers ---
 
+/// Derive the axelar-contract-deployments repo root from target_json path.
+/// target_json is like `.../axelar-contract-deployments/axelar-chains-config/info/testnet.json`
+fn deployments_root(target_json: &Path) -> Result<PathBuf> {
+    // Go up 3 levels: testnet.json -> info -> axelar-chains-config -> repo root
+    target_json
+        .parent().and_then(|p| p.parent()).and_then(|p| p.parent())
+        .map(|p| p.to_path_buf())
+        .ok_or_else(|| eyre::eyre!("cannot derive deployments root from {}", target_json.display()))
+}
+
+/// Known artifact paths relative to the axelar-contract-deployments repo root.
+/// Returns (implementation_artifact, Option<proxy_artifact>).
+fn artifact_paths_for_step(step_name: &str, root: &Path) -> Option<(String, Option<String>)> {
+    let r = |p: &str| root.join(p).to_string_lossy().into_owned();
+    match step_name {
+        "ConstAddressDeployer" => Some((
+            r("evm/legacy/ConstAddressDeployer.json"),
+            None,
+        )),
+        "Create3Deployer" => Some((
+            r("node_modules/@axelar-network/axelar-gmp-sdk-solidity/artifacts/contracts/deploy/Create3Deployer.sol/Create3Deployer.json"),
+            None,
+        )),
+        "AxelarGateway" => Some((
+            r("node_modules/@axelar-network/axelar-gmp-sdk-solidity/artifacts/contracts/gateway/AxelarAmplifierGateway.sol/AxelarAmplifierGateway.json"),
+            Some(r("node_modules/@axelar-network/axelar-gmp-sdk-solidity/artifacts/contracts/gateway/AxelarAmplifierGatewayProxy.sol/AxelarAmplifierGatewayProxy.json")),
+        )),
+        "Operators" => Some((
+            r("node_modules/@axelar-network/axelar-gmp-sdk-solidity/artifacts/contracts/utils/Operators.sol/Operators.json"),
+            None,
+        )),
+        "AxelarGasService" => Some((
+            r("node_modules/@axelar-network/axelar-cgp-solidity/artifacts/contracts/gas-service/AxelarGasService.sol/AxelarGasService.json"),
+            Some(r("node_modules/@axelar-network/axelar-cgp-solidity/artifacts/contracts/gas-service/AxelarGasServiceProxy.sol/AxelarGasServiceProxy.json")),
+        )),
+        _ => None,
+    }
+}
+
 fn read_artifact_bytecode(artifact_path: &str) -> Result<Vec<u8>> {
     let artifact: Value = serde_json::from_str(&fs::read_to_string(artifact_path)?)?;
     let bytecode_hex = artifact["bytecode"]
@@ -1247,6 +1286,17 @@ async fn main() -> Result<()> {
 
             println!("running step: {step_name} ({step_kind})");
 
+            // Resolve artifact paths: CLI flags override built-in defaults
+            let repo_root = deployments_root(&target_json)?;
+            let (resolved_artifact, resolved_proxy_artifact) = {
+                let defaults = artifact_paths_for_step(&step_name, &repo_root);
+                let art = artifact_path.clone()
+                    .or_else(|| defaults.as_ref().map(|(a, _)| a.clone()));
+                let proxy_art = proxy_artifact_path.clone()
+                    .or_else(|| defaults.and_then(|(_, p)| p));
+                (art, proxy_art)
+            };
+
             // Resolve EVM private key: --private-key flag > state key based on step
             let resolve_evm_key = |step_name: &str| -> Result<String> {
                 if let Some(ref pk) = private_key {
@@ -1270,7 +1320,7 @@ async fn main() -> Result<()> {
             match step_kind.as_str() {
                 "deploy-create" | "deploy-create2" => {
                     let pk = resolve_evm_key(&step_name)?;
-                    let ap = artifact_path
+                    let ap = resolved_artifact
                         .as_ref()
                         .ok_or_else(|| eyre::eyre!("--artifact-path required for deploy steps"))?;
 
@@ -1295,7 +1345,9 @@ async fn main() -> Result<()> {
                         // deploy-create2
                         let const_deployer_addr =
                             read_contract_address(&target_json, &axelar_id, "ConstAddressDeployer")?;
-                        let salt_string = salt.clone().unwrap_or_else(|| step_name.clone());
+                        let salt_string = salt.clone()
+                            .or_else(|| state["cosmSalt"].as_str().map(|s| s.to_string()))
+                            .unwrap_or_else(|| step_name.clone());
                         let salt_bytes = get_salt_from_key(&salt_string);
 
                         // For contracts with constructor args (e.g. Operators(address owner)),
@@ -1430,10 +1482,10 @@ async fn main() -> Result<()> {
 
                 "deploy-gateway" => {
                     let pk = resolve_evm_key(&step_name)?;
-                    let impl_artifact = artifact_path
+                    let impl_artifact = resolved_artifact
                         .as_ref()
                         .ok_or_else(|| eyre::eyre!("--artifact-path required (implementation artifact)"))?;
-                    let proxy_artifact = proxy_artifact_path
+                    let proxy_artifact = resolved_proxy_artifact
                         .as_ref()
                         .ok_or_else(|| eyre::eyre!("--proxy-artifact-path required (proxy artifact)"))?;
 
@@ -2360,10 +2412,10 @@ async fn main() -> Result<()> {
                     // Currently only AxelarGasService uses this step kind.
                     // Flow: deploy implementation (CREATE) → deploy proxy (CREATE) → proxy.init()
                     let pk = resolve_evm_key(&step_name)?;
-                    let impl_artifact = artifact_path
+                    let impl_artifact = resolved_artifact
                         .as_ref()
                         .ok_or_else(|| eyre::eyre!("--artifact-path required (implementation artifact)"))?;
-                    let proxy_artifact = proxy_artifact_path
+                    let proxy_artifact = resolved_proxy_artifact
                         .as_ref()
                         .ok_or_else(|| eyre::eyre!("--proxy-artifact-path required (proxy artifact)"))?;
 

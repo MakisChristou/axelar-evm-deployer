@@ -1,6 +1,6 @@
 ## How it works
 
-The deployer tracks progress in a state file (`~/.local/share/axelar-evm-deployer/<axelar-id>.json`). Each `cargo run -- deploy` invocation runs the **next pending step** and marks it completed. Steps that need extra arguments (artifact paths, salt) require them on the command line; steps that don't just need `--axelar-id`. Use `status` to see where you are.
+The deployer tracks progress in a state file (`~/.local/share/axelar-evm-deployer/<axelar-id>.json`). Each `cargo run -- deploy` invocation runs the **next pending step** and marks it completed. Artifact paths are built-in — every step just needs `--axelar-id` (and `--salt` for Create3Deployer). Use `status` to see where you are.
 
 EVM private keys are stored during `cosmos-init` and auto-selected per step — no need to pass `--private-key` on each deploy.
 
@@ -44,174 +44,90 @@ cargo run -- cosmos-init --axelar-id $CHAIN \
 cargo run -- status --axelar-id $CHAIN
 ```
 
-## 1. Deploy ConstAddressDeployer
+## Steps
 
-```bash
-cargo run -- deploy --axelar-id $CHAIN \
-  --artifact-path ../axelar-contract-deployments/evm/legacy/ConstAddressDeployer.json
-```
+Every step below is just `cargo run -- deploy --axelar-id $CHAIN` unless noted otherwise.
 
-## 2. Deploy Create3Deployer
+### 1. ConstAddressDeployer
 
-```bash
-cargo run -- deploy --axelar-id $CHAIN \
-  --artifact-path ../axelar-contract-deployments/node_modules/@axelar-network/axelar-gmp-sdk-solidity/artifacts/contracts/deploy/Create3Deployer.sol/Create3Deployer.json \
-  --salt $SALT
-```
+### 2. Create3Deployer
 
-## 3. PredictGatewayAddress
+### 3. PredictGatewayAddress
 
 Predicts EVM gateway proxy address using CREATE formula based on gateway deployer nonce.
 
-```bash
-cargo run -- deploy --axelar-id $CHAIN
-```
-
-## 4. AddCosmWasmConfig
+### 4. AddCosmWasmConfig
 
 Adds VotingVerifier and MultisigProver per-chain config entries to testnet.json.
 
-```bash
-cargo run -- deploy --axelar-id $CHAIN
-```
-
-## 5. InstantiateChainContracts
+### 5. InstantiateChainContracts
 
 Submits governance proposal to instantiate Gateway, VotingVerifier, and MultisigProver via the Coordinator.
 
-```bash
-cargo run -- deploy --axelar-id $CHAIN
-```
-
 > **ACTION REQUIRED:** Vote on the governance proposal after this step.
 
-## 6. WaitInstantiateProposal
+### 6. WaitInstantiateProposal
 
 Polls the governance proposal until it passes.
 
-```bash
-cargo run -- deploy --axelar-id $CHAIN
-```
-
-## 7. SaveDeployedContracts
+### 7. SaveDeployedContracts
 
 Queries the Coordinator for deployed contract addresses and saves them to testnet.json.
 
-```bash
-cargo run -- deploy --axelar-id $CHAIN
-```
-
-## 8. RegisterDeployment
+### 8. RegisterDeployment
 
 Submits governance proposal to register the deployment on the Coordinator.
 
-```bash
-cargo run -- deploy --axelar-id $CHAIN
-```
-
 > **ACTION REQUIRED:** Vote on the governance proposal after this step.
 
-## 9. WaitRegisterProposal
+### 9. WaitRegisterProposal
 
 Polls the governance proposal until it passes.
 
-```bash
-cargo run -- deploy --axelar-id $CHAIN
-```
-
-## 10. CreateRewardPools
+### 10. CreateRewardPools
 
 Submits governance proposal to create reward pools for VotingVerifier and Multisig.
 
-```bash
-cargo run -- deploy --axelar-id $CHAIN
-```
-
 > **ACTION REQUIRED:** Vote on the governance proposal after this step.
 
-## 11. WaitRewardPoolsProposal
+### 11. WaitRewardPoolsProposal
 
 Polls the governance proposal until it passes.
 
-```bash
-cargo run -- deploy --axelar-id $CHAIN
-```
-
-## 12. AddRewards
+### 12. AddRewards
 
 Funds both reward pools (VotingVerifier + Multisig) with 1000000uaxl each.
 
-```bash
-cargo run -- deploy --axelar-id $CHAIN
-```
+### 13. WaitForVerifierSet
 
-## 13. WaitForVerifierSet
-
-Prints infrastructure PR instructions, polls ServiceRegistry for registered verifiers (testnet requires 22), then calls `update_verifier_set` on MultisigProver using the admin mnemonic from `cosmos-init`.
-
-```bash
-cargo run -- deploy --axelar-id $CHAIN
-```
+Prints infrastructure PR instructions, polls ServiceRegistry for registered verifiers, then calls `update_verifier_set` on MultisigProver using the admin mnemonic from `cosmos-init`.
 
 > **ACTION REQUIRED:** Merge the infrastructure PR and wait for verifiers to register chain support before this step can complete.
 
-## 14. Deploy AxelarGateway
+### 14. AxelarGateway
 
 Deploys implementation + proxy. Fetches the initial verifier set from the Axelar chain LCD endpoint automatically. Reuses a previously deployed implementation on retry.
 
-```bash
-cargo run -- deploy --axelar-id $CHAIN \
-  --artifact-path ../axelar-contract-deployments/node_modules/@axelar-network/axelar-gmp-sdk-solidity/artifacts/contracts/gateway/AxelarAmplifierGateway.sol/AxelarAmplifierGateway.json \
-  --proxy-artifact-path ../axelar-contract-deployments/node_modules/@axelar-network/axelar-gmp-sdk-solidity/artifacts/contracts/gateway/AxelarAmplifierGatewayProxy.sol/AxelarAmplifierGatewayProxy.json
-```
+### 15. Operators
 
-## 15. Deploy Operators
+Deploys the Operators contract via CREATE2 (through ConstAddressDeployer). Constructor arg `owner` is set to the gateway deployer address.
 
-Deploys the Operators contract via CREATE2 (through ConstAddressDeployer). Constructor arg `owner` is set to the gateway deployer address. Salt defaults to `"Operators"`.
-
-```bash
-cargo run -- deploy --axelar-id $CHAIN \
-  --artifact-path ../axelar-contract-deployments/node_modules/@axelar-network/axelar-gmp-sdk-solidity/artifacts/contracts/utils/Operators.sol/Operators.json
-```
-
-## 16. RegisterOperators
+### 16. RegisterOperators
 
 Registers operator addresses on the Operators contract.
 
-```bash
-cargo run -- deploy --axelar-id $CHAIN
-```
-
-## 17. AxelarGasService
+### 17. AxelarGasService
 
 Deploys the AxelarGasService implementation + proxy using the legacy init-based proxy pattern. The gas collector is set to the Operators contract address. Three transactions: deploy implementation, deploy proxy, call `proxy.init()`.
 
-```bash
-cargo run -- deploy --axelar-id $CHAIN \
-  --artifact-path ../axelar-contract-deployments/node_modules/@axelar-network/axelar-cgp-solidity/artifacts/contracts/gas-service/AxelarGasService.sol/AxelarGasService.json \
-  --proxy-artifact-path ../axelar-contract-deployments/node_modules/@axelar-network/axelar-cgp-solidity/artifacts/contracts/gas-service/AxelarGasServiceProxy.sol/AxelarGasServiceProxy.json
-```
-
-## 18. TransferOperatorsOwnership
+### 18. TransferOperatorsOwnership
 
 Transfers Operators contract ownership to the governance address.
 
-```bash
-cargo run -- deploy --axelar-id $CHAIN
-```
-
-## 19. TransferGatewayOwnership
+### 19. TransferGatewayOwnership
 
 Transfers AxelarGateway contract ownership to the governance address.
 
-```bash
-cargo run -- deploy --axelar-id $CHAIN
-```
-
-## 20. TransferGasServiceOwnership
+### 20. TransferGasServiceOwnership
 
 Transfers AxelarGasService contract ownership to the governance address.
-
-```bash
-cargo run -- deploy --axelar-id $CHAIN
-```
