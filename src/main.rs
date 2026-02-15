@@ -40,6 +40,7 @@ sol! {
     #[sol(rpc)]
     contract Operators {
         function addOperator(address operator) external;
+        function isOperator(address account) external view returns (bool);
     }
 
     // WeightedSigners type for gateway setup params encoding
@@ -1336,13 +1337,23 @@ async fn main() -> Result<()> {
                         read_contract_address(&target_json, &axelar_id, "Operators")?;
                     let operators = Operators::new(operators_addr, &provider);
 
-                    // Testnet operator addresses
-                    let operator_addrs: Vec<Address> = vec![
-                        "0x8f23e84c49624a22e8c252684129910509ade4e2".parse()?,
-                        "0x3b401fa00191acb03c24ebb7754fe35d34dd1abd".parse()?,
-                    ];
+                    let env = state["env"].as_str().unwrap_or("testnet");
+                    let operator_addrs: Vec<Address> = match env {
+                        "testnet" => vec![
+                            "0x8f23e84c49624a22e8c252684129910509ade4e2".parse()?,
+                            "0x3b401fa00191acb03c24ebb7754fe35d34dd1abd".parse()?,
+                        ],
+                        _ => return Err(eyre::eyre!(
+                            "operator addresses not configured for env '{env}' — add them to the RegisterOperators handler"
+                        )),
+                    };
 
                     for op in &operator_addrs {
+                        let already = operators.isOperator(*op).call().await?;
+                        if already {
+                            println!("operator {op} already registered, skipping");
+                            continue;
+                        }
                         println!("adding operator: {op}");
                         let tx_hash = operators
                             .addOperator(*op)
