@@ -1,0 +1,81 @@
+use std::fs;
+use std::path::PathBuf;
+
+use eyre::Result;
+use serde_json::Value;
+
+use crate::cli::resolve_axelar_id;
+use crate::state::{read_state, state_path};
+
+pub fn run(axelar_id: Option<String>) -> Result<()> {
+    let axelar_id = resolve_axelar_id(axelar_id)?;
+    let state = read_state(&axelar_id)?;
+    let target_json: PathBuf = state["targetJson"]
+        .as_str()
+        .ok_or_else(|| eyre::eyre!("no targetJson in state"))?
+        .into();
+
+    // --- Delete state file ---
+    let sf = state_path(&axelar_id)?;
+    fs::remove_file(&sf)?;
+    println!("deleted {}", sf.display());
+
+    // --- Clean up target JSON ---
+    if !target_json.exists() {
+        println!(
+            "target json {} does not exist, skipping",
+            target_json.display()
+        );
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(&target_json)?;
+    let mut root: Value = serde_json::from_str(&content)?;
+
+    if let Some(chains) = root.get_mut("chains").and_then(|v| v.as_object_mut()) {
+        if chains.remove(&axelar_id).is_some() {
+            println!("removed chains.{axelar_id}");
+        }
+    }
+
+    if let Some(vv) = root
+        .pointer_mut("/axelar/contracts/VotingVerifier")
+        .and_then(|v| v.as_object_mut())
+    {
+        if vv.remove(&axelar_id).is_some() {
+            println!("removed axelar.contracts.VotingVerifier.{axelar_id}");
+        }
+    }
+
+    if let Some(mp) = root
+        .pointer_mut("/axelar/contracts/MultisigProver")
+        .and_then(|v| v.as_object_mut())
+    {
+        if mp.remove(&axelar_id).is_some() {
+            println!("removed axelar.contracts.MultisigProver.{axelar_id}");
+        }
+    }
+
+    if let Some(gw) = root
+        .pointer_mut("/axelar/contracts/Gateway")
+        .and_then(|v| v.as_object_mut())
+    {
+        if gw.remove(&axelar_id).is_some() {
+            println!("removed axelar.contracts.Gateway.{axelar_id}");
+        }
+    }
+
+    if let Some(deployments) = root
+        .pointer_mut("/axelar/contracts/Coordinator/deployments")
+        .and_then(|v| v.as_object_mut())
+    {
+        if deployments.remove(&axelar_id).is_some() {
+            println!("removed axelar.contracts.Coordinator.deployments.{axelar_id}");
+        }
+    }
+
+    fs::write(&target_json, serde_json::to_string_pretty(&root)? + "\n")?;
+    println!("cleaned up {}", target_json.display());
+
+    Ok(())
+}

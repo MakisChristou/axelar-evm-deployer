@@ -1,0 +1,50 @@
+use clap::{Parser, Subcommand};
+use eyre::Result;
+
+#[derive(Parser)]
+#[command(name = "axelar-evm-deployer")]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Commands,
+}
+
+#[derive(Subcommand)]
+pub enum Commands {
+    /// Initialize a new chain deployment (reads all config from .env / environment)
+    Init,
+
+    /// Show deployment progress
+    Status {
+        #[arg(long)]
+        axelar_id: Option<String>,
+    },
+
+    /// Run all pending deployment steps
+    Deploy {
+        #[arg(long)]
+        axelar_id: Option<String>,
+        /// Private key override (auto-resolved per step by default)
+        #[arg(long)]
+        private_key: Option<String>,
+        /// Path to implementation artifact JSON (auto-resolved by default)
+        #[arg(long)]
+        artifact_path: Option<String>,
+        /// Salt for create2 deployments (read from state by default)
+        #[arg(long)]
+        salt: Option<String>,
+        /// Path to proxy artifact JSON (auto-resolved by default)
+        #[arg(long)]
+        proxy_artifact_path: Option<String>,
+    },
+
+    /// Reset all steps to pending and remove all changes from target JSON
+    Reset {
+        #[arg(long)]
+        axelar_id: Option<String>,
+    },
+}
+
+pub fn resolve_axelar_id(opt: Option<String>) -> Result<String> {
+    opt.or_else(|| std::env::var("CHAIN").ok())
+        .ok_or_else(|| eyre::eyre!("--axelar-id not provided and CHAIN env var not set"))
+}

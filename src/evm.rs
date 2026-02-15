@@ -1,0 +1,215 @@
+use std::fs;
+
+use alloy::{
+    hex,
+    primitives::{Address, Bytes, FixedBytes, keccak256},
+    sol,
+    sol_types::{SolCall, SolValue},
+};
+use eyre::Result;
+use serde_json::Value;
+
+sol! {
+    #[sol(rpc)]
+    contract ConstAddressDeployer {
+        function deploy(bytes bytecode, bytes32 salt) external returns (address deployedAddress_);
+        function deployedAddress(bytes bytecode, address sender, bytes32 salt) external view returns (address deployedAddress_);
+    }
+
+    #[sol(rpc)]
+    contract Ownable {
+        function transferOwnership(address newOwner) external;
+        function owner() external view returns (address);
+    }
+
+    #[sol(rpc)]
+    contract Operators {
+        function addOperator(address operator) external;
+        function isOperator(address account) external view returns (bool);
+    }
+
+    /// Legacy init-based proxy (AxelarGasServiceProxy, AxelarDepositServiceProxy)
+    #[sol(rpc)]
+    contract LegacyProxy {
+        function init(address implementationAddress, address newOwner, bytes memory params) external;
+    }
+
+    // WeightedSigners type for gateway setup params encoding
+    struct WeightedSigner {
+        address signer;
+        uint128 weight;
+    }
+
+    struct WeightedSigners {
+        WeightedSigner[] signers;
+        uint128 threshold;
+        bytes32 nonce;
+    }
+
+    // Gateway setup params: abi.encode(address operator, WeightedSigners[] signers)
+    function setupParams(address operator, WeightedSigners[] signers);
+}
+
+/// Compute salt: keccak256(abi.encode(key)) — matches JS getSaltFromKey
+pub fn get_salt_from_key(key: &str) -> FixedBytes<32> {
+    let encoded = key.abi_encode();
+    keccak256(&encoded)
+}
+
+pub fn read_artifact_bytecode(artifact_path: &str) -> Result<Vec<u8>> {
+    let artifact: Value = serde_json::from_str(&fs::read_to_string(artifact_path)?)?;
+    let bytecode_hex = artifact["bytecode"]
+        .as_str()
+        .ok_or_else(|| eyre::eyre!("no bytecode field in artifact"))?;
+    Ok(hex::decode(bytecode_hex.strip_prefix("0x").unwrap_or(bytecode_hex))?)
+}
+
+/// Convert an ECDSA public key (compressed or uncompressed) to an EVM address.
+pub fn pubkey_to_address(pubkey_bytes: &[u8]) -> Result<Address> {
+    use alloy::signers::k256::PublicKey;
+    use alloy::signers::k256::elliptic_curve::sec1::ToEncodedPoint;
+
+    let pubkey = PublicKey::from_sec1_bytes(pubkey_bytes)
+        .map_err(|e| eyre::eyre!("invalid pubkey: {e}"))?;
+
+    // Get uncompressed SEC1 encoding (65 bytes: 0x04 || x || y)
+    let uncompressed = pubkey.to_encoded_point(false);
+
+    // EVM address = keccak256(x || y)[12..32]  (skip the 0x04 prefix)
+    let hash = keccak256(&uncompressed.as_bytes()[1..]);
+    Ok(Address::from_slice(&hash[12..]))
+}
+
+/// Encode gateway setup params: abi.encode(address operator, WeightedSigners[] signers)
+pub fn encode_gateway_setup_params(
+    operator: Address,
+    signers: &[(Address, u128)],
+    threshold: u128,
+    nonce: FixedBytes<32>,
+) -> Bytes {
+    let weighted_signers = vec![WeightedSigners {
+        signers: signers
+            .iter()
+            .map(|(addr, weight)| WeightedSigner {
+                signer: *addr,
+                weight: *weight,
+            })
+            .collect(),
+        threshold,
+        nonce,
+    }];
+
+    let encoded = setupParamsCall {
+        operator,
+        signers: weighted_signers,
+    }
+    .abi_encode();
+
+    // setupParamsCall encodes with the function selector (4 bytes) — we need just the params
+    Bytes::from(encoded[4..].to_vec())
+}
+
+/// Decode EVM revert data into a human-readable error name.
+pub fn decode_revert_data(hex_str: &str) -> String {
+    let hex_data = hex_str.strip_prefix("0x").unwrap_or(hex_str);
+    if hex_data.len() < 8 {
+        return format!("unknown revert data: 0x{hex_data}");
+    }
+    let selector = &hex_data[..8];
+    match selector {
+        "68155f9a" => "InvalidImplementation() — implementation has no code".into(),
+        "97905dfb" => "SetupFailed() — gateway setup() reverted".into(),
+        "49e27cff" => "InvalidOwner() — owner is zero address".into(),
+        "0dc149f0" => "AlreadyInitialized() — proxy already initialized".into(),
+        "30cd7471" => "NotOwner() — caller is not owner".into(),
+        "5e231fff" => "InvalidSigners() — signers array invalid".into(),
+        "aabd5a09" => "InvalidThreshold() — threshold out of range".into(),
+        "84677ce8" => "InvalidWeights() — signer weights invalid".into(),
+        "bf10dd3a" => "NotProxy() — must be called via proxy delegatecall".into(),
+        "d924e5f4" => "InvalidOwnerAddress()".into(),
+        "08c379a0" => {
+            if let Ok(bytes) = hex::decode(hex_data) {
+                if bytes.len() > 4 + 32 + 32 {
+                    let offset = 4 + 32;
+                    let len = u32::from_be_bytes(
+                        bytes[offset + 28..offset + 32].try_into().unwrap_or([0; 4]),
+                    ) as usize;
+                    let str_start = offset + 32;
+                    let str_end = (str_start + len).min(bytes.len());
+                    let msg = String::from_utf8_lossy(&bytes[str_start..str_end]);
+                    return format!("revert: \"{msg}\"");
+                }
+            }
+            format!("Error(string) — data: 0x{hex_data}")
+        }
+        _ => format!("unknown error selector 0x{selector} (data: 0x{hex_data})"),
+    }
+}
+
+/// Try to extract revert data hex from an alloy error's Debug representation.
+pub fn decode_evm_error(err: &dyn std::fmt::Debug) -> String {
+    let debug = format!("{err:?}");
+    for pattern in ["\"0x", "data: \"0x"] {
+        if let Some(pos) = debug.find(pattern) {
+            let start = debug[pos..].find("0x").map(|i| pos + i).unwrap_or(pos);
+            let hex_end = debug[start + 2..]
+                .find(|c: char| !c.is_ascii_hexdigit())
+                .map(|i| start + 2 + i)
+                .unwrap_or(debug.len());
+            let hex_data = &debug[start..hex_end];
+            if hex_data.len() >= 10 {
+                return decode_revert_data(hex_data);
+            }
+        }
+    }
+    format!("{debug}")
+}
+
+/// Compute CREATE address: keccak256(rlp([sender, nonce]))[12..]
+pub fn compute_create_address(sender: Address, nonce: u64) -> Address {
+    let mut stream = Vec::new();
+
+    let sender_bytes = sender.as_slice();
+    let mut items = Vec::new();
+
+    // RLP encode 20-byte address
+    items.push(0x94u8); // 0x80 + 20
+    items.extend_from_slice(sender_bytes);
+
+    // RLP encode nonce
+    if nonce == 0 {
+        items.push(0x80);
+    } else if nonce < 0x80 {
+        items.push(nonce as u8);
+    } else {
+        let nonce_bytes = {
+            let mut b = nonce.to_be_bytes().to_vec();
+            while b.first() == Some(&0) {
+                b.remove(0);
+            }
+            b
+        };
+        items.push(0x80 + nonce_bytes.len() as u8);
+        items.extend_from_slice(&nonce_bytes);
+    }
+
+    // List header
+    let len = items.len();
+    if len < 56 {
+        stream.push(0xc0 + len as u8);
+    } else {
+        let len_bytes = {
+            let mut b = len.to_be_bytes().to_vec();
+            while b.first() == Some(&0) {
+                b.remove(0);
+            }
+            b
+        };
+        stream.push(0xf7 + len_bytes.len() as u8);
+        stream.extend_from_slice(&len_bytes);
+    }
+    stream.extend_from_slice(&items);
+
+    let hash = keccak256(&stream);
+    Address::from_slice(&hash[12..])
+}
