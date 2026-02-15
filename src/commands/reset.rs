@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use crate::cli::resolve_axelar_id;
 use crate::state::{read_state, state_path};
+use crate::ui;
 
 pub fn run(axelar_id: Option<String>) -> Result<()> {
     let axelar_id = resolve_axelar_id(axelar_id)?;
@@ -18,14 +19,14 @@ pub fn run(axelar_id: Option<String>) -> Result<()> {
     // --- Delete state file ---
     let sf = state_path(&axelar_id)?;
     fs::remove_file(&sf)?;
-    println!("deleted {}", sf.display());
+    ui::success(&format!("deleted {}", sf.display()));
 
     // --- Clean up target JSON ---
     if !target_json.exists() {
-        println!(
+        ui::warn(&format!(
             "target json {} does not exist, skipping",
             target_json.display()
-        );
+        ));
         return Ok(());
     }
 
@@ -34,7 +35,7 @@ pub fn run(axelar_id: Option<String>) -> Result<()> {
 
     if let Some(chains) = root.get_mut("chains").and_then(|v| v.as_object_mut()) {
         if chains.remove(&axelar_id).is_some() {
-            println!("removed chains.{axelar_id}");
+            ui::info(&format!("removed chains.{axelar_id}"));
         }
     }
 
@@ -43,7 +44,7 @@ pub fn run(axelar_id: Option<String>) -> Result<()> {
         .and_then(|v| v.as_object_mut())
     {
         if vv.remove(&axelar_id).is_some() {
-            println!("removed axelar.contracts.VotingVerifier.{axelar_id}");
+            ui::info(&format!("removed VotingVerifier.{axelar_id}"));
         }
     }
 
@@ -52,7 +53,7 @@ pub fn run(axelar_id: Option<String>) -> Result<()> {
         .and_then(|v| v.as_object_mut())
     {
         if mp.remove(&axelar_id).is_some() {
-            println!("removed axelar.contracts.MultisigProver.{axelar_id}");
+            ui::info(&format!("removed MultisigProver.{axelar_id}"));
         }
     }
 
@@ -61,7 +62,7 @@ pub fn run(axelar_id: Option<String>) -> Result<()> {
         .and_then(|v| v.as_object_mut())
     {
         if gw.remove(&axelar_id).is_some() {
-            println!("removed axelar.contracts.Gateway.{axelar_id}");
+            ui::info(&format!("removed Gateway.{axelar_id}"));
         }
     }
 
@@ -70,12 +71,12 @@ pub fn run(axelar_id: Option<String>) -> Result<()> {
         .and_then(|v| v.as_object_mut())
     {
         if deployments.remove(&axelar_id).is_some() {
-            println!("removed axelar.contracts.Coordinator.deployments.{axelar_id}");
+            ui::info(&format!("removed Coordinator.deployments.{axelar_id}"));
         }
     }
 
     fs::write(&target_json, serde_json::to_string_pretty(&root)? + "\n")?;
-    println!("cleaned up {}", target_json.display());
+    ui::success(&format!("cleaned up {}", target_json.display()));
 
     Ok(())
 }

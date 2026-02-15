@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::time::Instant;
 
 use eyre::Result;
 use serde_json::{Value, json};
@@ -6,6 +7,7 @@ use serde_json::{Value, json};
 use crate::cli::resolve_axelar_id;
 use crate::state::{mark_step_completed, migrate_steps, next_pending_step, read_state, save_state};
 use crate::steps;
+use crate::ui;
 use crate::utils::{artifact_paths_for_step, deployments_root};
 
 pub struct DeployContext {
@@ -32,19 +34,19 @@ pub async fn run(
     if state.get("itsDeployerPrivateKey").and_then(|v| v.as_str()).is_none() {
         if let Ok(pk) = std::env::var("ITS_DEPLOYER_PRIVATE_KEY") {
             state["itsDeployerPrivateKey"] = json!(pk);
-            println!("loaded ITS_DEPLOYER_PRIVATE_KEY from env");
+            ui::info("loaded ITS_DEPLOYER_PRIVATE_KEY from env");
         }
     }
     if state.get("itsSalt").and_then(|v| v.as_str()).is_none() {
         if let Ok(s) = std::env::var("ITS_SALT") {
             state["itsSalt"] = json!(s);
-            println!("loaded ITS_SALT from env: {s}");
+            ui::info(&format!("loaded ITS_SALT from env: {s}"));
         }
     }
     if state.get("itsProxySalt").and_then(|v| v.as_str()).is_none() {
         if let Ok(s) = std::env::var("ITS_PROXY_SALT") {
             state["itsProxySalt"] = json!(s);
-            println!("loaded ITS_PROXY_SALT from env: {s}");
+            ui::info(&format!("loaded ITS_PROXY_SALT from env: {s}"));
         }
     }
 
@@ -60,6 +62,18 @@ pub async fn run(
             .ok_or_else(|| eyre::eyre!("no targetJson in state"))?,
     );
 
+    let env = state["env"].as_str().unwrap_or("?");
+    let total_steps = state["steps"]
+        .as_array()
+        .map(|a| a.len())
+        .unwrap_or(0);
+    let deploy_start = Instant::now();
+
+    ui::section(&format!("Deploy {axelar_id}"));
+    ui::kv("environment", env);
+    ui::kv("rpc", &rpc_url);
+    ui::kv("steps", &total_steps.to_string());
+
     let mut ctx = DeployContext {
         axelar_id,
         state,
@@ -71,15 +85,16 @@ pub async fn run(
         let (step_idx, step) = match next_pending_step(&ctx.state) {
             Some(s) => s,
             None => {
-                print_completion_message(&ctx.axelar_id);
+                print_completion_message(&ctx.axelar_id, deploy_start);
                 break;
             }
         };
 
         let step_name = step["name"].as_str().unwrap_or("?").to_string();
         let step_kind = step["kind"].as_str().unwrap_or("?").to_string();
+        let step_start = Instant::now();
 
-        println!("running step: {step_name} ({step_kind})");
+        ui::step_header(step_idx + 1, total_steps, &step_name);
 
         // Resolve artifact paths: CLI flags override built-in defaults
         let repo_root = deployments_root(&ctx.target_json)?;
@@ -214,28 +229,20 @@ pub async fn run(
 
         mark_step_completed(&mut ctx.state, step_idx);
         save_state(&ctx.axelar_id, &ctx.state)?;
-        println!("step '{step_name}' completed\n");
+        ui::success(&format!("{step_name} completed ({})", ui::format_elapsed(step_start)));
     }
 
     Ok(())
 }
 
-fn print_completion_message(axelar_id: &str) {
-    println!("All steps completed! {axelar_id} EVM deployment is fully done.\n");
-    println!("To test GMP (EVM -> {axelar_id}):\n");
-    println!("  1. Send a GMP call from another chain:");
-    println!("     ts-node evm/gateway.js -n [source-chain] --action callContract \\");
-    println!("       --destinationChain {axelar_id} \\");
-    println!("       --destination 0xba76c6980428A0b10CFC5d8ccb61949677A61233 --payload 0x1234\n");
-    println!("  2. Route via Amplifier:");
-    println!("     https://docs.axelar.dev/dev/amplifier/chain-integration/relay-messages\n");
-    println!("  3. Submit proof:");
-    println!("     ts-node evm/gateway.js -n {axelar_id} --action submitProof \\");
-    println!("       --multisigSessionId [session-id]\n");
-    println!("  4. Verify approval:");
-    println!("     ts-node evm/gateway.js -n {axelar_id} --action isContractCallApproved \\");
-    println!(
-        "       --commandID [id] --sourceChain [chain] --sourceAddress [addr] \\"
-    );
-    println!("       --destination [addr] --payloadHash [hash]");
+fn print_completion_message(axelar_id: &str, deploy_start: Instant) {
+    ui::section("Deployment Complete");
+    ui::success(&format!(
+        "All steps completed for {axelar_id} ({})",
+        ui::format_elapsed(deploy_start)
+    ));
+    println!();
+    ui::info(&format!(
+        "Run an end-to-end GMP test: cargo run -- test gmp --axelar-id {axelar_id}"
+    ));
 }

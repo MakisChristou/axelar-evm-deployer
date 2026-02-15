@@ -4,6 +4,7 @@ use eyre::Result;
 use serde_json::{Value, json};
 
 use crate::commands::deploy::DeployContext;
+use crate::ui;
 
 pub fn run(ctx: &DeployContext) -> Result<()> {
     let predicted_addr = ctx.state["predictedGatewayAddress"]
@@ -76,7 +77,7 @@ pub fn run(ctx: &DeployContext) -> Result<()> {
         .as_object_mut()
         .ok_or_else(|| eyre::eyre!("VotingVerifier is not an object"))?;
     vv.insert(chain_axelar_id.clone(), voting_verifier_config);
-    println!("added VotingVerifier.{chain_axelar_id} config");
+    ui::success(&format!("added VotingVerifier.{chain_axelar_id} config"));
 
     // Add MultisigProver chain config
     let multisig_prover_config = json!({
@@ -95,13 +96,13 @@ pub fn run(ctx: &DeployContext) -> Result<()> {
         .as_object_mut()
         .ok_or_else(|| eyre::eyre!("MultisigProver is not an object"))?;
     mp.insert(chain_axelar_id.clone(), multisig_prover_config);
-    println!("added MultisigProver.{chain_axelar_id} config");
+    ui::success(&format!("added MultisigProver.{chain_axelar_id} config"));
 
     fs::write(
         &ctx.target_json,
         serde_json::to_string_pretty(&root)? + "\n",
     )?;
-    println!("updated {}", ctx.target_json.display());
+    ui::success(&format!("updated {}", ctx.target_json.display()));
 
     Ok(())
 }

@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use crate::commands::deploy::DeployContext;
 use crate::evm::{ConstAddressDeployer, Create3Deployer, get_salt_from_key, read_artifact_bytecode};
 use crate::state::save_state;
+use crate::ui;
 use crate::utils::{deployments_root, read_contract_address, update_target_json};
 
 /// Deploy all ITS contracts (9 total) in a single step.
@@ -33,8 +34,8 @@ pub async fn run(
     let current_deployer = format!("{deployer_addr}");
     if let Some(ref prev) = saved_deployer {
         if prev != &current_deployer {
-            println!("WARNING: ITS deployer changed from {prev} to {current_deployer}");
-            println!("  clearing stale helper addresses from step state...");
+            ui::warn(&format!("ITS deployer changed from {prev} to {current_deployer}"));
+            ui::info("clearing stale helper addresses from step state...");
             let stale_keys = [
                 "TokenManagerDeployerAddress", "InterchainTokenAddress",
                 "InterchainTokenDeployerAddress", "TokenManagerAddress",
@@ -108,7 +109,7 @@ pub async fn run(
     let proxy_salt = get_salt_from_key(&format!("ITS {its_proxy_salt}"));
     let factory_salt = get_salt_from_key(&format!("ITS Factory {its_proxy_salt}"));
 
-    println!("ITS salt: 'ITS {its_salt}', proxy salt: 'ITS {its_proxy_salt}'");
+    ui::kv("ITS salt", &format!("'ITS {its_salt}', proxy salt: 'ITS {its_proxy_salt}'"));
 
     // --- Resolve artifact paths ---
     let repo_root = deployments_root(&ctx.target_json)?;
@@ -126,14 +127,14 @@ pub async fn run(
         .deployedAddress(Bytes::new(), deployer_addr, factory_salt)
         .call()
         .await?;
-    println!("predicted ITS proxy: {its_proxy_addr}");
-    println!("predicted Factory proxy: {factory_proxy_addr}");
+    ui::address("predicted ITS proxy", &format!("{its_proxy_addr}"));
+    ui::address("predicted Factory proxy", &format!("{factory_proxy_addr}"));
 
     let const_deployer = ConstAddressDeployer::new(const_deployer_addr, &provider);
 
     // ========= 1. Deploy helper contracts via CREATE2 =========
 
-    println!("\n--- deploying ITS helper contracts ---");
+    ui::section("deploying ITS helper contracts");
 
     let tmdeployer_bytecode = read_artifact_bytecode(
         &artifact("utils/TokenManagerDeployer.sol/TokenManagerDeployer.json"),
@@ -182,7 +183,7 @@ pub async fn run(
 
     // ========= 2. Deploy ITS Implementation via CREATE2 =========
 
-    println!("\n--- deploying InterchainTokenService implementation ---");
+    ui::section("deploying InterchainTokenService implementation");
 
     let its_impl_bytecode = read_artifact_bytecode(
         &artifact("InterchainTokenService.sol/InterchainTokenService.json"),
@@ -209,7 +210,7 @@ pub async fn run(
 
     // ========= 3. Deploy ITS Proxy via CREATE3 =========
 
-    println!("\n--- deploying InterchainTokenService proxy ---");
+    ui::section("deploying InterchainTokenService proxy");
 
     let proxy_bytecode = read_artifact_bytecode(
         &artifact("proxies/InterchainProxy.sol/InterchainProxy.json"),
@@ -231,7 +232,7 @@ pub async fn run(
 
     // ========= 4. Deploy Factory Implementation via CREATE2 =========
 
-    println!("\n--- deploying InterchainTokenFactory implementation ---");
+    ui::section("deploying InterchainTokenFactory implementation");
 
     let factory_impl_bytecode = read_artifact_bytecode(
         &artifact("InterchainTokenFactory.sol/InterchainTokenFactory.json"),
@@ -245,7 +246,7 @@ pub async fn run(
 
     // ========= 5. Deploy Factory Proxy via CREATE3 =========
 
-    println!("\n--- deploying InterchainTokenFactory proxy ---");
+    ui::section("deploying InterchainTokenFactory proxy");
 
     let factory_proxy_constructor_args =
         (factory_impl_addr, deployer_addr, Bytes::new()).abi_encode_params();
@@ -259,7 +260,7 @@ pub async fn run(
 
     // ========= 6. Write to target JSON =========
 
-    println!("\n--- saving ITS contract data to target JSON ---");
+    ui::section("saving ITS contract data to target JSON");
 
     let its_bytecode_raw = read_artifact_bytecode(
         &artifact("InterchainTokenService.sol/InterchainTokenService.json"),
@@ -302,9 +303,9 @@ pub async fn run(
         factory_data,
     )?;
 
-    println!("ITS deployment complete!");
-    println!("  InterchainTokenService: {its_proxy_addr}");
-    println!("  InterchainTokenFactory: {factory_proxy_addr}");
+    ui::success("ITS deployment complete!");
+    ui::address("InterchainTokenService", &format!("{its_proxy_addr}"));
+    ui::address("InterchainTokenFactory", &format!("{factory_proxy_addr}"));
 
     Ok(())
 }
@@ -338,18 +339,18 @@ async fn deploy_via_create2<P: Provider>(
     if let Some(addr_str) = step.get(&saved_key).and_then(|v| v.as_str()) {
         let saved: Address = addr_str.parse()?;
         if saved != predicted {
-            println!("  {name}: stale address {saved} in step state (predicted {predicted}), ignoring");
+            ui::warn(&format!("{name}: stale address {saved} in step state (predicted {predicted}), ignoring"));
         }
     }
 
     // Check if already deployed at the correct predicted address
     let existing_code = provider.get_code_at(predicted).await?;
     if !existing_code.is_empty() {
-        println!("  {name}: already deployed at {predicted}");
+        ui::info(&format!("{name}: already deployed at {predicted}"));
         return Ok(predicted);
     }
 
-    println!("  {name}: deploying via CREATE2...");
+    ui::info(&format!("{name}: deploying via CREATE2..."));
     let pending = const_deployer
         .deploy_call(deploy_bytes, salt)
         .send()
@@ -365,14 +366,15 @@ async fn deploy_via_create2<P: Provider>(
             }
         })?;
     let tx_hash = *pending.tx_hash();
-    println!("  {name}: tx {tx_hash} (waiting for confirmation...)");
+    ui::tx_hash(&format!("{name}: tx"), &format!("{tx_hash}"));
+    ui::info("waiting for confirmation...");
     let receipt = tokio::time::timeout(
         std::time::Duration::from_secs(120),
         pending.get_receipt(),
     )
     .await
     .map_err(|_| eyre::eyre!("{name}: tx {tx_hash} timed out after 120s — check explorer and re-run"))??;
-    println!("  {name}: confirmed in block {} -> {predicted}", receipt.block_number.unwrap_or(0));
+    ui::success(&format!("{name}: confirmed in block {} -> {predicted}", receipt.block_number.unwrap_or(0)));
     Ok(predicted)
 }
 
@@ -389,14 +391,14 @@ async fn deploy_via_create3<P: Provider>(
 ) -> Result<Address> {
     let existing_code = provider.get_code_at(predicted).await?;
     if !existing_code.is_empty() {
-        println!("  {name}: already deployed at {predicted}");
+        ui::info(&format!("{name}: already deployed at {predicted}"));
         return Ok(predicted);
     }
 
     let mut deploy_code = proxy_bytecode;
     deploy_code.extend_from_slice(&constructor_args);
 
-    println!("  {name}: deploying via CREATE3...");
+    ui::info(&format!("{name}: deploying via CREATE3..."));
     let pending = create3
         .deploy_call(Bytes::from(deploy_code), salt)
         .send()
@@ -410,14 +412,15 @@ async fn deploy_via_create3<P: Provider>(
             }
         })?;
     let tx_hash = *pending.tx_hash();
-    println!("  {name}: tx {tx_hash} (waiting for confirmation...)");
+    ui::tx_hash(&format!("{name}: tx"), &format!("{tx_hash}"));
+    ui::info("waiting for confirmation...");
     let receipt = tokio::time::timeout(
         std::time::Duration::from_secs(120),
         pending.get_receipt(),
     )
     .await
     .map_err(|_| eyre::eyre!("{name}: tx {tx_hash} timed out after 120s — check explorer and re-run"))??;
-    println!("  {name}: confirmed in block {} -> {predicted}", receipt.block_number.unwrap_or(0));
+    ui::success(&format!("{name}: confirmed in block {} -> {predicted}", receipt.block_number.unwrap_or(0)));
     Ok(predicted)
 }
 

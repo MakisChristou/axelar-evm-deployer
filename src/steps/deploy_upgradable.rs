@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use crate::commands::deploy::DeployContext;
 use crate::evm::{LegacyProxy, read_artifact_bytecode};
 use crate::state::save_state;
+use crate::ui;
 use crate::utils::{read_contract_address, update_target_json};
 
 pub async fn run(
@@ -31,7 +32,7 @@ pub async fn run(
 
     // Read the gas collector address (= Operators contract)
     let gas_collector = read_contract_address(&ctx.target_json, &ctx.axelar_id, "Operators")?;
-    println!("gas collector (Operators): {gas_collector}");
+    ui::address("gas collector (Operators)", &format!("{gas_collector}"));
 
     // --- Tx 1: Deploy implementation (skip if already deployed) ---
     let impl_addr =
@@ -43,10 +44,10 @@ pub async fn run(
                     "saved implementation {addr} has no code on-chain"
                 ));
             }
-            println!("reusing previously deployed implementation: {addr}");
+            ui::info(&format!("reusing previously deployed implementation: {addr}"));
             addr
         } else {
-            println!("deploying AxelarGasService implementation...");
+            ui::info("deploying AxelarGasService implementation...");
             let impl_bytecode = read_artifact_bytecode(impl_artifact)?;
             let mut impl_deploy_code = impl_bytecode.clone();
             impl_deploy_code.extend_from_slice(&gas_collector.abi_encode());
@@ -54,7 +55,7 @@ pub async fn run(
             let tx = TransactionRequest::default()
                 .with_deploy_code(Bytes::from(impl_deploy_code));
             let receipt = provider.send_transaction(tx).await?.get_receipt().await?;
-            println!("  implementation tx hash: {}", receipt.transaction_hash);
+            ui::tx_hash("implementation tx hash", &format!("{}", receipt.transaction_hash));
 
             if !receipt.status() {
                 return Err(eyre::eyre!(
@@ -66,7 +67,7 @@ pub async fn run(
             let addr = receipt
                 .contract_address
                 .ok_or_else(|| eyre::eyre!("no contract address in implementation receipt"))?;
-            println!("  implementation deployed at: {addr}");
+            ui::address("implementation deployed at", &format!("{addr}"));
 
             // Save to state so retries skip re-deployment
             if let Some(s) = ctx.state["steps"]
@@ -86,16 +87,16 @@ pub async fn run(
         if code.is_empty() {
             return Err(eyre::eyre!("saved proxy {addr} has no code on-chain"));
         }
-        println!("reusing previously deployed proxy: {addr}");
+        ui::info(&format!("reusing previously deployed proxy: {addr}"));
         addr
     } else {
-        println!("deploying AxelarGasServiceProxy...");
+        ui::info("deploying AxelarGasServiceProxy...");
         let proxy_bytecode = read_artifact_bytecode(proxy_artifact)?;
 
         let tx =
             TransactionRequest::default().with_deploy_code(Bytes::from(proxy_bytecode));
         let receipt = provider.send_transaction(tx).await?.get_receipt().await?;
-        println!("  proxy tx hash: {}", receipt.transaction_hash);
+        ui::tx_hash("proxy tx hash", &format!("{}", receipt.transaction_hash));
 
         if !receipt.status() {
             return Err(eyre::eyre!(
@@ -107,7 +108,7 @@ pub async fn run(
         let addr = receipt
             .contract_address
             .ok_or_else(|| eyre::eyre!("no contract address in proxy receipt"))?;
-        println!("  proxy deployed at: {addr}");
+        ui::address("proxy deployed at", &format!("{addr}"));
 
         // Save to state so retries skip re-deployment
         if let Some(s) = ctx.state["steps"]
@@ -129,14 +130,14 @@ pub async fn run(
 
     if impl_slot != U256::ZERO {
         let stored_impl = alloy::primitives::Address::from_word(impl_slot.into());
-        println!("proxy already initialized with implementation: {stored_impl}");
+        ui::info(&format!("proxy already initialized with implementation: {stored_impl}"));
     } else {
-        println!("calling proxy.init({impl_addr}, {deployer_addr}, 0x)...");
+        ui::info(&format!("calling proxy.init({impl_addr}, {deployer_addr}, 0x)..."));
         let proxy = LegacyProxy::new(proxy_addr, &provider);
         let init_tx = proxy.init(impl_addr, deployer_addr, Bytes::new());
 
         let receipt = init_tx.send().await?.get_receipt().await?;
-        println!("  init tx hash: {}", receipt.transaction_hash);
+        ui::tx_hash("init tx hash", &format!("{}", receipt.transaction_hash));
 
         if !receipt.status() {
             return Err(eyre::eyre!(
@@ -144,7 +145,7 @@ pub async fn run(
                 receipt.transaction_hash
             ));
         }
-        println!("  proxy initialized successfully");
+        ui::success("proxy initialized successfully");
     }
 
     // --- Write to target JSON ---

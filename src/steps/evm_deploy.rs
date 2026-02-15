@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 
 use crate::commands::deploy::DeployContext;
 use crate::evm::{ConstAddressDeployer, get_salt_from_key, read_artifact_bytecode};
+use crate::ui;
 use crate::utils::{read_contract_address, update_target_json};
 
 pub async fn run(
@@ -33,7 +34,7 @@ pub async fn run(
         let tx = TransactionRequest::default()
             .with_deploy_code(Bytes::from(bytecode_raw.clone()));
         let receipt = provider.send_transaction(tx).await?.get_receipt().await?;
-        println!("tx hash: {}", receipt.transaction_hash);
+        ui::tx_hash("tx hash", &format!("{}", receipt.transaction_hash));
         let addr = receipt
             .contract_address
             .ok_or_else(|| eyre::eyre!("no contract address in receipt"))?;
@@ -67,20 +68,21 @@ pub async fn run(
             .deployedAddress(deploy_bytes.clone(), deployer_addr, salt_bytes)
             .call()
             .await?;
-        println!("predicted address: {addr}");
+        ui::address("predicted address", &format!("{addr}"));
 
         let pending = const_deployer
             .deploy_call(deploy_bytes, salt_bytes)
             .send()
             .await?;
         let tx_hash = *pending.tx_hash();
-        println!("tx submitted: {tx_hash} (waiting for confirmation...)");
+        ui::tx_hash("tx submitted", &format!("{tx_hash}"));
+        ui::info("waiting for confirmation...");
         pending.get_receipt().await?;
 
         (addr, "create2", Some(salt_string))
     };
 
-    println!("deployed at: {addr}");
+    ui::address("deployed at", &format!("{addr}"));
 
     let predeploy_codehash = keccak256(&bytecode_raw);
     let deployed_code = provider.get_code_at(addr).await?;

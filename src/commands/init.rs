@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 
 use crate::cosmos::{derive_axelar_wallet, read_axelar_config};
 use crate::state::{data_dir, default_steps, save_state, state_path};
+use crate::ui;
 
 pub async fn run() -> Result<()> {
     let require = |name: &str| -> Result<String> {
@@ -74,7 +75,7 @@ pub async fn run() -> Result<()> {
 
     chains.insert(axelar_id.clone(), chain_entry);
     fs::write(&target_json, serde_json::to_string_pretty(&root)? + "\n")?;
-    println!("added chain '{axelar_id}' to {}", target_json.display());
+    ui::success(&format!("added chain '{axelar_id}' to {}", target_json.display()));
 
     // --- State file ---
     let dir = data_dir()?;
@@ -89,12 +90,14 @@ pub async fn run() -> Result<()> {
         "cosmSalt": salt,
     });
 
+    ui::section("Deployer Addresses");
+
     let (_, axelar_address) = derive_axelar_wallet(&mnemonic)?;
-    println!("axelar deployer address: {axelar_address}");
+    ui::address("axelar deployer", &axelar_address);
 
     if let Some(ref admin_mn) = admin_mnemonic {
         let (_, admin_address) = derive_axelar_wallet(admin_mn)?;
-        println!("prover admin address: {admin_address}");
+        ui::address("prover admin", &admin_address);
         state["adminMnemonic"] = json!(admin_mn);
     }
 
@@ -102,7 +105,7 @@ pub async fn run() -> Result<()> {
         let signer: PrivateKeySigner = pk
             .parse()
             .map_err(|e| eyre::eyre!("invalid deployer private key: {e}"))?;
-        println!("deployer address: {}", signer.address());
+        ui::address("deployer", &format!("{}", signer.address()));
         state["deployerPrivateKey"] = json!(pk);
     }
     if let Some(ref pk) = gateway_deployer_private_key {
@@ -110,7 +113,7 @@ pub async fn run() -> Result<()> {
             .parse()
             .map_err(|e| eyre::eyre!("invalid gateway deployer private key: {e}"))?;
         let gw_addr = signer.address();
-        println!("gateway deployer address: {gw_addr}");
+        ui::address("gateway deployer", &format!("{gw_addr}"));
         state["gatewayDeployerPrivateKey"] = json!(pk);
         state["gatewayDeployer"] = json!(format!("{gw_addr}"));
     }
@@ -118,29 +121,30 @@ pub async fn run() -> Result<()> {
         let signer: PrivateKeySigner = pk
             .parse()
             .map_err(|e| eyre::eyre!("invalid gas service deployer private key: {e}"))?;
-        println!("gas service deployer address: {}", signer.address());
+        ui::address("gas service deployer", &format!("{}", signer.address()));
         state["gasServiceDeployerPrivateKey"] = json!(pk);
     }
     if let Some(ref pk) = its_deployer_private_key {
         let signer: PrivateKeySigner = pk
             .parse()
             .map_err(|e| eyre::eyre!("invalid ITS deployer private key: {e}"))?;
-        println!("ITS deployer address: {}", signer.address());
+        ui::address("ITS deployer", &format!("{}", signer.address()));
         state["itsDeployerPrivateKey"] = json!(pk);
     }
     if let Some(ref s) = its_salt {
         state["itsSalt"] = json!(s);
-        println!("ITS salt: {s}");
+        ui::kv("ITS salt", s);
     }
     if let Some(ref s) = its_proxy_salt {
         state["itsProxySalt"] = json!(s);
-        println!("ITS proxy salt: {s}");
+        ui::kv("ITS proxy salt", s);
     }
 
+    ui::section("State");
     let state_file = state_path(&axelar_id)?;
     save_state(&axelar_id, &state)?;
-    println!("saved state to {}", state_file.display());
-    println!("init complete for '{axelar_id}' (env={env})");
+    ui::kv("state file", &state_file.display().to_string());
+    ui::success(&format!("init complete for '{axelar_id}' (env={env})"));
 
     // Query and display the deployer balance
     if target_json.exists() {
@@ -157,10 +161,10 @@ pub async fn run() -> Result<()> {
                         .unwrap_or("0");
                     let display_denom = fee_denom.strip_prefix('u').unwrap_or(&fee_denom);
                     let bal_major: f64 = bal.parse::<f64>().unwrap_or(0.0) / 1_000_000.0;
-                    println!("balance: {bal_major:.6} {display_denom}");
+                    ui::kv("balance", &format!("{bal_major:.6} {display_denom}"));
                 }
             }
-            Err(e) => println!("could not query balance: {e}"),
+            Err(e) => ui::warn(&format!("could not query balance: {e}")),
         }
     }
 

@@ -12,6 +12,7 @@ use crate::cosmos::{
     read_axelar_contract_field, sign_and_broadcast_cosmos_tx,
 };
 use crate::evm::get_salt_from_key;
+use crate::ui;
 use crate::utils::compute_domain_separator;
 
 pub async fn run(
@@ -103,7 +104,7 @@ async fn run_instantiate(
     env: &str,
     proposal_key: &str,
 ) -> Result<()> {
-    println!("instantiating chain contracts for {chain_axelar_id}...");
+    ui::info(&format!("instantiating chain contracts for {chain_axelar_id}..."));
 
     let coordinator_addr =
         read_axelar_contract_field(&ctx.target_json, "/axelar/contracts/Coordinator/address")?;
@@ -118,7 +119,7 @@ async fn run_instantiate(
     let governance_address =
         read_axelar_contract_field(&ctx.target_json, "/axelar/governanceAddress")?;
 
-    println!("  fetching code IDs...");
+    ui::info("fetching code IDs...");
     let gateway_hash = read_axelar_contract_field(
         &ctx.target_json,
         "/axelar/contracts/Gateway/storeCodeProposalCodeHash",
@@ -135,8 +136,9 @@ async fn run_instantiate(
     let gateway_code_id = lcd_fetch_code_id(lcd, &gateway_hash).await?;
     let verifier_code_id = lcd_fetch_code_id(lcd, &verifier_hash).await?;
     let prover_code_id = lcd_fetch_code_id(lcd, &prover_hash).await?;
-    println!(
-        "  code IDs: gateway={gateway_code_id}, verifier={verifier_code_id}, prover={prover_code_id}"
+    ui::kv(
+        "code IDs",
+        &format!("gateway={gateway_code_id}, verifier={verifier_code_id}, prover={prover_code_id}"),
     );
 
     let content = fs::read_to_string(&ctx.target_json)?;
@@ -231,10 +233,8 @@ async fn run_instantiate(
         }
     });
 
-    println!(
-        "  execute msg: {}",
-        serde_json::to_string_pretty(&execute_msg)?
-    );
+    let json_str = serde_json::to_string_pretty(&execute_msg)?;
+    ui::info(&format!("execute msg: {}", ui::truncated_json(&json_str, 3)));
 
     let sender = if use_governance {
         &governance_address
@@ -337,16 +337,17 @@ async fn run_instantiate(
 
     if use_governance {
         let proposal_id = extract_proposal_id(&tx_resp)?;
-        println!("  proposal submitted: {proposal_id}");
-        println!();
-        println!("  ACTION REQUIRED: vote on the proposal:");
-        println!("  ./vote_{env}_proposal.sh {env}-nodes {proposal_id}");
+        ui::kv("proposal submitted", &proposal_id.to_string());
+        ui::action_required(&[
+            "Vote on the proposal:",
+            &format!("./vote_{env}_proposal.sh {env}-nodes {proposal_id}"),
+        ]);
         if ctx.state.get("proposals").is_none() {
             ctx.state["proposals"] = json!({});
         }
         ctx.state["proposals"][&proposal_key] = json!(proposal_id);
     } else {
-        println!("  direct execution completed");
+        ui::success("direct execution completed");
     }
 
     Ok(())
@@ -366,7 +367,7 @@ async fn run_register_deployment(
     env: &str,
     proposal_key: &str,
 ) -> Result<()> {
-    println!("registering deployment for {chain_axelar_id}...");
+    ui::info(&format!("registering deployment for {chain_axelar_id}..."));
 
     let coordinator_addr =
         read_axelar_contract_field(&ctx.target_json, "/axelar/contracts/Coordinator/address")?;
@@ -424,16 +425,17 @@ async fn run_register_deployment(
 
     if use_governance {
         let proposal_id = extract_proposal_id(&tx_resp)?;
-        println!("  proposal submitted: {proposal_id}");
-        println!();
-        println!("  ACTION REQUIRED: vote on the proposal:");
-        println!("  ./vote_{env}_proposal.sh {env}-nodes {proposal_id}");
+        ui::kv("proposal submitted", &proposal_id.to_string());
+        ui::action_required(&[
+            "Vote on the proposal:",
+            &format!("./vote_{env}_proposal.sh {env}-nodes {proposal_id}"),
+        ]);
         if ctx.state.get("proposals").is_none() {
             ctx.state["proposals"] = json!({});
         }
         ctx.state["proposals"][proposal_key] = json!(proposal_id);
     } else {
-        println!("  direct execution completed");
+        ui::success("direct execution completed");
     }
 
     Ok(())
@@ -453,7 +455,7 @@ async fn run_create_reward_pools(
     env: &str,
     proposal_key: &str,
 ) -> Result<()> {
-    println!("creating reward pools for {chain_axelar_id}...");
+    ui::info(&format!("creating reward pools for {chain_axelar_id}..."));
 
     let rewards_addr =
         read_axelar_contract_field(&ctx.target_json, "/axelar/contracts/Rewards/address")?;
@@ -542,16 +544,17 @@ async fn run_create_reward_pools(
 
     if use_governance {
         let proposal_id = extract_proposal_id(&tx_resp)?;
-        println!("  proposal submitted: {proposal_id}");
-        println!();
-        println!("  ACTION REQUIRED: vote on the proposal:");
-        println!("  ./vote_{env}_proposal.sh {env}-nodes {proposal_id}");
+        ui::kv("proposal submitted", &proposal_id.to_string());
+        ui::action_required(&[
+            "Vote on the proposal:",
+            &format!("./vote_{env}_proposal.sh {env}-nodes {proposal_id}"),
+        ]);
         if ctx.state.get("proposals").is_none() {
             ctx.state["proposals"] = json!({});
         }
         ctx.state["proposals"][proposal_key] = json!(proposal_id);
     } else {
-        println!("  direct execution completed");
+        ui::success("direct execution completed");
     }
 
     Ok(())
@@ -568,7 +571,7 @@ async fn run_add_rewards(
     gas_price: f64,
     chain_axelar_id: &str,
 ) -> Result<()> {
-    println!("adding rewards for {chain_axelar_id}...");
+    ui::info(&format!("adding rewards for {chain_axelar_id}..."));
 
     let rewards_addr =
         read_axelar_contract_field(&ctx.target_json, "/axelar/contracts/Rewards/address")?;
@@ -607,7 +610,7 @@ async fn run_add_rewards(
     let inner_msg2 =
         build_execute_msg_any_with_funds(axelar_address, &rewards_addr, &msg2, funds)?;
 
-    println!("  sending {reward_amount}{fee_denom} to each reward pool");
+    ui::info(&format!("sending {reward_amount}{fee_denom} to each reward pool"));
     let tx_resp = sign_and_broadcast_cosmos_tx(
         signing_key,
         axelar_address,
@@ -632,7 +635,7 @@ async fn run_add_rewards(
             "add_rewards tx failed (code {code}): {raw_log}"
         ));
     }
-    println!("  rewards added to both pools");
+    ui::success("rewards added to both pools");
 
     Ok(())
 }
@@ -651,7 +654,7 @@ async fn run_register_its_on_hub(
     env: &str,
     proposal_key: &str,
 ) -> Result<()> {
-    println!("registering {chain_axelar_id} on ITS Hub...");
+    ui::info(&format!("registering {chain_axelar_id} on ITS Hub..."));
 
     let its_hub_addr = read_axelar_contract_field(
         &ctx.target_json,
@@ -695,10 +698,8 @@ async fn run_register_its_on_hub(
         }
     });
 
-    println!(
-        "  execute msg: {}",
-        serde_json::to_string_pretty(&execute_msg)?
-    );
+    let json_str = serde_json::to_string_pretty(&execute_msg)?;
+    ui::info(&format!("execute msg: {}", ui::truncated_json(&json_str, 3)));
 
     let sender = if use_governance {
         &governance_address
@@ -743,16 +744,17 @@ async fn run_register_its_on_hub(
 
     if use_governance {
         let proposal_id = extract_proposal_id(&tx_resp)?;
-        println!("  proposal submitted: {proposal_id}");
-        println!();
-        println!("  ACTION REQUIRED: vote on the proposal:");
-        println!("  ./vote_{env}_proposal.sh {env}-nodes {proposal_id}");
+        ui::kv("proposal submitted", &proposal_id.to_string());
+        ui::action_required(&[
+            "Vote on the proposal:",
+            &format!("./vote_{env}_proposal.sh {env}-nodes {proposal_id}"),
+        ]);
         if ctx.state.get("proposals").is_none() {
             ctx.state["proposals"] = json!({});
         }
         ctx.state["proposals"][proposal_key] = json!(proposal_id);
     } else {
-        println!("  direct execution completed");
+        ui::success("direct execution completed");
     }
 
     Ok(())

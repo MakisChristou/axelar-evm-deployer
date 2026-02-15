@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 
 use crate::commands::deploy::DeployContext;
 use crate::cosmos::{lcd_cosmwasm_smart_query, read_axelar_config, read_axelar_contract_field};
+use crate::ui;
 
 pub async fn run(ctx: &DeployContext) -> Result<()> {
     let (lcd, _, _, _) = read_axelar_config(&ctx.target_json)?;
@@ -25,9 +26,9 @@ pub async fn run(ctx: &DeployContext) -> Result<()> {
         &format!("/axelar/contracts/Coordinator/deployments/{chain_axelar_id}/deploymentName"),
     )?;
 
-    println!(
+    ui::info(&format!(
         "querying deployed contracts for {chain_axelar_id} (deployment: {deployment_name})..."
-    );
+    ));
 
     let query = json!({
         "deployment": {
@@ -46,9 +47,9 @@ pub async fn run(ctx: &DeployContext) -> Result<()> {
         .as_str()
         .ok_or_else(|| eyre::eyre!("no gateway_address in response"))?;
 
-    println!("  VotingVerifier: {verifier_address}");
-    println!("  MultisigProver: {prover_address}");
-    println!("  Gateway: {gateway_address}");
+    ui::address("VotingVerifier", verifier_address);
+    ui::address("MultisigProver", prover_address);
+    ui::address("Gateway", gateway_address);
 
     let content = fs::read_to_string(&ctx.target_json)?;
     let mut root: Value = serde_json::from_str(&content)?;
@@ -73,7 +74,7 @@ pub async fn run(ctx: &DeployContext) -> Result<()> {
         &ctx.target_json,
         serde_json::to_string_pretty(&root)? + "\n",
     )?;
-    println!("  updated {}", ctx.target_json.display());
+    ui::success(&format!("updated {}", ctx.target_json.display()));
 
     Ok(())
 }

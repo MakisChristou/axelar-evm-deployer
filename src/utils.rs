@@ -5,6 +5,8 @@ use alloy::primitives::{Address, FixedBytes, keccak256};
 use eyre::Result;
 use serde_json::{Map, Value};
 
+use crate::ui;
+
 pub fn update_target_json(
     target_json: &Path,
     axelar_id: &str,
@@ -23,7 +25,7 @@ pub fn update_target_json(
 
     contracts.insert(contract_name.to_string(), contract_data);
     fs::write(target_json, serde_json::to_string_pretty(&root)? + "\n")?;
-    println!("updated {contract_name} in {}", target_json.display());
+    ui::success(&format!("updated {contract_name} in {}", target_json.display()));
     Ok(())
 }
 
@@ -131,7 +133,7 @@ pub fn compute_domain_separator(target_json: &Path, axelar_id: &str) -> Result<F
 
     let input = format!("{chain_axelar_id}{router_address}{axelar_chain_id}");
     let hash = keccak256(input.as_bytes());
-    println!("domain separator input: {input}");
-    println!("domain separator: {hash}");
+    ui::kv("domain separator input", &input);
+    ui::kv("domain separator", &format!("{hash}"));
     Ok(hash)
 }

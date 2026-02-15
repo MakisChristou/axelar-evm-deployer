@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use eyre::Result;
 use serde_json::{Value, json};
 
+use crate::ui;
+
 pub fn data_dir() -> Result<PathBuf> {
     let dir = dirs::data_dir()
         .ok_or_else(|| eyre::eyre!("could not determine data directory"))?
@@ -70,7 +72,7 @@ pub fn migrate_steps(state: &mut Value) {
         }
     }
     if added > 0 {
-        println!("migrated state: added {added} new step(s)");
+        ui::info(&format!("migrated state: added {added} new step(s)"));
     }
 }
 

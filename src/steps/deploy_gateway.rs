@@ -16,6 +16,7 @@ use crate::commands::deploy::DeployContext;
 use crate::cosmos::fetch_verifier_set;
 use crate::evm::{decode_evm_error, encode_gateway_setup_params, read_artifact_bytecode};
 use crate::state::save_state;
+use crate::ui;
 use crate::utils::{compute_domain_separator, update_target_json};
 
 pub async fn run(
@@ -47,10 +48,10 @@ pub async fn run(
                     "saved implementation {addr} has no code on-chain"
                 ));
             }
-            println!("reusing previously deployed implementation: {addr}");
+            ui::info(&format!("reusing previously deployed implementation: {addr}"));
             (addr, keccak256(&code))
         } else {
-            println!("deploying AxelarAmplifierGateway implementation...");
+            ui::info("deploying AxelarAmplifierGateway implementation...");
             let impl_bytecode = read_artifact_bytecode(impl_artifact)?;
             let mut impl_deploy_code = impl_bytecode.clone();
             impl_deploy_code.extend_from_slice(
@@ -65,11 +66,11 @@ pub async fn run(
             let tx = TransactionRequest::default()
                 .with_deploy_code(Bytes::from(impl_deploy_code));
             let receipt = provider.send_transaction(tx).await?.get_receipt().await?;
-            println!("implementation tx hash: {}", receipt.transaction_hash);
+            ui::tx_hash("implementation tx hash", &format!("{}", receipt.transaction_hash));
             let addr = receipt
                 .contract_address
                 .ok_or_else(|| eyre::eyre!("no contract address in implementation receipt"))?;
-            println!("implementation deployed at: {addr}");
+            ui::address("implementation deployed at", &format!("{addr}"));
 
             let code = provider.get_code_at(addr).await?;
             let codehash = keccak256(&code);
@@ -102,14 +103,13 @@ pub async fn run(
     let operator = deployer_addr;
     let owner = deployer_addr;
     let setup_params = encode_gateway_setup_params(operator, &signers, threshold, nonce);
-    println!(
-        "setup params ({} bytes): 0x{}",
-        setup_params.len(),
-        hex::encode(&setup_params)
+    ui::kv(
+        "setup params",
+        &format!("{} bytes: 0x{}", setup_params.len(), hex::encode(&setup_params)),
     );
 
     // --- Tx 2: Deploy proxy ---
-    println!("deploying AxelarAmplifierGatewayProxy...");
+    ui::info("deploying AxelarAmplifierGatewayProxy...");
     let proxy_bytecode = read_artifact_bytecode(proxy_artifact)?;
     let mut proxy_deploy_code = proxy_bytecode.clone();
     proxy_deploy_code
@@ -121,11 +121,11 @@ pub async fn run(
         .with_gas_limit(5_000_000);
 
     match provider.call(tx.clone()).await {
-        Ok(_) => println!("  eth_call simulation passed"),
+        Ok(_) => ui::success("eth_call simulation passed"),
         Err(e) => {
             let reason = decode_evm_error(&e);
-            eprintln!("  WARNING: eth_call simulation failed: {reason}");
-            eprintln!("  proceeding with send_transaction anyway...");
+            ui::warn(&format!("eth_call simulation failed: {reason}"));
+            ui::warn("proceeding with send_transaction anyway...");
         }
     }
 
@@ -136,7 +136,7 @@ pub async fn run(
             return Err(eyre::eyre!("proxy deployment failed: {reason}"));
         }
     };
-    println!("proxy tx hash: {}", receipt.transaction_hash);
+    ui::tx_hash("proxy tx hash", &format!("{}", receipt.transaction_hash));
 
     if !receipt.status() {
         return Err(eyre::eyre!(
@@ -148,7 +148,7 @@ pub async fn run(
     let proxy_addr = receipt
         .contract_address
         .ok_or_else(|| eyre::eyre!("no contract address in proxy receipt"))?;
-    println!("proxy deployed at: {proxy_addr}");
+    ui::address("proxy deployed at", &format!("{proxy_addr}"));
 
     // --- Write to target JSON ---
     let mut contract_data = serde_json::Map::new();

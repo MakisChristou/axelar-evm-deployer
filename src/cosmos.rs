@@ -15,6 +15,7 @@ use prost::Message;
 use serde_json::Value;
 
 use crate::evm::pubkey_to_address;
+use crate::ui;
 
 // --- wallet ---
 
@@ -328,7 +329,7 @@ pub async fn sign_and_broadcast_cosmos_tx(
     messages: Vec<cosmrs::Any>,
 ) -> Result<Value> {
     let (account_number, sequence) = lcd_query_account(lcd, address).await?;
-    println!("  account: {address}, number={account_number}, sequence={sequence}");
+    ui::kv("account", &format!("{address}, number={account_number}, sequence={sequence}"));
 
     let sim_tx = build_and_sign_cosmos_tx(
         signing_key,
@@ -344,7 +345,7 @@ pub async fn sign_and_broadcast_cosmos_tx(
     let gas_used = lcd_simulate_tx(lcd, &sim_tx).await?;
     let gas_limit = (gas_used as f64 * 1.4) as u64;
     let fee_amount = ((gas_limit as f64) * gas_price).ceil() as u128;
-    println!("  gas: used={gas_used}, limit={gas_limit}, fee={fee_amount}{fee_denom}");
+    ui::kv("gas", &format!("used={gas_used}, limit={gas_limit}, fee={fee_amount}{fee_denom}"));
 
     let tx_bytes = build_and_sign_cosmos_tx(
         signing_key,
@@ -363,9 +364,9 @@ pub async fn sign_and_broadcast_cosmos_tx(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    println!("  tx hash: {tx_hash}");
+    ui::tx_hash("tx hash", &tx_hash);
 
-    println!("  waiting for tx confirmation...");
+    ui::info("waiting for tx confirmation...");
     let tx_resp = lcd_wait_for_tx(lcd, &tx_hash).await?;
     Ok(tx_resp)
 }
@@ -470,7 +471,7 @@ pub async fn fetch_verifier_set(
     let url = format!(
         "{lcd}/cosmwasm/wasm/v1/contract/{prover_addr}/smart/{query_b64}"
     );
-    println!("fetching verifier set from: {url}");
+    ui::info(&format!("fetching verifier set from: {url}"));
 
     let resp: Value = reqwest::get(&url).await?.json().await?;
 
@@ -525,15 +526,13 @@ pub async fn fetch_verifier_set(
 
     weighted_signers.sort_by_key(|(addr, _)| *addr);
 
-    println!(
-        "verifier set: {} signers, threshold={}, created_at={}, id={}",
-        weighted_signers.len(),
-        threshold,
-        created_at,
-        verifier_set_id
+    ui::kv(
+        "verifier set",
+        &format!("{} signers, threshold={}, created_at={}, id={}",
+            weighted_signers.len(), threshold, created_at, verifier_set_id),
     );
     for (addr, weight) in &weighted_signers {
-        println!("  {addr} weight={weight}");
+        ui::kv(&format!("{addr}"), &format!("weight={weight}"));
     }
 
     Ok((weighted_signers, threshold, nonce, verifier_set_id))

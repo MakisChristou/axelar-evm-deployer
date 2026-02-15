@@ -7,6 +7,7 @@ use serde_json::json;
 
 use crate::commands::deploy::DeployContext;
 use crate::evm::compute_create_address;
+use crate::ui;
 
 pub async fn run(ctx: &mut DeployContext) -> Result<()> {
     let gateway_deployer_str = ctx.state["gatewayDeployer"]
@@ -18,10 +19,10 @@ pub async fn run(ctx: &mut DeployContext) -> Result<()> {
     let nonce = provider.get_transaction_count(gateway_deployer).await?;
     let proxy_nonce = nonce + 1; // +1 for implementation tx
     let predicted = compute_create_address(gateway_deployer, proxy_nonce);
-    println!("gateway deployer: {gateway_deployer}");
-    println!("current nonce: {nonce}");
-    println!("proxy nonce (impl+1): {proxy_nonce}");
-    println!("predicted gateway proxy address: {predicted}");
+    ui::address("gateway deployer", &format!("{gateway_deployer}"));
+    ui::kv("current nonce", &nonce.to_string());
+    ui::kv("proxy nonce (impl+1)", &proxy_nonce.to_string());
+    ui::address("predicted gateway proxy", &format!("{predicted}"));
 
     ctx.state["predictedGatewayAddress"] = json!(format!("{predicted}"));
 

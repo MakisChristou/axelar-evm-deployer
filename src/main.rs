@@ -4,6 +4,7 @@ mod cosmos;
 mod evm;
 mod state;
 mod steps;
+pub mod ui;
 mod utils;
 
 use clap::Parser;
