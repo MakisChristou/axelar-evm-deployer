@@ -29,5 +29,8 @@ async fn main() -> Result<()> {
                 .await
         }
         cli::Commands::Reset { axelar_id } => commands::reset::run(axelar_id),
+        cli::Commands::Test { subcommand } => match subcommand {
+            cli::TestCommands::Gmp { axelar_id } => commands::test_gmp::run(axelar_id).await,
+        },
     }
 }

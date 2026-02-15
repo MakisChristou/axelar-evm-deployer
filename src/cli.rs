@@ -42,6 +42,21 @@ pub enum Commands {
         #[arg(long)]
         axelar_id: Option<String>,
     },
+
+    /// Test GMP or ITS functionality
+    Test {
+        #[command(subcommand)]
+        subcommand: TestCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum TestCommands {
+    /// Test GMP source flow: deploy SenderReceiver, send a loopback callContract
+    Gmp {
+        #[arg(long)]
+        axelar_id: Option<String>,
+    },
 }
 
 pub fn resolve_axelar_id(opt: Option<String>) -> Result<String> {

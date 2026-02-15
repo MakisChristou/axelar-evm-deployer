@@ -34,6 +34,16 @@ sol! {
         function isOperator(address account) external view returns (bool);
     }
 
+    #[sol(rpc)]
+    contract SenderReceiver {
+        function sendMessage(
+            string calldata destinationChain,
+            string calldata destinationAddress,
+            string calldata message_
+        ) external payable;
+        function message() external view returns (string);
+    }
+
     /// Legacy init-based proxy (AxelarGasServiceProxy, AxelarDepositServiceProxy)
     #[sol(rpc)]
     contract LegacyProxy {
