@@ -135,11 +135,18 @@ sol! {
     #[sol(rpc)]
     contract ERC20 {
         function name() external view returns (string);
+        function balanceOf(address account) external view returns (uint256);
     }
 
     #[sol(rpc)]
     contract InterchainToken {
         function interchainTokenId() external view returns (bytes32);
+        function interchainTransfer(
+            string calldata destinationChain,
+            bytes calldata destinationAddress,
+            uint256 amount,
+            bytes calldata metadata
+        ) external payable;
     }
 }
 
