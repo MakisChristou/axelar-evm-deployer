@@ -208,6 +208,7 @@ pub async fn lcd_fetch_code_id(lcd: &str, expected_checksum: &str) -> Result<u64
 
 // --- tx building ---
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_and_sign_cosmos_tx(
     signing_key: &SigningKey,
     chain_id: &str,

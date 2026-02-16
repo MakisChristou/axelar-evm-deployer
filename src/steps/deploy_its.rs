@@ -394,6 +394,7 @@ pub async fn run(
 
 /// Deploy a contract via CREATE2 using ConstAddressDeployer.
 /// Checks step state and on-chain code to skip already-deployed contracts.
+#[allow(clippy::too_many_arguments)]
 async fn deploy_via_create2<P: Provider>(
     const_deployer: &ConstAddressDeployer::ConstAddressDeployerInstance<P>,
     provider: P,
