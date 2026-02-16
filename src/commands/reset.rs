@@ -33,47 +33,38 @@ pub fn run(axelar_id: Option<String>) -> Result<()> {
     let content = fs::read_to_string(&target_json)?;
     let mut root: Value = serde_json::from_str(&content)?;
 
-    if let Some(chains) = root.get_mut("chains").and_then(|v| v.as_object_mut()) {
-        if chains.remove(&axelar_id).is_some() {
+    if let Some(chains) = root.get_mut("chains").and_then(|v| v.as_object_mut())
+        && chains.remove(&axelar_id).is_some() {
             ui::info(&format!("removed chains.{axelar_id}"));
         }
-    }
 
     if let Some(vv) = root
         .pointer_mut("/axelar/contracts/VotingVerifier")
         .and_then(|v| v.as_object_mut())
-    {
-        if vv.remove(&axelar_id).is_some() {
+        && vv.remove(&axelar_id).is_some() {
             ui::info(&format!("removed VotingVerifier.{axelar_id}"));
         }
-    }
 
     if let Some(mp) = root
         .pointer_mut("/axelar/contracts/MultisigProver")
         .and_then(|v| v.as_object_mut())
-    {
-        if mp.remove(&axelar_id).is_some() {
+        && mp.remove(&axelar_id).is_some() {
             ui::info(&format!("removed MultisigProver.{axelar_id}"));
         }
-    }
 
     if let Some(gw) = root
         .pointer_mut("/axelar/contracts/Gateway")
         .and_then(|v| v.as_object_mut())
-    {
-        if gw.remove(&axelar_id).is_some() {
+        && gw.remove(&axelar_id).is_some() {
             ui::info(&format!("removed Gateway.{axelar_id}"));
         }
-    }
 
     if let Some(deployments) = root
         .pointer_mut("/axelar/contracts/Coordinator/deployments")
         .and_then(|v| v.as_object_mut())
-    {
-        if deployments.remove(&axelar_id).is_some() {
+        && deployments.remove(&axelar_id).is_some() {
             ui::info(&format!("removed Coordinator.deployments.{axelar_id}"));
         }
-    }
 
     fs::write(&target_json, serde_json::to_string_pretty(&root)? + "\n")?;
     ui::success(&format!("cleaned up {}", target_json.display()));

@@ -75,11 +75,10 @@ pub async fn lcd_simulate_tx(lcd: &str, tx_bytes: &[u8]) -> Result<u64> {
         .await?
         .json()
         .await?;
-    if let Some(err) = resp.get("message").and_then(|v| v.as_str()) {
-        if !err.is_empty() {
+    if let Some(err) = resp.get("message").and_then(|v| v.as_str())
+        && !err.is_empty() {
             return Err(eyre::eyre!("simulation failed: {err}"));
         }
-    }
     let gas_used: u64 = resp
         .pointer("/gas_info/gas_used")
         .and_then(|v| v.as_str())
@@ -380,8 +379,8 @@ pub fn extract_proposal_id(tx_resp: &Value) -> Result<u64> {
         .ok_or_else(|| eyre::eyre!("no events in tx response"))?;
     for event in events {
         let event_type = event["type"].as_str().unwrap_or("");
-        if event_type == "submit_proposal" || event_type == "proposal_submitted" {
-            if let Some(attrs) = event["attributes"].as_array() {
+        if (event_type == "submit_proposal" || event_type == "proposal_submitted")
+            && let Some(attrs) = event["attributes"].as_array() {
                 for attr in attrs {
                     let key = attr["key"].as_str().unwrap_or("");
                     if key == "proposal_id" {
@@ -390,7 +389,6 @@ pub fn extract_proposal_id(tx_resp: &Value) -> Result<u64> {
                     }
                 }
             }
-        }
     }
     Err(eyre::eyre!("proposal_id not found in tx events"))
 }

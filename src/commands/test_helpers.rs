@@ -13,8 +13,8 @@ pub fn extract_poll_id(tx_resp: &serde_json::Value) -> Option<String> {
 
     for event in events {
         let event_type = event["type"].as_str().unwrap_or("");
-        if event_type == "wasm" || event_type.starts_with("wasm-") {
-            if let Some(attrs) = event["attributes"].as_array() {
+        if (event_type == "wasm" || event_type.starts_with("wasm-"))
+            && let Some(attrs) = event["attributes"].as_array() {
                 for attr in attrs {
                     let key = attr["key"].as_str().unwrap_or("");
                     if key == "poll_id" {
@@ -23,7 +23,6 @@ pub fn extract_poll_id(tx_resp: &serde_json::Value) -> Option<String> {
                     }
                 }
             }
-        }
     }
 
     None
@@ -38,8 +37,8 @@ pub fn extract_event_attr(tx_resp: &serde_json::Value, attr_name: &str) -> Resul
 
     for event in events {
         let event_type = event["type"].as_str().unwrap_or("");
-        if event_type == "wasm" || event_type.starts_with("wasm-") {
-            if let Some(attrs) = event["attributes"].as_array() {
+        if (event_type == "wasm" || event_type.starts_with("wasm-"))
+            && let Some(attrs) = event["attributes"].as_array() {
                 for attr in attrs {
                     let key = attr["key"].as_str().unwrap_or("");
                     if key == attr_name {
@@ -50,7 +49,6 @@ pub fn extract_event_attr(tx_resp: &serde_json::Value, attr_name: &str) -> Resul
                     }
                 }
             }
-        }
     }
 
     Err(eyre::eyre!("{attr_name} not found in tx events"))
@@ -108,8 +106,8 @@ pub async fn wait_for_poll_votes(lcd: &str, voting_verifier: &str, poll_id: &str
         let finished = poll["finished"].as_bool().unwrap_or(false);
         let expires_at: u64 = poll["expires_at"].as_u64().unwrap_or(0);
 
-        if let Some(tallies) = poll["tallies"].as_array() {
-            if let Some(tally) = tallies.first() {
+        if let Some(tallies) = poll["tallies"].as_array()
+            && let Some(tally) = tallies.first() {
                 let succeeded: u64 = tally["SucceededOnChain"]
                     .as_str()
                     .and_then(|s| s.parse().ok())
@@ -141,7 +139,6 @@ pub async fn wait_for_poll_votes(lcd: &str, voting_verifier: &str, poll_id: &str
                     return Ok(());
                 }
             }
-        }
     }
 
     spinner.finish_and_clear();

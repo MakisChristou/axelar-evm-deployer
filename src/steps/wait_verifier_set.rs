@@ -57,13 +57,12 @@ pub async fn run(ctx: &DeployContext) -> Result<()> {
 
     // Check if verifier set already exists
     let query_msg = json!("current_verifier_set");
-    if let Ok(data) = lcd_cosmwasm_smart_query(&lcd, &prover_addr, &query_msg).await {
-        if !data.is_null() && data.get("id").is_some() {
+    if let Ok(data) = lcd_cosmwasm_smart_query(&lcd, &prover_addr, &query_msg).await
+        && !data.is_null() && data.get("id").is_some() {
             let id = data["id"].as_str().unwrap_or("?");
             ui::success(&format!("verifier set already exists! id: {id}"));
             return Ok(());
         }
-    }
 
     // Print instructions and poll
     ui::info(&format!(

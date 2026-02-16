@@ -350,19 +350,17 @@ async fn run_instantiate(
     if let Some(gw) = root.pointer_mut(&format!("/axelar/contracts/Gateway/{chain_axelar_id}")) {
         gw["codeId"] = json!(gateway_code_id);
         gw["contractAdmin"] = json!(contract_admin);
-    } else {
-        if let Some(gateway_obj) = root
-            .pointer_mut("/axelar/contracts/Gateway")
-            .and_then(|v| v.as_object_mut())
-        {
-            gateway_obj.insert(
-                chain_axelar_id.to_string(),
-                json!({
-                    "codeId": gateway_code_id,
-                    "contractAdmin": contract_admin
-                }),
-            );
-        }
+    } else if let Some(gateway_obj) = root
+        .pointer_mut("/axelar/contracts/Gateway")
+        .and_then(|v| v.as_object_mut())
+    {
+        gateway_obj.insert(
+            chain_axelar_id.to_string(),
+            json!({
+                "codeId": gateway_code_id,
+                "contractAdmin": contract_admin
+            }),
+        );
     }
     fs::write(
         &ctx.target_json,

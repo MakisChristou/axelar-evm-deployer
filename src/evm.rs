@@ -231,8 +231,8 @@ pub fn decode_revert_data(hex_str: &str) -> String {
         "d924e5f4" => "InvalidOwnerAddress()".into(),
         "f9188a68" => "UntrustedChain() — destination chain not trusted by ITS".into(),
         "08c379a0" => {
-            if let Ok(bytes) = hex::decode(hex_data) {
-                if bytes.len() > 4 + 32 + 32 {
+            if let Ok(bytes) = hex::decode(hex_data)
+                && bytes.len() > 4 + 32 + 32 {
                     let offset = 4 + 32;
                     let len = u32::from_be_bytes(
                         bytes[offset + 28..offset + 32].try_into().unwrap_or([0; 4]),
@@ -242,7 +242,6 @@ pub fn decode_revert_data(hex_str: &str) -> String {
                     let msg = String::from_utf8_lossy(&bytes[str_start..str_end]);
                     return format!("revert: \"{msg}\"");
                 }
-            }
             format!("Error(string) — data: 0x{hex_data}")
         }
         _ => format!("unknown error selector 0x{selector} (data: 0x{hex_data})"),
@@ -265,7 +264,7 @@ pub fn decode_evm_error(err: &dyn std::fmt::Debug) -> String {
             }
         }
     }
-    format!("{debug}")
+    debug.to_string()
 }
 
 /// Compute CREATE address: keccak256(rlp([sender, nonce]))[12..]

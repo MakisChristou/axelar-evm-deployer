@@ -65,8 +65,7 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
     let its_proxy_addr = read_contract_address(&target_json, &axelar_id, "InterchainTokenService")?;
 
     // Read destination chain config from testnet.json
-    let dest_rpc =
-        read_axelar_contract_field(&target_json, &format!("/chains/{DEST_CHAIN}/rpc"))?;
+    let dest_rpc = read_axelar_contract_field(&target_json, &format!("/chains/{DEST_CHAIN}/rpc"))?;
     let dest_its_addr = read_contract_address(&target_json, DEST_CHAIN, "InterchainTokenService")?;
 
     ui::section(&format!("ITS Test: {axelar_id} → {DEST_CHAIN}"));
@@ -113,7 +112,7 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
             lines.push(format!("   owner: {owner}"));
         }
         lines.push(format!("   cast send {its_proxy_addr} \\"));
-        lines.push(format!("     'setTrustedChain(string)' \\"));
+        lines.push("     'setTrustedChain(string)' \\".to_string());
         lines.push(format!("     '{DEST_CHAIN}' \\"));
         lines.push(format!("     --rpc-url {rpc_url} \\"));
         lines.push("     --private-key $PRIVATE_KEY".into());
@@ -125,7 +124,7 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
             lines.push(format!("   owner: {owner}"));
         }
         lines.push(format!("   cast send {dest_its_addr} \\"));
-        lines.push(format!("     'setTrustedChain(string)' \\"));
+        lines.push("     'setTrustedChain(string)' \\".to_string());
         lines.push(format!("     '{axelar_id}' \\"));
         lines.push(format!("     --rpc-url {dest_rpc} \\"));
         lines.push("     --private-key $PRIVATE_KEY".into());
@@ -136,9 +135,7 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
         ui::action_required(&line_refs);
         return Ok(());
     }
-    ui::success(&format!(
-        "\"{DEST_CHAIN}\" is trusted on {axelar_id} ITS"
-    ));
+    ui::success(&format!("\"{DEST_CHAIN}\" is trusted on {axelar_id} ITS"));
 
     // ── Step 1: Deploy interchain token locally ─────────────────────────
     ui::step_header(1, TOTAL_STEPS, "Deploy interchain token");
@@ -462,7 +459,11 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
     }
 
     // ── Step 7: Poll destination chain to confirm token deployed ─────────
-    ui::step_header(7, TOTAL_STEPS, &format!("Poll {DEST_CHAIN} for token deployment"));
+    ui::step_header(
+        7,
+        TOTAL_STEPS,
+        &format!("Poll {DEST_CHAIN} for token deployment"),
+    );
 
     let dest_provider = ProviderBuilder::new().connect_http(dest_rpc.parse()?);
     let dest_its = InterchainTokenService::new(dest_its_addr, &dest_provider);
@@ -589,19 +590,13 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
     .await?;
 
     // ── Step 10: Verify transfer on destination ──────────────────────────
-    ui::step_header(
-        10,
-        TOTAL_STEPS,
-        &format!("Verify transfer on {DEST_CHAIN}"),
-    );
+    ui::step_header(10, TOTAL_STEPS, &format!("Verify transfer on {DEST_CHAIN}"));
 
     ui::address("token", &format!("{predicted_addr}"));
     ui::address("receiver", &format!("{receiver}"));
 
     let dest_token = ERC20::new(predicted_addr, &dest_provider);
-    let spinner = ui::wait_spinner(&format!(
-        "Waiting for balance to appear on {DEST_CHAIN}..."
-    ));
+    let spinner = ui::wait_spinner(&format!("Waiting for balance to appear on {DEST_CHAIN}..."));
 
     let mut final_balance = U256::ZERO;
     for i in 0..30 {
@@ -615,16 +610,10 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
                     final_balance = bal;
                     break;
                 }
-                spinner.set_message(format!(
-                    "Balance still 0 (attempt {}/30)...",
-                    i + 1
-                ));
+                spinner.set_message(format!("Balance still 0 (attempt {}/30)...", i + 1));
             }
             Err(_) => {
-                spinner.set_message(format!(
-                    "Query failed (attempt {}/30)...",
-                    i + 1
-                ));
+                spinner.set_message(format!("Query failed (attempt {}/30)...", i + 1));
             }
         }
     }
@@ -636,9 +625,7 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
             "Receiver {receiver} has balance {final_balance} on {DEST_CHAIN}"
         ));
     } else {
-        ui::warn(&format!(
-            "Balance still 0 on {DEST_CHAIN} after 5 minutes"
-        ));
+        ui::warn(&format!("Balance still 0 on {DEST_CHAIN} after 5 minutes"));
         ui::info("The relayer may still be processing. Check axelarscan for status.");
     }
 
@@ -783,10 +770,8 @@ async fn relay_to_hub(
             Err(e) => {
                 let err = format!("{e}");
                 if err.contains("not verified") {
-                    spinner.set_message(format!(
-                        "Not yet verified (attempt {}/60)...",
-                        attempt + 1
-                    ));
+                    spinner
+                        .set_message(format!("Not yet verified (attempt {}/60)...", attempt + 1));
                     continue;
                 }
                 spinner.finish_and_clear();
