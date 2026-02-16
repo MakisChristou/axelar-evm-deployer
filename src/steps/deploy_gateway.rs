@@ -48,7 +48,9 @@ pub async fn run(
                     "saved implementation {addr} has no code on-chain"
                 ));
             }
-            ui::info(&format!("reusing previously deployed implementation: {addr}"));
+            ui::info(&format!(
+                "reusing previously deployed implementation: {addr}"
+            ));
             (addr, keccak256(&code))
         } else {
             ui::info("deploying AxelarAmplifierGateway implementation...");
@@ -63,10 +65,12 @@ pub async fn run(
                     .abi_encode(),
             );
 
-            let tx = TransactionRequest::default()
-                .with_deploy_code(Bytes::from(impl_deploy_code));
+            let tx = TransactionRequest::default().with_deploy_code(Bytes::from(impl_deploy_code));
             let receipt = provider.send_transaction(tx).await?.get_receipt().await?;
-            ui::tx_hash("implementation tx hash", &format!("{}", receipt.transaction_hash));
+            ui::tx_hash(
+                "implementation tx hash",
+                &format!("{}", receipt.transaction_hash),
+            );
             let addr = receipt
                 .contract_address
                 .ok_or_else(|| eyre::eyre!("no contract address in implementation receipt"))?;
@@ -105,7 +109,11 @@ pub async fn run(
     let setup_params = encode_gateway_setup_params(operator, &signers, threshold, nonce);
     ui::kv(
         "setup params",
-        &format!("{} bytes: 0x{}", setup_params.len(), hex::encode(&setup_params)),
+        &format!(
+            "{} bytes: 0x{}",
+            setup_params.len(),
+            hex::encode(&setup_params)
+        ),
     );
 
     // --- Tx 2: Deploy proxy ---

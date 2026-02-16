@@ -110,7 +110,9 @@ pub fn read_artifact_bytecode(artifact_path: &str) -> Result<Vec<u8>> {
     let bytecode_hex = artifact["bytecode"]
         .as_str()
         .ok_or_else(|| eyre::eyre!("no bytecode field in artifact"))?;
-    Ok(hex::decode(bytecode_hex.strip_prefix("0x").unwrap_or(bytecode_hex))?)
+    Ok(hex::decode(
+        bytecode_hex.strip_prefix("0x").unwrap_or(bytecode_hex),
+    )?)
 }
 
 /// Convert an ECDSA public key (compressed or uncompressed) to an EVM address.
@@ -118,8 +120,8 @@ pub fn pubkey_to_address(pubkey_bytes: &[u8]) -> Result<Address> {
     use alloy::signers::k256::PublicKey;
     use alloy::signers::k256::elliptic_curve::sec1::ToEncodedPoint;
 
-    let pubkey = PublicKey::from_sec1_bytes(pubkey_bytes)
-        .map_err(|e| eyre::eyre!("invalid pubkey: {e}"))?;
+    let pubkey =
+        PublicKey::from_sec1_bytes(pubkey_bytes).map_err(|e| eyre::eyre!("invalid pubkey: {e}"))?;
 
     // Get uncompressed SEC1 encoding (65 bytes: 0x04 || x || y)
     let uncompressed = pubkey.to_encoded_point(false);

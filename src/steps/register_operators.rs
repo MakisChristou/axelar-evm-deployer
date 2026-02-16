@@ -1,8 +1,4 @@
-use alloy::{
-    primitives::Address,
-    providers::ProviderBuilder,
-    signers::local::PrivateKeySigner,
-};
+use alloy::{primitives::Address, providers::ProviderBuilder, signers::local::PrivateKeySigner};
 use eyre::Result;
 
 use crate::commands::deploy::DeployContext;
@@ -28,7 +24,7 @@ pub async fn run(ctx: &DeployContext, private_key: &str) -> Result<()> {
         _ => {
             return Err(eyre::eyre!(
                 "operator addresses not configured for env '{env}' — add them to the RegisterOperators handler"
-            ))
+            ));
         }
     };
 
@@ -48,9 +44,15 @@ pub async fn run(ctx: &DeployContext, private_key: &str) -> Result<()> {
             pending.get_receipt(),
         )
         .await
-        .map_err(|_| eyre::eyre!("tx {tx_hash} timed out after 120s — check the explorer and re-run deploy to retry"))?
-        ?;
-        ui::success(&format!("confirmed in block {}", receipt.block_number.unwrap_or(0)));
+        .map_err(|_| {
+            eyre::eyre!(
+                "tx {tx_hash} timed out after 120s — check the explorer and re-run deploy to retry"
+            )
+        })??;
+        ui::success(&format!(
+            "confirmed in block {}",
+            receipt.block_number.unwrap_or(0)
+        ));
     }
 
     Ok(())

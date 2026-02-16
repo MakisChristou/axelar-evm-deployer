@@ -66,13 +66,17 @@ pub async fn run(ctx: &DeployContext) -> Result<()> {
     }
 
     // Print instructions and poll
-    ui::info(&format!("waiting for verifier set on MultisigProver ({prover_addr})..."));
+    ui::info(&format!(
+        "waiting for verifier set on MultisigProver ({prover_addr})..."
+    ));
     ui::action_required(&[
         "An admin must complete these steps in order:",
         "",
         "1. Open a PR in https://github.com/axelarnetwork/infrastructure",
         "",
-        &format!("   File: infrastructure/{env}/apps/axelar-{env}/ampd/ampd-epsilon/helm-values.yaml"),
+        &format!(
+            "   File: infrastructure/{env}/apps/axelar-{env}/ampd/ampd-epsilon/helm-values.yaml"
+        ),
         "",
         "   Add to config_toml.chains:",
         "",

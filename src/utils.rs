@@ -20,12 +20,18 @@ pub fn update_target_json(
         .pointer_mut(&format!("/chains/{axelar_id}/contracts"))
         .and_then(|v| v.as_object_mut())
         .ok_or_else(|| {
-            eyre::eyre!("no chains.{axelar_id}.contracts in {}", target_json.display())
+            eyre::eyre!(
+                "no chains.{axelar_id}.contracts in {}",
+                target_json.display()
+            )
         })?;
 
     contracts.insert(contract_name.to_string(), contract_data);
     fs::write(target_json, serde_json::to_string_pretty(&root)? + "\n")?;
-    ui::success(&format!("updated {contract_name} in {}", target_json.display()));
+    ui::success(&format!(
+        "updated {contract_name} in {}",
+        target_json.display()
+    ));
     Ok(())
 }
 
@@ -60,7 +66,9 @@ pub fn read_contract_address(
     let content = fs::read_to_string(target_json)?;
     let root: Value = serde_json::from_str(&content)?;
     let addr_str = root
-        .pointer(&format!("/chains/{axelar_id}/contracts/{contract_name}/address"))
+        .pointer(&format!(
+            "/chains/{axelar_id}/contracts/{contract_name}/address"
+        ))
         .and_then(|v| v.as_str())
         .ok_or_else(|| eyre::eyre!("{contract_name} not deployed yet for {axelar_id}"))?;
     Ok(addr_str.parse()?)
@@ -87,25 +95,34 @@ pub fn deployments_root(target_json: &Path) -> Result<PathBuf> {
 pub fn artifact_paths_for_step(step_name: &str, root: &Path) -> Option<(String, Option<String>)> {
     let r = |p: &str| root.join(p).to_string_lossy().into_owned();
     match step_name {
-        "ConstAddressDeployer" => Some((
-            r("evm/legacy/ConstAddressDeployer.json"),
-            None,
-        )),
+        "ConstAddressDeployer" => Some((r("evm/legacy/ConstAddressDeployer.json"), None)),
         "Create3Deployer" => Some((
-            r("node_modules/@axelar-network/axelar-gmp-sdk-solidity/artifacts/contracts/deploy/Create3Deployer.sol/Create3Deployer.json"),
+            r(
+                "node_modules/@axelar-network/axelar-gmp-sdk-solidity/artifacts/contracts/deploy/Create3Deployer.sol/Create3Deployer.json",
+            ),
             None,
         )),
         "AxelarGateway" => Some((
-            r("node_modules/@axelar-network/axelar-gmp-sdk-solidity/artifacts/contracts/gateway/AxelarAmplifierGateway.sol/AxelarAmplifierGateway.json"),
-            Some(r("node_modules/@axelar-network/axelar-gmp-sdk-solidity/artifacts/contracts/gateway/AxelarAmplifierGatewayProxy.sol/AxelarAmplifierGatewayProxy.json")),
+            r(
+                "node_modules/@axelar-network/axelar-gmp-sdk-solidity/artifacts/contracts/gateway/AxelarAmplifierGateway.sol/AxelarAmplifierGateway.json",
+            ),
+            Some(r(
+                "node_modules/@axelar-network/axelar-gmp-sdk-solidity/artifacts/contracts/gateway/AxelarAmplifierGatewayProxy.sol/AxelarAmplifierGatewayProxy.json",
+            )),
         )),
         "Operators" => Some((
-            r("node_modules/@axelar-network/axelar-gmp-sdk-solidity/artifacts/contracts/utils/Operators.sol/Operators.json"),
+            r(
+                "node_modules/@axelar-network/axelar-gmp-sdk-solidity/artifacts/contracts/utils/Operators.sol/Operators.json",
+            ),
             None,
         )),
         "AxelarGasService" => Some((
-            r("node_modules/@axelar-network/axelar-cgp-solidity/artifacts/contracts/gas-service/AxelarGasService.sol/AxelarGasService.json"),
-            Some(r("node_modules/@axelar-network/axelar-cgp-solidity/artifacts/contracts/gas-service/AxelarGasServiceProxy.sol/AxelarGasServiceProxy.json")),
+            r(
+                "node_modules/@axelar-network/axelar-cgp-solidity/artifacts/contracts/gas-service/AxelarGasService.sol/AxelarGasService.json",
+            ),
+            Some(r(
+                "node_modules/@axelar-network/axelar-cgp-solidity/artifacts/contracts/gas-service/AxelarGasServiceProxy.sol/AxelarGasServiceProxy.json",
+            )),
         )),
         _ => None,
     }

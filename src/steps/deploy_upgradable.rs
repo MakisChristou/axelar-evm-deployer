@@ -35,50 +35,54 @@ pub async fn run(
     ui::address("gas collector (Operators)", &format!("{gas_collector}"));
 
     // --- Tx 1: Deploy implementation (skip if already deployed) ---
-    let impl_addr =
-        if let Some(saved) = step.get("implementationAddress").and_then(|v| v.as_str()) {
-            let addr = saved.parse()?;
-            let code = provider.get_code_at(addr).await?;
-            if code.is_empty() {
-                return Err(eyre::eyre!(
-                    "saved implementation {addr} has no code on-chain"
-                ));
-            }
-            ui::info(&format!("reusing previously deployed implementation: {addr}"));
-            addr
-        } else {
-            ui::info("deploying AxelarGasService implementation...");
-            let impl_bytecode = read_artifact_bytecode(impl_artifact)?;
-            let mut impl_deploy_code = impl_bytecode.clone();
-            impl_deploy_code.extend_from_slice(&gas_collector.abi_encode());
+    let impl_addr = if let Some(saved) = step.get("implementationAddress").and_then(|v| v.as_str())
+    {
+        let addr = saved.parse()?;
+        let code = provider.get_code_at(addr).await?;
+        if code.is_empty() {
+            return Err(eyre::eyre!(
+                "saved implementation {addr} has no code on-chain"
+            ));
+        }
+        ui::info(&format!(
+            "reusing previously deployed implementation: {addr}"
+        ));
+        addr
+    } else {
+        ui::info("deploying AxelarGasService implementation...");
+        let impl_bytecode = read_artifact_bytecode(impl_artifact)?;
+        let mut impl_deploy_code = impl_bytecode.clone();
+        impl_deploy_code.extend_from_slice(&gas_collector.abi_encode());
 
-            let tx = TransactionRequest::default()
-                .with_deploy_code(Bytes::from(impl_deploy_code));
-            let receipt = provider.send_transaction(tx).await?.get_receipt().await?;
-            ui::tx_hash("implementation tx hash", &format!("{}", receipt.transaction_hash));
+        let tx = TransactionRequest::default().with_deploy_code(Bytes::from(impl_deploy_code));
+        let receipt = provider.send_transaction(tx).await?.get_receipt().await?;
+        ui::tx_hash(
+            "implementation tx hash",
+            &format!("{}", receipt.transaction_hash),
+        );
 
-            if !receipt.status() {
-                return Err(eyre::eyre!(
-                    "implementation deployment tx {} reverted on-chain",
-                    receipt.transaction_hash
-                ));
-            }
+        if !receipt.status() {
+            return Err(eyre::eyre!(
+                "implementation deployment tx {} reverted on-chain",
+                receipt.transaction_hash
+            ));
+        }
 
-            let addr = receipt
-                .contract_address
-                .ok_or_else(|| eyre::eyre!("no contract address in implementation receipt"))?;
-            ui::address("implementation deployed at", &format!("{addr}"));
+        let addr = receipt
+            .contract_address
+            .ok_or_else(|| eyre::eyre!("no contract address in implementation receipt"))?;
+        ui::address("implementation deployed at", &format!("{addr}"));
 
-            // Save to state so retries skip re-deployment
-            if let Some(s) = ctx.state["steps"]
-                .as_array_mut()
-                .and_then(|a| a.get_mut(step_idx))
-            {
-                s["implementationAddress"] = json!(format!("{addr}"));
-            }
-            save_state(&ctx.axelar_id, &ctx.state)?;
-            addr
-        };
+        // Save to state so retries skip re-deployment
+        if let Some(s) = ctx.state["steps"]
+            .as_array_mut()
+            .and_then(|a| a.get_mut(step_idx))
+        {
+            s["implementationAddress"] = json!(format!("{addr}"));
+        }
+        save_state(&ctx.axelar_id, &ctx.state)?;
+        addr
+    };
 
     // --- Tx 2: Deploy proxy (skip if already deployed) ---
     let proxy_addr = if let Some(saved) = step.get("proxyAddress").and_then(|v| v.as_str()) {
@@ -93,8 +97,7 @@ pub async fn run(
         ui::info("deploying AxelarGasServiceProxy...");
         let proxy_bytecode = read_artifact_bytecode(proxy_artifact)?;
 
-        let tx =
-            TransactionRequest::default().with_deploy_code(Bytes::from(proxy_bytecode));
+        let tx = TransactionRequest::default().with_deploy_code(Bytes::from(proxy_bytecode));
         let receipt = provider.send_transaction(tx).await?.get_receipt().await?;
         ui::tx_hash("proxy tx hash", &format!("{}", receipt.transaction_hash));
 
@@ -130,9 +133,13 @@ pub async fn run(
 
     if impl_slot != U256::ZERO {
         let stored_impl = alloy::primitives::Address::from_word(impl_slot.into());
-        ui::info(&format!("proxy already initialized with implementation: {stored_impl}"));
+        ui::info(&format!(
+            "proxy already initialized with implementation: {stored_impl}"
+        ));
     } else {
-        ui::info(&format!("calling proxy.init({impl_addr}, {deployer_addr}, 0x)..."));
+        ui::info(&format!(
+            "calling proxy.init({impl_addr}, {deployer_addr}, 0x)..."
+        ));
         let proxy = LegacyProxy::new(proxy_addr, &provider);
         let init_tx = proxy.init(impl_addr, deployer_addr, Bytes::new());
 

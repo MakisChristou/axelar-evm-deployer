@@ -1,15 +1,18 @@
 use std::fs;
 use std::path::Path;
 
-use alloy::{hex, primitives::{Address, FixedBytes, U256}};
+use alloy::{
+    hex,
+    primitives::{Address, FixedBytes, U256},
+};
 use base64::Engine;
 use bip32::Mnemonic;
-use cosmrs::bip32::XPrv;
-use cosmrs::crypto::secp256k1::SigningKey;
-use cosmrs::tx::{self, Fee, SignDoc, SignerInfo};
 use cosmos_sdk_proto::cosmos::base::v1beta1::Coin as ProtoCoin;
 use cosmos_sdk_proto::cosmos::gov::v1::MsgSubmitProposal;
 use cosmos_sdk_proto::cosmwasm::wasm::v1::MsgExecuteContract as ProtoMsgExecuteContract;
+use cosmrs::bip32::XPrv;
+use cosmrs::crypto::secp256k1::SigningKey;
+use cosmrs::tx::{self, Fee, SignDoc, SignerInfo};
 use eyre::Result;
 use prost::Message;
 use serde_json::Value;
@@ -174,9 +177,8 @@ pub async fn lcd_fetch_code_id(lcd: &str, expected_checksum: &str) -> Result<u64
     let expected = expected_checksum.to_uppercase();
     let mut next_key: Option<String> = None;
     loop {
-        let mut url = format!(
-            "{lcd}/cosmwasm/wasm/v1/code?pagination.limit=100&pagination.reverse=true"
-        );
+        let mut url =
+            format!("{lcd}/cosmwasm/wasm/v1/code?pagination.limit=100&pagination.reverse=true");
         if let Some(ref key) = next_key {
             url.push_str(&format!("&pagination.key={key}"));
         }
@@ -185,16 +187,9 @@ pub async fn lcd_fetch_code_id(lcd: &str, expected_checksum: &str) -> Result<u64
             .as_array()
             .ok_or_else(|| eyre::eyre!("no code_infos in response"))?;
         for code in codes {
-            let checksum = code["data_hash"]
-                .as_str()
-                .unwrap_or("")
-                .to_uppercase();
+            let checksum = code["data_hash"].as_str().unwrap_or("").to_uppercase();
             if checksum == expected {
-                let code_id: u64 = code["code_id"]
-                    .as_str()
-                    .unwrap_or("0")
-                    .parse()
-                    .unwrap_or(0);
+                let code_id: u64 = code["code_id"].as_str().unwrap_or("0").parse().unwrap_or(0);
                 return Ok(code_id);
             }
         }
@@ -329,7 +324,10 @@ pub async fn sign_and_broadcast_cosmos_tx(
     messages: Vec<cosmrs::Any>,
 ) -> Result<Value> {
     let (account_number, sequence) = lcd_query_account(lcd, address).await?;
-    ui::kv("account", &format!("{address}, number={account_number}, sequence={sequence}"));
+    ui::kv(
+        "account",
+        &format!("{address}, number={account_number}, sequence={sequence}"),
+    );
 
     let sim_tx = build_and_sign_cosmos_tx(
         signing_key,
@@ -345,7 +343,10 @@ pub async fn sign_and_broadcast_cosmos_tx(
     let gas_used = lcd_simulate_tx(lcd, &sim_tx).await?;
     let gas_limit = (gas_used as f64 * 1.4) as u64;
     let fee_amount = ((gas_limit as f64) * gas_price).ceil() as u128;
-    ui::kv("gas", &format!("used={gas_used}, limit={gas_limit}, fee={fee_amount}{fee_denom}"));
+    ui::kv(
+        "gas",
+        &format!("used={gas_used}, limit={gas_limit}, fee={fee_amount}{fee_denom}"),
+    );
 
     let tx_bytes = build_and_sign_cosmos_tx(
         signing_key,
@@ -461,16 +462,12 @@ pub async fn fetch_verifier_set(
             "/axelar/contracts/MultisigProver/{chain_axelar_id}/address"
         ))
         .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            eyre::eyre!("no MultisigProver.{chain_axelar_id}.address in target json")
-        })?;
+        .ok_or_else(|| eyre::eyre!("no MultisigProver.{chain_axelar_id}.address in target json"))?;
 
     let query_msg = "\"current_verifier_set\"";
     let query_b64 = base64::engine::general_purpose::STANDARD.encode(query_msg.as_bytes());
 
-    let url = format!(
-        "{lcd}/cosmwasm/wasm/v1/contract/{prover_addr}/smart/{query_b64}"
-    );
+    let url = format!("{lcd}/cosmwasm/wasm/v1/contract/{prover_addr}/smart/{query_b64}");
     ui::info(&format!("fetching verifier set from: {url}"));
 
     let resp: Value = reqwest::get(&url).await?.json().await?;
@@ -528,8 +525,13 @@ pub async fn fetch_verifier_set(
 
     ui::kv(
         "verifier set",
-        &format!("{} signers, threshold={}, created_at={}, id={}",
-            weighted_signers.len(), threshold, created_at, verifier_set_id),
+        &format!(
+            "{} signers, threshold={}, created_at={}, id={}",
+            weighted_signers.len(),
+            threshold,
+            created_at,
+            verifier_set_id
+        ),
     );
     for (addr, weight) in &weighted_signers {
         ui::kv(&format!("{addr}"), &format!("weight={weight}"));

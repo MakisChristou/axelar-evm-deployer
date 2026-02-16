@@ -26,8 +26,14 @@ async fn main() -> Result<()> {
             salt,
             proxy_artifact_path,
         } => {
-            commands::deploy::run(axelar_id, private_key, artifact_path, salt, proxy_artifact_path)
-                .await
+            commands::deploy::run(
+                axelar_id,
+                private_key,
+                artifact_path,
+                salt,
+                proxy_artifact_path,
+            )
+            .await
         }
         cli::Commands::Reset { axelar_id } => commands::reset::run(axelar_id),
         cli::Commands::Test { subcommand } => match subcommand {

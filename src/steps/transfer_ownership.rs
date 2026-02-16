@@ -1,8 +1,4 @@
-use alloy::{
-    primitives::Address,
-    providers::ProviderBuilder,
-    signers::local::PrivateKeySigner,
-};
+use alloy::{primitives::Address, providers::ProviderBuilder, signers::local::PrivateKeySigner};
 use eyre::Result;
 use serde_json::{Map, Value, json};
 
@@ -11,11 +7,7 @@ use crate::evm::Ownable;
 use crate::ui;
 use crate::utils::{patch_target_json, read_contract_address};
 
-pub async fn run(
-    ctx: &DeployContext,
-    step: &Value,
-    private_key: &str,
-) -> Result<()> {
+pub async fn run(ctx: &DeployContext, step: &Value, private_key: &str) -> Result<()> {
     let signer: PrivateKeySigner = private_key.parse()?;
     let provider = ProviderBuilder::new()
         .wallet(signer)
@@ -32,7 +24,9 @@ pub async fn run(
     let contract_addr = read_contract_address(&ctx.target_json, &ctx.axelar_id, contract_name)?;
     let ownable = Ownable::new(contract_addr, &provider);
 
-    ui::info(&format!("transferring {contract_name} ownership to {new_owner}"));
+    ui::info(&format!(
+        "transferring {contract_name} ownership to {new_owner}"
+    ));
     let tx_hash = ownable
         .transferOwnership(new_owner)
         .send()

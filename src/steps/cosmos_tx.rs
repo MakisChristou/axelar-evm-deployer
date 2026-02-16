@@ -15,11 +15,7 @@ use crate::evm::get_salt_from_key;
 use crate::ui;
 use crate::utils::compute_domain_separator;
 
-pub async fn run(
-    ctx: &mut DeployContext,
-    step: &Value,
-    step_name: &str,
-) -> Result<()> {
+pub async fn run(ctx: &mut DeployContext, step: &Value, step_name: &str) -> Result<()> {
     let mnemonic = ctx.state["mnemonic"]
         .as_str()
         .ok_or_else(|| eyre::eyre!("no mnemonic in state. Run init first"))?
@@ -41,44 +37,83 @@ pub async fn run(
             .to_string()
     };
 
-    let proposal_key = step["proposalKey"]
-        .as_str()
-        .unwrap_or("")
-        .to_string();
+    let proposal_key = step["proposalKey"].as_str().unwrap_or("").to_string();
 
     match step_name {
         "InstantiateChainContracts" => {
             run_instantiate(
-                ctx, &signing_key, &axelar_address, &lcd, &chain_id, &fee_denom, gas_price,
-                use_governance, &chain_axelar_id, &env, &proposal_key,
+                ctx,
+                &signing_key,
+                &axelar_address,
+                &lcd,
+                &chain_id,
+                &fee_denom,
+                gas_price,
+                use_governance,
+                &chain_axelar_id,
+                &env,
+                &proposal_key,
             )
             .await?;
         }
         "RegisterDeployment" => {
             run_register_deployment(
-                ctx, &signing_key, &axelar_address, &lcd, &chain_id, &fee_denom, gas_price,
-                use_governance, &chain_axelar_id, &env, &proposal_key,
+                ctx,
+                &signing_key,
+                &axelar_address,
+                &lcd,
+                &chain_id,
+                &fee_denom,
+                gas_price,
+                use_governance,
+                &chain_axelar_id,
+                &env,
+                &proposal_key,
             )
             .await?;
         }
         "CreateRewardPools" => {
             run_create_reward_pools(
-                ctx, &signing_key, &axelar_address, &lcd, &chain_id, &fee_denom, gas_price,
-                use_governance, &chain_axelar_id, &env, &proposal_key,
+                ctx,
+                &signing_key,
+                &axelar_address,
+                &lcd,
+                &chain_id,
+                &fee_denom,
+                gas_price,
+                use_governance,
+                &chain_axelar_id,
+                &env,
+                &proposal_key,
             )
             .await?;
         }
         "AddRewards" => {
             run_add_rewards(
-                ctx, &signing_key, &axelar_address, &lcd, &chain_id, &fee_denom, gas_price,
+                ctx,
+                &signing_key,
+                &axelar_address,
+                &lcd,
+                &chain_id,
+                &fee_denom,
+                gas_price,
                 &chain_axelar_id,
             )
             .await?;
         }
         "RegisterItsOnHub" => {
             run_register_its_on_hub(
-                ctx, &signing_key, &axelar_address, &lcd, &chain_id, &fee_denom, gas_price,
-                use_governance, &chain_axelar_id, &env, &proposal_key,
+                ctx,
+                &signing_key,
+                &axelar_address,
+                &lcd,
+                &chain_id,
+                &fee_denom,
+                gas_price,
+                use_governance,
+                &chain_axelar_id,
+                &env,
+                &proposal_key,
             )
             .await?;
         }
@@ -104,7 +139,9 @@ async fn run_instantiate(
     env: &str,
     proposal_key: &str,
 ) -> Result<()> {
-    ui::info(&format!("instantiating chain contracts for {chain_axelar_id}..."));
+    ui::info(&format!(
+        "instantiating chain contracts for {chain_axelar_id}..."
+    ));
 
     let coordinator_addr =
         read_axelar_contract_field(&ctx.target_json, "/axelar/contracts/Coordinator/address")?;
@@ -170,9 +207,8 @@ async fn run_instantiate(
         _ => "axelar12qvsvse32cjyw60ztysd3v655aj5urqeup82ky",
     };
 
-    let deployment_name = format!(
-        "{chain_axelar_id}-{gateway_code_id}-{verifier_code_id}-{prover_code_id}"
-    );
+    let deployment_name =
+        format!("{chain_axelar_id}-{gateway_code_id}-{verifier_code_id}-{prover_code_id}");
 
     let execute_msg = json!({
         "instantiate_chain_contracts": {
@@ -234,7 +270,10 @@ async fn run_instantiate(
     });
 
     let json_str = serde_json::to_string_pretty(&execute_msg)?;
-    ui::info(&format!("execute msg: {}", ui::truncated_json(&json_str, 3)));
+    ui::info(&format!(
+        "execute msg: {}",
+        ui::truncated_json(&json_str, 3)
+    ));
 
     let sender = if use_governance {
         &governance_address
@@ -287,16 +326,13 @@ async fn run_instantiate(
     if coord.get("deployments").is_none() {
         coord.insert("deployments".to_string(), json!({}));
     }
-    coord["deployments"]
-        .as_object_mut()
-        .unwrap()
-        .insert(
-            chain_axelar_id.to_string(),
-            json!({
-                "deploymentName": deployment_name,
-                "salt": salt_key
-            }),
-        );
+    coord["deployments"].as_object_mut().unwrap().insert(
+        chain_axelar_id.to_string(),
+        json!({
+            "deploymentName": deployment_name,
+            "salt": salt_key
+        }),
+    );
 
     if let Some(vv) = root.pointer_mut(&format!(
         "/axelar/contracts/VotingVerifier/{chain_axelar_id}"
@@ -311,9 +347,7 @@ async fn run_instantiate(
         mp["domainSeparator"] = json!(format!("0x{domain_sep_hex}"));
         mp["contractAdmin"] = json!(contract_admin);
     }
-    if let Some(gw) =
-        root.pointer_mut(&format!("/axelar/contracts/Gateway/{chain_axelar_id}"))
-    {
+    if let Some(gw) = root.pointer_mut(&format!("/axelar/contracts/Gateway/{chain_axelar_id}")) {
         gw["codeId"] = json!(gateway_code_id);
         gw["contractAdmin"] = json!(contract_admin);
     } else {
@@ -607,10 +641,11 @@ async fn run_add_rewards(
 
     let inner_msg1 =
         build_execute_msg_any_with_funds(axelar_address, &rewards_addr, &msg1, funds.clone())?;
-    let inner_msg2 =
-        build_execute_msg_any_with_funds(axelar_address, &rewards_addr, &msg2, funds)?;
+    let inner_msg2 = build_execute_msg_any_with_funds(axelar_address, &rewards_addr, &msg2, funds)?;
 
-    ui::info(&format!("sending {reward_amount}{fee_denom} to each reward pool"));
+    ui::info(&format!(
+        "sending {reward_amount}{fee_denom} to each reward pool"
+    ));
     let tx_resp = sign_and_broadcast_cosmos_tx(
         signing_key,
         axelar_address,
@@ -673,7 +708,10 @@ async fn run_register_its_on_hub(
         ))
         .and_then(|v| v.as_str())
         .ok_or_else(|| {
-            eyre::eyre!("no InterchainTokenService address for {} — run DeployInterchainTokenService first", ctx.axelar_id)
+            eyre::eyre!(
+                "no InterchainTokenService address for {} — run DeployInterchainTokenService first",
+                ctx.axelar_id
+            )
         })?
         .to_string();
 
@@ -699,7 +737,10 @@ async fn run_register_its_on_hub(
     });
 
     let json_str = serde_json::to_string_pretty(&execute_msg)?;
-    ui::info(&format!("execute msg: {}", ui::truncated_json(&json_str, 3)));
+    ui::info(&format!(
+        "execute msg: {}",
+        ui::truncated_json(&json_str, 3)
+    ));
 
     let sender = if use_governance {
         &governance_address

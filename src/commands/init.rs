@@ -75,7 +75,10 @@ pub async fn run() -> Result<()> {
 
     chains.insert(axelar_id.clone(), chain_entry);
     fs::write(&target_json, serde_json::to_string_pretty(&root)? + "\n")?;
-    ui::success(&format!("added chain '{axelar_id}' to {}", target_json.display()));
+    ui::success(&format!(
+        "added chain '{axelar_id}' to {}",
+        target_json.display()
+    ));
 
     // --- State file ---
     let dir = data_dir()?;

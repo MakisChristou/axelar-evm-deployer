@@ -61,7 +61,10 @@ pub fn run(axelar_id: Option<String>) -> Result<()> {
 
         let addr = if status == "completed" {
             match name {
-                "ConstAddressDeployer" | "Create3Deployer" | "AxelarGateway" | "Operators"
+                "ConstAddressDeployer"
+                | "Create3Deployer"
+                | "AxelarGateway"
+                | "Operators"
                 | "AxelarGasService" => read_addr(name),
                 "PredictGatewayAddress" => state["predictedGatewayAddress"]
                     .as_str()

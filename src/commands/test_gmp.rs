@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use alloy::{
     network::TransactionBuilder,
-    primitives::{keccak256, Bytes, U256},
+    primitives::{Bytes, U256, keccak256},
     providers::{Provider, ProviderBuilder},
     rpc::types::TransactionRequest,
     signers::local::PrivateKeySigner,
@@ -57,23 +57,23 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
     ui::address("gas service", &format!("{gas_service_addr}"));
 
     // --- Deploy SenderReceiver if needed ---
-    let sender_receiver_addr = if let Some(addr_str) = state
-        .get("senderReceiverAddress")
-        .and_then(|v| v.as_str())
-    {
-        let addr: alloy::primitives::Address = addr_str.parse()?;
-        let code = provider.get_code_at(addr).await?;
-        if code.is_empty() {
-            ui::warn(&format!("SenderReceiver at {addr} has no code, redeploying..."));
-            deploy_sender_receiver(&provider, gateway_addr, gas_service_addr).await?
+    let sender_receiver_addr =
+        if let Some(addr_str) = state.get("senderReceiverAddress").and_then(|v| v.as_str()) {
+            let addr: alloy::primitives::Address = addr_str.parse()?;
+            let code = provider.get_code_at(addr).await?;
+            if code.is_empty() {
+                ui::warn(&format!(
+                    "SenderReceiver at {addr} has no code, redeploying..."
+                ));
+                deploy_sender_receiver(&provider, gateway_addr, gas_service_addr).await?
+            } else {
+                ui::info(&format!("SenderReceiver: reusing {addr}"));
+                addr
+            }
         } else {
-            ui::info(&format!("SenderReceiver: reusing {addr}"));
-            addr
-        }
-    } else {
-        ui::info("deploying SenderReceiver...");
-        deploy_sender_receiver(&provider, gateway_addr, gas_service_addr).await?
-    };
+            ui::info("deploying SenderReceiver...");
+            deploy_sender_receiver(&provider, gateway_addr, gas_service_addr).await?
+        };
 
     state["senderReceiverAddress"] = json!(format!("{sender_receiver_addr}"));
     save_state(&axelar_id, &state)?;
@@ -103,14 +103,14 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
     ui::tx_hash("tx", &format!("{tx_hash}"));
     ui::info("waiting for confirmation...");
 
-    let receipt = tokio::time::timeout(
-        std::time::Duration::from_secs(120),
-        pending.get_receipt(),
-    )
-    .await
-    .map_err(|_| eyre::eyre!("tx {tx_hash} timed out after 120s"))??;
+    let receipt = tokio::time::timeout(std::time::Duration::from_secs(120), pending.get_receipt())
+        .await
+        .map_err(|_| eyre::eyre!("tx {tx_hash} timed out after 120s"))??;
 
-    ui::success(&format!("confirmed in block {}", receipt.block_number.unwrap_or(0)));
+    ui::success(&format!(
+        "confirmed in block {}",
+        receipt.block_number.unwrap_or(0)
+    ));
 
     // --- Extract ContractCall event index from receipt ---
     let event_index = receipt
@@ -197,8 +197,7 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
         let end_poll_msg = json!({ "end_poll": { "poll_id": poll_id } });
-        let end_poll_any =
-            build_execute_msg_any(&axelar_address, &voting_verifier, &end_poll_msg)?;
+        let end_poll_any = build_execute_msg_any(&axelar_address, &voting_verifier, &end_poll_msg)?;
         match sign_and_broadcast_cosmos_tx(
             &signing_key,
             &axelar_address,
@@ -218,7 +217,8 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
             Err(e) => {
                 let msg = format!("{e}");
                 if msg.contains("cannot tally before poll end") {
-                    spinner.set_message(format!("Poll not expired yet (attempt {})...", attempt + 1));
+                    spinner
+                        .set_message(format!("Poll not expired yet (attempt {})...", attempt + 1));
                     continue;
                 }
                 spinner.finish_and_clear();
@@ -300,7 +300,10 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
     .await
     .map_err(|_| eyre::eyre!("approve tx timed out after 120s"))??;
 
-    ui::success(&format!("confirmed in block {}", approve_receipt.block_number.unwrap_or(0)));
+    ui::success(&format!(
+        "confirmed in block {}",
+        approve_receipt.block_number.unwrap_or(0)
+    ));
 
     // Extract commandId from the ContractCallApproved event (topic[1])
     let command_id = approve_receipt
@@ -355,14 +358,20 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
     .await
     .map_err(|_| eyre::eyre!("execute tx timed out after 120s"))??;
 
-    ui::success(&format!("confirmed in block {}", exec_receipt.block_number.unwrap_or(0)));
+    ui::success(&format!(
+        "confirmed in block {}",
+        exec_receipt.block_number.unwrap_or(0)
+    ));
 
     // Verify the message was stored
     let stored_message = sr_contract.message().call().await?;
     ui::kv("stored message", &format!("\"{stored_message}\""));
 
     ui::section("Complete");
-    ui::success(&format!("GMP flow complete ({})", ui::format_elapsed(gmp_start)));
+    ui::success(&format!(
+        "GMP flow complete ({})",
+        ui::format_elapsed(gmp_start)
+    ));
 
     Ok(())
 }
@@ -405,7 +414,9 @@ fn extract_poll_id(tx_resp: &serde_json::Value) -> Result<String> {
         }
     }
 
-    Err(eyre::eyre!("poll_id not found in verify_messages tx events"))
+    Err(eyre::eyre!(
+        "poll_id not found in verify_messages tx events"
+    ))
 }
 
 /// Extract a named attribute from wasm events in a tx response.
@@ -485,9 +496,7 @@ async fn wait_for_poll_votes(lcd: &str, voting_verifier: &str, poll_id: &str) ->
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
         let finished = poll["finished"].as_bool().unwrap_or(false);
-        let expires_at: u64 = poll["expires_at"]
-            .as_u64()
-            .unwrap_or(0);
+        let expires_at: u64 = poll["expires_at"].as_u64().unwrap_or(0);
 
         if let Some(tallies) = poll["tallies"].as_array() {
             if let Some(tally) = tallies.first() {
@@ -545,17 +554,17 @@ async fn deploy_sender_receiver<P: Provider>(
     ui::tx_hash("deploy tx", &format!("{tx_hash}"));
     ui::info("waiting for confirmation...");
 
-    let receipt = tokio::time::timeout(
-        std::time::Duration::from_secs(120),
-        pending.get_receipt(),
-    )
-    .await
-    .map_err(|_| eyre::eyre!("deploy tx {tx_hash} timed out after 120s"))??;
+    let receipt = tokio::time::timeout(std::time::Duration::from_secs(120), pending.get_receipt())
+        .await
+        .map_err(|_| eyre::eyre!("deploy tx {tx_hash} timed out after 120s"))??;
 
     let addr = receipt
         .contract_address
         .ok_or_else(|| eyre::eyre!("no contract address in receipt"))?;
 
-    ui::success(&format!("deployed in block {}", receipt.block_number.unwrap_or(0)));
+    ui::success(&format!(
+        "deployed in block {}",
+        receipt.block_number.unwrap_or(0)
+    ));
     Ok(addr)
 }

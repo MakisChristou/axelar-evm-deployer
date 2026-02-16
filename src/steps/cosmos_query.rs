@@ -64,9 +64,7 @@ pub async fn run(ctx: &DeployContext) -> Result<()> {
     )) {
         mp["address"] = json!(prover_address);
     }
-    if let Some(gw) =
-        root.pointer_mut(&format!("/axelar/contracts/Gateway/{chain_axelar_id}"))
-    {
+    if let Some(gw) = root.pointer_mut(&format!("/axelar/contracts/Gateway/{chain_axelar_id}")) {
         gw["address"] = json!(gateway_address);
     }
 

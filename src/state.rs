@@ -19,8 +19,12 @@ pub fn state_path(axelar_id: &str) -> Result<PathBuf> {
 
 pub fn read_state(axelar_id: &str) -> Result<Value> {
     let path = state_path(axelar_id)?;
-    let content = fs::read_to_string(&path)
-        .map_err(|e| eyre::eyre!("failed to read state file {}: {e}. Run `init` first.", path.display()))?;
+    let content = fs::read_to_string(&path).map_err(|e| {
+        eyre::eyre!(
+            "failed to read state file {}: {e}. Run `init` first.",
+            path.display()
+        )
+    })?;
     Ok(serde_json::from_str(&content)?)
 }
 

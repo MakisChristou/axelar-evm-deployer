@@ -31,8 +31,7 @@ pub async fn run(
         .connect_http(ctx.rpc_url.parse()?);
 
     let (addr, deploy_method, salt_used) = if step_kind == "deploy-create" {
-        let tx = TransactionRequest::default()
-            .with_deploy_code(Bytes::from(bytecode_raw.clone()));
+        let tx = TransactionRequest::default().with_deploy_code(Bytes::from(bytecode_raw.clone()));
         let receipt = provider.send_transaction(tx).await?.get_receipt().await?;
         ui::tx_hash("tx hash", &format!("{}", receipt.transaction_hash));
         let addr = receipt

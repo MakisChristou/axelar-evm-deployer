@@ -31,7 +31,11 @@ pub async fn run(
     migrate_steps(&mut state);
 
     // Load ITS config from env vars if not already in state
-    if state.get("itsDeployerPrivateKey").and_then(|v| v.as_str()).is_none() {
+    if state
+        .get("itsDeployerPrivateKey")
+        .and_then(|v| v.as_str())
+        .is_none()
+    {
         if let Ok(pk) = std::env::var("ITS_DEPLOYER_PRIVATE_KEY") {
             state["itsDeployerPrivateKey"] = json!(pk);
             ui::info("loaded ITS_DEPLOYER_PRIVATE_KEY from env");
@@ -63,10 +67,7 @@ pub async fn run(
     );
 
     let env = state["env"].as_str().unwrap_or("?");
-    let total_steps = state["steps"]
-        .as_array()
-        .map(|a| a.len())
-        .unwrap_or(0);
+    let total_steps = state["steps"].as_array().map(|a| a.len()).unwrap_or(0);
     let deploy_start = Instant::now();
 
     ui::section(&format!("Deploy {axelar_id}"));
@@ -118,15 +119,13 @@ pub async fn run(
                 "ConstAddressDeployer" | "Create3Deployer" => "deployerPrivateKey",
                 "DeployInterchainTokenService" => "itsDeployerPrivateKey",
                 "AxelarGateway" => "gatewayDeployerPrivateKey",
-                "Operators" | "RegisterOperators" | "TransferOperatorsOwnership"
+                "Operators"
+                | "RegisterOperators"
+                | "TransferOperatorsOwnership"
                 | "TransferGatewayOwnership" => "gatewayDeployerPrivateKey",
                 "TransferGasServiceOwnership" => "gasServiceDeployerPrivateKey",
                 "AxelarGasService" => "gasServiceDeployerPrivateKey",
-                _ => {
-                    return Err(eyre::eyre!(
-                        "--private-key required for step {step_name}"
-                    ))
-                }
+                _ => return Err(eyre::eyre!("--private-key required for step {step_name}")),
             };
             ctx.state[state_key]
                 .as_str()
@@ -144,15 +143,7 @@ pub async fn run(
                 let ap = resolved_artifact
                     .as_ref()
                     .ok_or_else(|| eyre::eyre!("--artifact-path required for deploy steps"))?;
-                steps::evm_deploy::run(
-                    &mut ctx,
-                    &step_name,
-                    &step_kind,
-                    &pk,
-                    ap,
-                    &salt,
-                )
-                .await?;
+                steps::evm_deploy::run(&mut ctx, &step_name, &step_kind, &pk, ap, &salt).await?;
             }
 
             "register-operators" => {
@@ -167,16 +158,14 @@ pub async fn run(
 
             "deploy-gateway" => {
                 let pk = resolve_evm_key(&step_name)?;
-                let impl_art = resolved_artifact
-                    .as_ref()
-                    .ok_or_else(|| eyre::eyre!("--artifact-path required (implementation artifact)"))?;
-                let proxy_art = resolved_proxy_artifact
-                    .as_ref()
-                    .ok_or_else(|| eyre::eyre!("--proxy-artifact-path required (proxy artifact)"))?;
-                steps::deploy_gateway::run(
-                    &mut ctx, step_idx, &step, &pk, impl_art, proxy_art,
-                )
-                .await?;
+                let impl_art = resolved_artifact.as_ref().ok_or_else(|| {
+                    eyre::eyre!("--artifact-path required (implementation artifact)")
+                })?;
+                let proxy_art = resolved_proxy_artifact.as_ref().ok_or_else(|| {
+                    eyre::eyre!("--proxy-artifact-path required (proxy artifact)")
+                })?;
+                steps::deploy_gateway::run(&mut ctx, step_idx, &step, &pk, impl_art, proxy_art)
+                    .await?;
             }
 
             "predict-address" => {
@@ -205,12 +194,12 @@ pub async fn run(
 
             "deploy-upgradable" => {
                 let pk = resolve_evm_key(&step_name)?;
-                let impl_art = resolved_artifact
-                    .as_ref()
-                    .ok_or_else(|| eyre::eyre!("--artifact-path required (implementation artifact)"))?;
-                let proxy_art = resolved_proxy_artifact
-                    .as_ref()
-                    .ok_or_else(|| eyre::eyre!("--proxy-artifact-path required (proxy artifact)"))?;
+                let impl_art = resolved_artifact.as_ref().ok_or_else(|| {
+                    eyre::eyre!("--artifact-path required (implementation artifact)")
+                })?;
+                let proxy_art = resolved_proxy_artifact.as_ref().ok_or_else(|| {
+                    eyre::eyre!("--proxy-artifact-path required (proxy artifact)")
+                })?;
                 steps::deploy_upgradable::run(
                     &mut ctx, step_idx, &step, &step_name, &pk, impl_art, proxy_art,
                 )
@@ -229,7 +218,10 @@ pub async fn run(
 
         mark_step_completed(&mut ctx.state, step_idx);
         save_state(&ctx.axelar_id, &ctx.state)?;
-        ui::success(&format!("{step_name} completed ({})", ui::format_elapsed(step_start)));
+        ui::success(&format!(
+            "{step_name} completed ({})",
+            ui::format_elapsed(step_start)
+        ));
     }
 
     Ok(())
