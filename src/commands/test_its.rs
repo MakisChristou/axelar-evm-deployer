@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use alloy::{
     primitives::{Address, FixedBytes, U256, keccak256},
-    providers::{Provider, ProviderBuilder},
+    providers::ProviderBuilder,
     signers::local::PrivateKeySigner,
     sol_types::{SolEvent, SolValue},
 };
@@ -16,7 +16,10 @@ use crate::cosmos::{
     build_execute_msg_any, derive_axelar_wallet, lcd_cosmwasm_smart_query, read_axelar_config,
     read_axelar_contract_field, sign_and_broadcast_cosmos_tx,
 };
-use crate::evm::{ContractCall, InterchainTokenFactory, InterchainTokenService, Ownable};
+use crate::evm::{
+    ContractCall, ERC20, InterchainToken, InterchainTokenDeployed, InterchainTokenFactory,
+    InterchainTokenService, Ownable,
+};
 use crate::state::read_state;
 use crate::ui;
 use crate::utils::read_contract_address;
@@ -175,13 +178,22 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
         receipt.block_number.unwrap_or(0)
     ));
 
-    // Extract tokenId from the return value (first 32 bytes of output)
-    // We need to compute the tokenId the same way the factory does
-    // tokenId = keccak256(abi.encode(PREFIX_INTERCHAIN_TOKEN_ID, deployer, salt))
-    // But we can also just read interchainTokenAddress later for verification.
-    // For now, extract from the InterchainTokenDeployed event or compute it.
-    let token_id = compute_interchain_token_id(its_factory_addr, deployer_address, salt);
+    // Extract tokenId from InterchainTokenDeployed event logs
+    let (token_id, local_token_addr) = extract_token_deployed_event(&receipt)?;
     ui::kv("tokenId", &format!("{token_id}"));
+    ui::address("local token", &format!("{local_token_addr}"));
+
+    // Verify tokenId by calling interchainTokenId() on the deployed token
+    let on_chain_id = InterchainToken::new(local_token_addr, &provider)
+        .interchainTokenId()
+        .call()
+        .await?;
+    if on_chain_id != token_id {
+        return Err(eyre::eyre!(
+            "tokenId mismatch: event={token_id} on-chain={on_chain_id}"
+        ));
+    }
+    ui::success("tokenId verified on-chain");
 
     // ── Step 2: Deploy remote interchain token to flow ──────────────────
     ui::step_header(2, TOTAL_STEPS, "Deploy remote interchain token to flow");
@@ -280,21 +292,67 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
     )
     .await?;
 
-    let poll_id = extract_poll_id(&verify_resp)?;
-    ui::kv("poll_id", &poll_id);
+    if let Some(poll_id) = extract_poll_id(&verify_resp) {
+        ui::kv("poll_id", &poll_id);
 
-    // ── Step 4: Wait for poll votes + end poll ──────────────────────────
-    ui::step_header(4, TOTAL_STEPS, "Wait for poll votes + end poll");
-    wait_for_poll_votes(&lcd, &voting_verifier, &poll_id).await?;
+        // ── Step 4: Wait for poll votes + end poll ──────────────────────────
+        ui::step_header(4, TOTAL_STEPS, "Wait for poll votes + end poll");
+        wait_for_poll_votes(&lcd, &voting_verifier, &poll_id).await?;
 
-    // End the poll — retry if it hasn't expired yet
-    let spinner = ui::wait_spinner("Ending poll (waiting for block expiry)...");
+        // End the poll — retry if it hasn't expired yet
+        let spinner = ui::wait_spinner("Ending poll (waiting for block expiry)...");
+        for attempt in 0..60 {
+            if attempt > 0 {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+            let end_poll_msg = json!({ "end_poll": { "poll_id": poll_id } });
+            let end_poll_any =
+                build_execute_msg_any(&axelar_address, &voting_verifier, &end_poll_msg)?;
+            match sign_and_broadcast_cosmos_tx(
+                &signing_key,
+                &axelar_address,
+                &lcd,
+                &chain_id,
+                &fee_denom,
+                gas_price,
+                vec![end_poll_any],
+            )
+            .await
+            {
+                Ok(_) => {
+                    spinner.finish_and_clear();
+                    ui::success("poll ended");
+                    break;
+                }
+                Err(e) => {
+                    let msg = format!("{e}");
+                    if msg.contains("cannot tally before poll end") {
+                        spinner.set_message(format!(
+                            "Poll not expired yet (attempt {})...",
+                            attempt + 1
+                        ));
+                        continue;
+                    }
+                    spinner.finish_and_clear();
+                    return Err(e);
+                }
+            }
+        }
+    } else {
+        ui::info("no new poll created — message already being verified by active verifiers");
+        ui::step_header(4, TOTAL_STEPS, "Wait for poll votes + end poll");
+        ui::info("skipped (existing poll)");
+    }
+
+    // ── Step 5: route_messages ──────────────────────────────────────────
+    ui::step_header(5, TOTAL_STEPS, "route_messages");
+    let spinner = ui::wait_spinner("Routing message to hub...");
     for attempt in 0..60 {
         if attempt > 0 {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
-        let end_poll_msg = json!({ "end_poll": { "poll_id": poll_id } });
-        let end_poll_any = build_execute_msg_any(&axelar_address, &voting_verifier, &end_poll_msg)?;
+        let route_msg = json!({ "route_messages": [its_msg] });
+        let route_any = build_execute_msg_any(&axelar_address, &cosm_gateway, &route_msg)?;
         match sign_and_broadcast_cosmos_tx(
             &signing_key,
             &axelar_address,
@@ -302,20 +360,22 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
             &chain_id,
             &fee_denom,
             gas_price,
-            vec![end_poll_any],
+            vec![route_any],
         )
         .await
         {
             Ok(_) => {
                 spinner.finish_and_clear();
-                ui::success("poll ended");
+                ui::success("message routed to hub");
                 break;
             }
             Err(e) => {
                 let msg = format!("{e}");
-                if msg.contains("cannot tally before poll end") {
-                    spinner
-                        .set_message(format!("Poll not expired yet (attempt {})...", attempt + 1));
+                if msg.contains("not verified") {
+                    spinner.set_message(format!(
+                        "Message not yet verified (attempt {}/60)...",
+                        attempt + 1
+                    ));
                     continue;
                 }
                 spinner.finish_and_clear();
@@ -324,22 +384,6 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
         }
     }
 
-    // ── Step 5: route_messages ──────────────────────────────────────────
-    ui::step_header(5, TOTAL_STEPS, "route_messages");
-    let route_msg = json!({ "route_messages": [its_msg] });
-    let route_any = build_execute_msg_any(&axelar_address, &cosm_gateway, &route_msg)?;
-    sign_and_broadcast_cosmos_tx(
-        &signing_key,
-        &axelar_address,
-        &lcd,
-        &chain_id,
-        &fee_denom,
-        gas_price,
-        vec![route_any],
-    )
-    .await?;
-    ui::success("message routed to hub");
-
     // ── Step 6: Execute on AxelarnetGateway (hub) ───────────────────────
     ui::step_header(6, TOTAL_STEPS, "Execute on AxelarnetGateway (hub)");
 
@@ -347,7 +391,7 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
         read_axelar_contract_field(&target_json, "/axelar/contracts/AxelarnetGateway/address")?;
     ui::address("AxelarnetGateway", &axelarnet_gateway);
 
-    // Check executable_messages
+    // Wait for message to become executable (Router needs time to approve it)
     let exec_query = json!({
         "executable_messages": {
             "cc_ids": [{
@@ -356,11 +400,26 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
             }]
         }
     });
-    let exec_status = lcd_cosmwasm_smart_query(&lcd, &axelarnet_gateway, &exec_query).await?;
-    ui::info(&format!(
-        "executable status: {}",
-        serde_json::to_string_pretty(&exec_status)?
-    ));
+    let spinner = ui::wait_spinner("Waiting for message to be approved on hub...");
+    for i in 0..120 {
+        if i > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+        let status = lcd_cosmwasm_smart_query(&lcd, &axelarnet_gateway, &exec_query).await?;
+        let status_str = serde_json::to_string(&status)?;
+        if !status_str.contains("null") && status_str.contains(&message_id) {
+            spinner.finish_and_clear();
+            ui::success("message approved on hub");
+            break;
+        }
+        if i == 119 {
+            spinner.finish_and_clear();
+            return Err(eyre::eyre!(
+                "message not approved on AxelarnetGateway after 10 minutes"
+            ));
+        }
+        spinner.set_message(format!("Not yet approved (attempt {}/120)...", i + 1));
+    }
 
     // Execute with payload
     let payload_hex = alloy::hex::encode(&payload);
@@ -374,7 +433,7 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
         }
     });
     let execute_any = build_execute_msg_any(&axelar_address, &axelarnet_gateway, &execute_msg)?;
-    let _execute_resp = sign_and_broadcast_cosmos_tx(
+    match sign_and_broadcast_cosmos_tx(
         &signing_key,
         &axelar_address,
         &lcd,
@@ -383,10 +442,24 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
         gas_price,
         vec![execute_any],
     )
-    .await?;
-    ui::success(&format!(
-        "hub executed — message routed to {DEST_CHAIN} (relayer will handle delivery)"
-    ));
+    .await
+    {
+        Ok(_) => {
+            ui::success(&format!(
+                "hub executed — message routed to {DEST_CHAIN} (relayer will handle delivery)"
+            ));
+        }
+        Err(e) => {
+            let msg = format!("{e}");
+            if msg.contains("already executed") {
+                ui::success(&format!(
+                    "message already executed on hub by relayer — continuing to {DEST_CHAIN}"
+                ));
+            } else {
+                return Err(e);
+            }
+        }
+    }
 
     // ── Step 7: Poll destination chain to confirm token deployed ─────────
     ui::step_header(7, TOTAL_STEPS, &format!("Poll {DEST_CHAIN} for token deployment"));
@@ -397,6 +470,14 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
     ui::address(&format!("{DEST_CHAIN} ITS"), &format!("{dest_its_addr}"));
     ui::kv("tokenId", &format!("{token_id}"));
 
+    // Get the predicted token address on the destination chain
+    let predicted_addr = dest_its
+        .interchainTokenAddress(token_id)
+        .call()
+        .await
+        .map_err(|e| eyre::eyre!("failed to query interchainTokenAddress on {DEST_CHAIN}: {e}"))?;
+    ui::address("predicted token addr", &format!("{predicted_addr}"));
+
     let spinner = ui::wait_spinner(&format!("Waiting for token to appear on {DEST_CHAIN}..."));
     let mut deployed_addr = Address::ZERO;
 
@@ -405,23 +486,21 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         }
 
-        match dest_its.interchainTokenAddress(token_id).call().await {
-            Ok(addr) => {
-                if addr != Address::ZERO {
-                    // Check if there's code at the address
-                    let code = dest_provider.get_code_at(addr).await.unwrap_or_default();
-                    if !code.is_empty() {
-                        deployed_addr = addr;
-                        break;
-                    }
-                }
+        // Try calling name() on the predicted address — if it succeeds, the token is deployed
+        // (get_code_at doesn't work reliably on some chains like Flow)
+        let token = ERC20::new(predicted_addr, &dest_provider);
+        match token.name().call().await {
+            Ok(name) => {
+                spinner.finish_and_clear();
+                ui::success(&format!("Token responds to name() → \"{name}\""));
+                deployed_addr = predicted_addr;
+                break;
+            }
+            Err(_) => {
                 spinner.set_message(format!(
-                    "Token not yet deployed (attempt {}/30, addr={addr})...",
+                    "Token not yet deployed (attempt {}/30, addr={predicted_addr})...",
                     i + 1
                 ));
-            }
-            Err(e) => {
-                spinner.set_message(format!("Query failed (attempt {}/30): {e}...", i + 1));
             }
         }
     }
@@ -462,21 +541,33 @@ fn generate_salt() -> FixedBytes<32> {
     keccak256(&encoded)
 }
 
-/// Compute the interchain token ID the same way the factory does:
-/// keccak256(abi.encode(PREFIX_INTERCHAIN_TOKEN_ID, keccak256(abi.encode(factory, deployer, salt))))
-/// PREFIX_INTERCHAIN_TOKEN_ID = keccak256("its-interchain-token-id")
-fn compute_interchain_token_id(
-    factory: Address,
-    deployer: Address,
-    salt: FixedBytes<32>,
-) -> FixedBytes<32> {
-    // The factory computes deploySalt = keccak256(abi.encode(msg.sender, salt))
-    // Then tokenId = ITS.interchainTokenId(address(this), deploySalt)
-    // ITS.interchainTokenId(sender, salt) = keccak256(abi.encode(PREFIX, sender, salt))
-    // PREFIX = keccak256("its-interchain-token-id")
-    let prefix = keccak256(b"its-interchain-token-id");
-    let deploy_salt = keccak256(&(deployer, salt).abi_encode_params());
-    keccak256(&(prefix, factory, deploy_salt).abi_encode_params())
+/// Extract tokenId and token address from InterchainTokenDeployed event in receipt logs.
+/// Reads topics/data directly to avoid ABI decode issues with indexed field differences.
+fn extract_token_deployed_event(
+    receipt: &alloy::rpc::types::TransactionReceipt,
+) -> Result<(FixedBytes<32>, Address)> {
+    for log in receipt.inner.logs() {
+        if log.topics().first() == Some(&InterchainTokenDeployed::SIGNATURE_HASH) {
+            // tokenId is always topics[1] (first indexed param)
+            let token_id = *log
+                .topics()
+                .get(1)
+                .ok_or_else(|| eyre::eyre!("InterchainTokenDeployed missing tokenId topic"))?;
+
+            // tokenAddress is always the first ABI-encoded field in data (bytes 12..32)
+            let data = log.data().data.as_ref();
+            if data.len() >= 32 {
+                let token_address = Address::from_slice(&data[12..32]);
+                return Ok((token_id, token_address));
+            }
+
+            return Ok((token_id, Address::ZERO));
+        }
+    }
+
+    Err(eyre::eyre!(
+        "InterchainTokenDeployed event not found in receipt logs"
+    ))
 }
 
 /// Extract ContractCall event data from a transaction receipt.

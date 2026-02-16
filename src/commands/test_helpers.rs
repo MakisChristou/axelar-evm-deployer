@@ -5,11 +5,11 @@ use crate::cosmos::lcd_cosmwasm_smart_query;
 use crate::ui;
 
 /// Extract poll_id from the verify_messages tx response events.
-pub fn extract_poll_id(tx_resp: &serde_json::Value) -> Result<String> {
+/// Returns None if no poll was created (e.g. message already being verified by active relayers).
+pub fn extract_poll_id(tx_resp: &serde_json::Value) -> Option<String> {
     let events = tx_resp
         .pointer("/tx_response/events")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| eyre::eyre!("no events in verify_messages tx response"))?;
+        .and_then(|v| v.as_array())?;
 
     for event in events {
         let event_type = event["type"].as_str().unwrap_or("");
@@ -18,33 +18,15 @@ pub fn extract_poll_id(tx_resp: &serde_json::Value) -> Result<String> {
                 for attr in attrs {
                     let key = attr["key"].as_str().unwrap_or("");
                     if key == "poll_id" {
-                        let val = attr["value"]
-                            .as_str()
-                            .ok_or_else(|| eyre::eyre!("poll_id attribute has no value"))?;
-                        let val = val.trim_matches('"');
-                        return Ok(val.to_string());
+                        let val = attr["value"].as_str()?;
+                        return Some(val.trim_matches('"').to_string());
                     }
                 }
             }
         }
     }
 
-    // Debug: print events
-    ui::warn("poll_id not found, dumping tx events:");
-    for event in events {
-        let event_type = event["type"].as_str().unwrap_or("?");
-        if let Some(attrs) = event["attributes"].as_array() {
-            for attr in attrs {
-                let key = attr["key"].as_str().unwrap_or("?");
-                let val = attr["value"].as_str().unwrap_or("?");
-                ui::info(&format!("{event_type}: {key} = {val}"));
-            }
-        }
-    }
-
-    Err(eyre::eyre!(
-        "poll_id not found in verify_messages tx events"
-    ))
+    None
 }
 
 /// Extract a named attribute from wasm events in a tx response.

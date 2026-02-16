@@ -121,6 +121,26 @@ sol! {
         function interchainTokenAddress(bytes32 tokenId) external view returns (address);
         function isTrustedChain(string calldata chainName) external view returns (bool);
     }
+
+    // InterchainTokenDeployed event (emitted by ITS when a token is deployed)
+    event InterchainTokenDeployed(
+        bytes32 indexed tokenId,
+        address tokenAddress,
+        address minter,
+        string name,
+        string symbol,
+        uint8 decimals
+    );
+
+    #[sol(rpc)]
+    contract ERC20 {
+        function name() external view returns (string);
+    }
+
+    #[sol(rpc)]
+    contract InterchainToken {
+        function interchainTokenId() external view returns (bytes32);
+    }
 }
 
 /// Compute salt: keccak256(abi.encode(key)) — matches JS getSaltFromKey

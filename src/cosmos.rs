@@ -341,7 +341,7 @@ pub async fn sign_and_broadcast_cosmos_tx(
     )?;
 
     let gas_used = lcd_simulate_tx(lcd, &sim_tx).await?;
-    let gas_limit = (gas_used as f64 * 1.4) as u64;
+    let gas_limit = (gas_used as f64 * 2.0) as u64;
     let fee_amount = ((gas_limit as f64) * gas_price).ceil() as u128;
     ui::kv(
         "gas",
