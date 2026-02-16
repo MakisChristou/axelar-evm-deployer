@@ -57,6 +57,12 @@ pub enum TestCommands {
         #[arg(long)]
         axelar_id: Option<String>,
     },
+
+    /// Test ITS: deploy interchain token on source, deploy remotely to flow via hub
+    Its {
+        #[arg(long)]
+        axelar_id: Option<String>,
+    },
 }
 
 pub fn resolve_axelar_id(opt: Option<String>) -> Result<String> {

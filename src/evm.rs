@@ -97,6 +97,30 @@ sol! {
         bytes32 indexed payloadHash,
         bytes payload
     );
+
+    #[sol(rpc)]
+    contract InterchainTokenFactory {
+        function deployInterchainToken(
+            bytes32 salt,
+            string calldata name,
+            string calldata symbol,
+            uint8 decimals,
+            uint256 initialSupply,
+            address minter
+        ) external payable returns (bytes32 tokenId);
+
+        function deployRemoteInterchainToken(
+            bytes32 salt,
+            string calldata destinationChain,
+            uint256 gasValue
+        ) external payable returns (bytes32 tokenId);
+    }
+
+    #[sol(rpc)]
+    contract InterchainTokenService {
+        function interchainTokenAddress(bytes32 tokenId) external view returns (address);
+        function isTrustedChain(string calldata chainName) external view returns (bool);
+    }
 }
 
 /// Compute salt: keccak256(abi.encode(key)) — matches JS getSaltFromKey
@@ -178,6 +202,7 @@ pub fn decode_revert_data(hex_str: &str) -> String {
         "84677ce8" => "InvalidWeights() — signer weights invalid".into(),
         "bf10dd3a" => "NotProxy() — must be called via proxy delegatecall".into(),
         "d924e5f4" => "InvalidOwnerAddress()".into(),
+        "f9188a68" => "UntrustedChain() — destination chain not trusted by ITS".into(),
         "08c379a0" => {
             if let Ok(bytes) = hex::decode(hex_data) {
                 if bytes.len() > 4 + 32 + 32 {
