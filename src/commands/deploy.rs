@@ -148,6 +148,7 @@ pub async fn run(
                 return Ok(pk.clone());
             }
             let state_key = match step_name {
+                "EvmCompatibilityCheck" => "deployerPrivateKey",
                 "ConstAddressDeployer" | "Create3Deployer" => "deployerPrivateKey",
                 "DeployInterchainTokenService" => "itsDeployerPrivateKey",
                 "AxelarGateway" => "gatewayDeployerPrivateKey",
@@ -170,6 +171,11 @@ pub async fn run(
         };
 
         match step_kind.as_str() {
+            "evm-compat" => {
+                let pk = resolve_evm_key(&step_name)?;
+                steps::evm_compat::run(&ctx, &pk).await?;
+            }
+
             "deploy-create" | "deploy-create2" => {
                 let pk = resolve_evm_key(&step_name)?;
                 let ap = resolved_artifact

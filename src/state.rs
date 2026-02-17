@@ -82,6 +82,7 @@ pub fn migrate_steps(state: &mut Value) {
 
 pub fn default_steps() -> Vec<Value> {
     vec![
+        json!({ "name": "EvmCompatibilityCheck", "kind": "evm-compat", "status": "pending" }),
         json!({ "name": "ConstAddressDeployer", "kind": "deploy-create", "status": "pending" }),
         json!({ "name": "Create3Deployer", "kind": "deploy-create2", "status": "pending" }),
         json!({ "name": "PredictGatewayAddress", "kind": "predict-address", "status": "pending" }),

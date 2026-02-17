@@ -1,4 +1,5 @@
 pub mod config_edit;
+pub mod evm_compat;
 pub mod cosmos_poll;
 pub mod cosmos_query;
 pub mod cosmos_tx;
