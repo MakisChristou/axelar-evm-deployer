@@ -12,6 +12,7 @@ use serde_json::json;
 
 use crate::cli::resolve_axelar_id;
 use crate::commands::test_helpers::{extract_poll_id, wait_for_poll_votes};
+use crate::preflight;
 use crate::cosmos::{
     build_execute_msg_any, derive_axelar_wallet, lcd_cosmwasm_smart_query, read_axelar_config,
     read_axelar_contract_field, sign_and_broadcast_cosmos_tx,
@@ -59,6 +60,23 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
     let provider = ProviderBuilder::new()
         .wallet(signer)
         .connect_http(rpc_url.parse()?);
+
+    // --- Pre-flight: check deployer balance ---
+    let token_symbol = std::fs::read_to_string(&target_json)
+        .ok()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+        .and_then(|root| {
+            root.pointer(&format!("/chains/{axelar_id}/tokenSymbol"))
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        })
+        .unwrap_or_else(|| "ETH".to_string());
+    preflight::check_evm_balances(
+        &rpc_url,
+        &[("deployer", deployer_address)],
+        &token_symbol,
+    )
+    .await?;
 
     let its_factory_addr =
         read_contract_address(&target_json, &axelar_id, "InterchainTokenFactory")?;

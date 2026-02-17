@@ -2,6 +2,7 @@ mod cli;
 mod commands;
 mod cosmos;
 mod evm;
+mod preflight;
 mod state;
 mod steps;
 pub mod ui;

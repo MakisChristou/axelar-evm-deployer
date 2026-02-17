@@ -1,10 +1,13 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
+use alloy::primitives::Address;
+use alloy::signers::local::PrivateKeySigner;
 use eyre::Result;
 use serde_json::{Value, json};
 
 use crate::cli::resolve_axelar_id;
+use crate::preflight;
 use crate::state::{mark_step_completed, migrate_steps, next_pending_step, read_state, save_state};
 use crate::steps;
 use crate::ui;
@@ -77,6 +80,39 @@ pub async fn run(
         rpc_url,
         target_json,
     };
+
+    // --- Pre-flight: check EVM deployer balances ---
+    {
+        let key_fields: &[(&str, &str)] = &[
+            ("deployer", "deployerPrivateKey"),
+            ("gateway deployer", "gatewayDeployerPrivateKey"),
+            ("gas service deployer", "gasServiceDeployerPrivateKey"),
+            ("ITS deployer", "itsDeployerPrivateKey"),
+        ];
+        let mut wallets: Vec<(&str, Address)> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for &(label, state_key) in key_fields {
+            if let Some(pk_str) = ctx.state[state_key].as_str()
+                && let Ok(signer) = pk_str.parse::<PrivateKeySigner>()
+            {
+                let addr = signer.address();
+                if seen.insert(addr) {
+                    wallets.push((label, addr));
+                }
+            }
+        }
+        let token_symbol = std::fs::read_to_string(&ctx.target_json)
+            .ok()
+            .and_then(|c| serde_json::from_str::<Value>(&c).ok())
+            .and_then(|root| {
+                root.pointer(&format!("/chains/{}/tokenSymbol", ctx.axelar_id))
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            })
+            .unwrap_or_else(|| "ETH".to_string());
+
+        preflight::check_evm_balances(&ctx.rpc_url, &wallets, &token_symbol).await?;
+    }
 
     loop {
         let (step_idx, step) = match next_pending_step(&ctx.state) {
