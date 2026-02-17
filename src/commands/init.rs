@@ -67,18 +67,18 @@ pub async fn run() -> Result<()> {
         .ok_or_else(|| eyre::eyre!("no 'chains' object in {}", target_json.display()))?;
 
     if chains.contains_key(&axelar_id) {
-        return Err(eyre::eyre!(
-            "chain '{axelar_id}' already exists in {}",
+        ui::info(&format!(
+            "chain '{axelar_id}' already exists in {}, skipping",
+            target_json.display()
+        ));
+    } else {
+        chains.insert(axelar_id.clone(), chain_entry);
+        fs::write(&target_json, serde_json::to_string_pretty(&root)? + "\n")?;
+        ui::success(&format!(
+            "added chain '{axelar_id}' to {}",
             target_json.display()
         ));
     }
-
-    chains.insert(axelar_id.clone(), chain_entry);
-    fs::write(&target_json, serde_json::to_string_pretty(&root)? + "\n")?;
-    ui::success(&format!(
-        "added chain '{axelar_id}' to {}",
-        target_json.display()
-    ));
 
     // --- State file ---
     let dir = data_dir()?;

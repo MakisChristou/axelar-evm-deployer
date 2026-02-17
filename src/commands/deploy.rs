@@ -7,8 +7,11 @@ use eyre::Result;
 use serde_json::{Value, json};
 
 use crate::cli::resolve_axelar_id;
+use crate::commands;
 use crate::preflight;
-use crate::state::{mark_step_completed, migrate_steps, next_pending_step, read_state, save_state};
+use crate::state::{
+    mark_step_completed, migrate_steps, next_pending_step, read_state, save_state, state_path,
+};
 use crate::steps;
 use crate::ui;
 use crate::utils::{artifact_paths_for_step, deployments_root};
@@ -28,6 +31,12 @@ pub async fn run(
     proxy_artifact_path: Option<String>,
 ) -> Result<()> {
     let axelar_id = resolve_axelar_id(axelar_id)?;
+
+    if !state_path(&axelar_id)?.exists() {
+        ui::info("no state file found, running init…");
+        commands::init::run().await?;
+    }
+
     let mut state = read_state(&axelar_id)?;
 
     // Migrate: append any new steps added since this state was created

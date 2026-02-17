@@ -34,35 +34,19 @@ pub async fn run(ctx: &DeployContext) -> Result<()> {
         &ctx.target_json,
         "/axelar/contracts/ServiceRegistry/address",
     )?;
-    let admin_addr = if let Some(admin_mn) = ctx.state["adminMnemonic"].as_str() {
-        let (_, addr) = derive_axelar_wallet(admin_mn)?;
-        addr
-    } else {
-        root.pointer("/axelar/multisigProverAdminAddress")
-            .and_then(|v| v.as_str())
-            .unwrap_or("<prover-admin>")
-            .to_string()
-    };
-    let axelar_chain_id = root
-        .pointer("/axelar/chainId")
-        .and_then(|v| v.as_str())
-        .unwrap_or("<chain-id>");
-    let axelar_rpc = root
-        .pointer("/axelar/rpc")
-        .and_then(|v| v.as_str())
-        .unwrap_or("<rpc>");
-
     let (lcd, chain_id, fee_denom, gas_price) = read_axelar_config(&ctx.target_json)?;
     let env = ctx.state["env"].as_str().unwrap_or("testnet");
 
     // Check if verifier set already exists
     let query_msg = json!("current_verifier_set");
     if let Ok(data) = lcd_cosmwasm_smart_query(&lcd, &prover_addr, &query_msg).await
-        && !data.is_null() && data.get("id").is_some() {
-            let id = data["id"].as_str().unwrap_or("?");
-            ui::success(&format!("verifier set already exists! id: {id}"));
-            return Ok(());
-        }
+        && !data.is_null()
+        && data.get("id").is_some()
+    {
+        let id = data["id"].as_str().unwrap_or("?");
+        ui::success(&format!("verifier set already exists! id: {id}"));
+        return Ok(());
+    }
 
     // Print instructions and poll
     ui::info(&format!(
@@ -116,11 +100,6 @@ pub async fn run(ctx: &DeployContext) -> Result<()> {
         "",
         "3. Register chain support:",
         &format!("   ./register_chain_support.sh {chain_axelar_id}"),
-        "",
-        "4. Update verifier set:",
-        &format!("   axelard tx wasm execute {prover_addr} '\"update_verifier_set\"' \\"),
-        &format!("     --from {admin_addr} --chain-id {axelar_chain_id} --node {axelar_rpc} \\"),
-        "     --gas auto --gas-adjustment 1.3",
     ]);
 
     // Phase 1: poll ServiceRegistry for active verifiers
