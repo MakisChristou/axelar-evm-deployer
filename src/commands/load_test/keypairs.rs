@@ -13,9 +13,11 @@ use solana_sdk::{
 
 use crate::ui;
 
-/// Minimum lamports each derived key must have before the load test starts.
-/// 0.01 SOL = enough for ~2000 transactions.
-const MIN_LAMPORTS_PER_KEY: u64 = 10_000_000;
+/// When a key drops below this balance, it gets topped up.
+const MIN_LAMPORTS_PER_KEY: u64 = 10_000_000; // 0.01 SOL
+
+/// Top-up target: fund keys to this amount so they last multiple runs.
+const TARGET_LAMPORTS_PER_KEY: u64 = 20_000_000; // 0.02 SOL
 
 /// Lamports reserved in the main wallet for transfer fees.
 const FUNDING_RESERVE: u64 = 5_000_000;
@@ -61,13 +63,13 @@ pub fn ensure_funded(
         let balance = rpc.get_balance(&kp.pubkey()).unwrap_or(0);
         balances.push(balance);
         if balance < MIN_LAMPORTS_PER_KEY {
-            to_fund.push((i, MIN_LAMPORTS_PER_KEY - balance));
+            to_fund.push((i, TARGET_LAMPORTS_PER_KEY - balance));
         }
     }
 
     if to_fund.is_empty() {
         ui::success(&format!(
-            "all {} derived keys are funded (>= {} SOL each)",
+            "all {} derived keys are funded (>= {:.4} SOL each)",
             derived.len(),
             MIN_LAMPORTS_PER_KEY as f64 / 1e9,
         ));
