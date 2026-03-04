@@ -11,7 +11,6 @@ use solana_sdk::{
     transaction::Transaction,
 };
 use solana_transaction_status::UiTransactionEncoding;
-use std::sync::Arc;
 use std::time::Instant;
 
 use crate::commands::load_test::metrics::TxMetrics;
@@ -30,30 +29,6 @@ pub fn load_keypair(path: Option<&str>) -> Result<Keypair> {
     };
     read_keypair_file(&key_path)
         .map_err(|e| eyre::eyre!("failed to read Solana keypair from {key_path}: {e}"))
-}
-
-/// Derive N keypairs from a BIP39 mnemonic using ed25519 SLIP-0010 derivation.
-pub fn derive_keypairs_from_mnemonic(
-    mnemonic: &str,
-    count: usize,
-) -> Result<Vec<Arc<dyn Signer + Send + Sync>>> {
-    use solana_sdk::signature::keypair_from_seed;
-
-    let seed = bip39::Mnemonic::parse(mnemonic)
-        .map_err(|e| eyre::eyre!("invalid mnemonic: {e}"))?
-        .to_seed("");
-
-    let mut keypairs: Vec<Arc<dyn Signer + Send + Sync>> = Vec::with_capacity(count);
-
-    for i in 0..count {
-        let path = format!("m/44'/501'/{i}'");
-        let derived = derive_key_from_seed(&seed, &path)?;
-        let kp = keypair_from_seed(&derived[..32])
-            .map_err(|e| eyre::eyre!("failed to create keypair: {e}"))?;
-        keypairs.push(Arc::new(kp));
-    }
-
-    Ok(keypairs)
 }
 
 /// Send a call_contract instruction to the Solana Axelar Gateway.
@@ -152,57 +127,4 @@ fn fetch_tx_details(
         }
     }
     Ok((None, None))
-}
-
-/// SLIP-0010 ed25519 key derivation from seed.
-#[allow(clippy::missing_asserts_for_indexing)]
-fn derive_key_from_seed(seed: &[u8], path: &str) -> Result<[u8; 64]> {
-    use hmac::{Hmac, Mac};
-    use sha2::Sha512;
-
-    let mut hmac =
-        Hmac::<Sha512>::new_from_slice(b"ed25519 seed").map_err(|e| eyre::eyre!("{e}"))?;
-    hmac.update(seed);
-    let result = hmac.finalize();
-    let bytes = result.into_bytes();
-
-    let mut key = [0u8; 64];
-    key[..32].copy_from_slice(&bytes[..32]);
-    key[32..].copy_from_slice(&bytes[32..64]);
-
-    let parts: Vec<&str> = path.split('/').collect();
-    for (i, part) in parts.iter().enumerate() {
-        if i == 0 && *part == "m" {
-            continue;
-        }
-
-        let hardened = part.ends_with('\'');
-        let index_str = part.trim_end_matches('\'');
-        let index: u32 = index_str
-            .parse()
-            .map_err(|_| eyre::eyre!("invalid derivation path index: {part}"))?;
-
-        #[allow(clippy::arithmetic_side_effects)]
-        let child_index = if hardened {
-            0x8000_0000 | index
-        } else {
-            index
-        };
-
-        let mut data = Vec::with_capacity(37);
-        data.push(0);
-        data.extend_from_slice(&key[..32]);
-        data.extend_from_slice(&child_index.to_be_bytes());
-
-        let mut hmac =
-            Hmac::<Sha512>::new_from_slice(&key[32..64]).map_err(|e| eyre::eyre!("{e}"))?;
-        hmac.update(&data);
-        let result = hmac.finalize();
-        let bytes = result.into_bytes();
-
-        key[..32].copy_from_slice(&bytes[..32]);
-        key[32..].copy_from_slice(&bytes[32..64]);
-    }
-
-    Ok(key)
 }

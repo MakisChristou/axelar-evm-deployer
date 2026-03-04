@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use eyre::Result;
 
-use crate::commands::load_test::ContentionMode;
+use crate::commands::load_test::sol_to_evm::ContentionMode;
+use crate::commands::load_test::TestType;
 
 #[derive(Parser)]
 #[command(name = "axelar-evm-deployer")]
@@ -68,23 +69,15 @@ pub enum TestCommands {
         axelar_id: Option<String>,
     },
 
-    /// Solana-to-EVM load test: send call_contract txs from Solana and verify on-chain
+    /// Cross-chain load test (auto-detects chains and RPCs from config)
     LoadTest {
-        /// Path to chains config JSON (e.g. devnet-amplifier.json)
+        /// Path to chains config JSON (e.g. devnet-amplifier.json, testnet.json, mainnet.json)
         #[arg(long, env = "CHAINS_CONFIG")]
         config: PathBuf,
 
-        /// Destination EVM chain axelar ID
-        #[arg(long)]
-        destination_chain: String,
-
-        /// Source chain axelar ID (Solana)
-        #[arg(long, default_value = "solana-18")]
-        source_chain: String,
-
-        /// EVM private key for deploying SenderReceiver on destination chain
-        #[arg(long, env = "EVM_PRIVATE_KEY")]
-        private_key: String,
+        /// Load test type: sol-to-evm, evm-to-sol, evm-to-evm
+        #[arg(long, value_enum)]
+        test_type: TestType,
 
         /// Test duration in seconds
         #[arg(long)]
@@ -94,23 +87,27 @@ pub enum TestCommands {
         #[arg(long, default_value = "10")]
         delay: u64,
 
+        /// Override destination chain axelar ID (auto-detected from config)
+        #[arg(long)]
+        destination_chain: Option<String>,
+
+        /// Override source chain axelar ID (auto-detected from config)
+        #[arg(long)]
+        source_chain: Option<String>,
+
+        /// EVM private key for deploying SenderReceiver on destination chain
+        #[arg(long, env = "EVM_PRIVATE_KEY")]
+        private_key: Option<String>,
+
         /// Path to Solana keypair JSON file
         #[arg(long, env = "SOLANA_PRIVATE_KEY")]
         keypair: Option<String>,
-
-        /// Mnemonic for deriving multiple keypairs
-        #[arg(long, env = "MNEMONIC")]
-        mnemonic: Option<String>,
-
-        /// Number of keypairs to derive from mnemonic
-        #[arg(long)]
-        addresses_to_derive: Option<usize>,
 
         /// Contention testing mode
         #[arg(long, value_enum, default_value = "none")]
         contention_mode: ContentionMode,
 
-        /// Hex-encoded payload to send (default: test message)
+        /// Hex-encoded payload to send (default: random test message)
         #[arg(long)]
         payload: Option<String>,
 

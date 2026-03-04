@@ -17,13 +17,13 @@ pub struct TxMetrics {
     /// keccak256 of the payload, hex-encoded (no 0x prefix).
     #[serde(default)]
     pub payload_hash: String,
-    /// The Solana pubkey of the signer.
+    /// The source address of the signer.
     #[serde(default)]
     pub source_address: String,
     /// Raw payload bytes (kept in-memory for verification, not serialized).
     #[serde(skip)]
     pub payload: Vec<u8>,
-    /// Instant the Solana tx was submitted (for computing T+X timing).
+    /// Instant the tx was submitted (for computing T+X timing).
     #[serde(skip)]
     pub send_instant: Option<Instant>,
     /// Amplifier pipeline timing (populated during verification phase).
@@ -50,12 +50,12 @@ pub struct AmplifierTiming {
 /// Comprehensive load test report containing all metrics.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LoadTestReport {
+    pub source_chain: String,
     pub destination_chain: String,
     pub destination_address: String,
     pub duration_secs: u64,
     pub delay_ms: u64,
     pub contention_mode: String,
-    pub num_keypairs: usize,
 
     pub total_submitted: u64,
     pub total_confirmed: u64,

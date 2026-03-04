@@ -33,9 +33,6 @@ solana-axelar-gateway = { version = "0.1.11", features = ["no-entrypoint"], defa
 anchor-lang = { version = "1.0.0-rc.1", features = ["event-cpi"] }
 hex = "0.4"
 rand = "0.8"
-bip39 = "2"
-hmac = "0.12"
-sha2 = "0.10"
 
 [features]
 default = ["devnet-amplifier"]

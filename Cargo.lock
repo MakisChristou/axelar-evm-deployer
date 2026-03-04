@@ -1437,7 +1437,6 @@ dependencies = [
  "anchor-lang",
  "base64 0.22.1",
  "bip32",
- "bip39",
  "clap",
  "comfy-table",
  "cosmos-sdk-proto",
@@ -1447,7 +1446,6 @@ dependencies = [
  "eyre",
  "futures",
  "hex",
- "hmac",
  "indicatif 0.17.11",
  "owo-colors",
  "prost",
@@ -1455,7 +1453,6 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "solana-axelar-gateway",
  "solana-client",
  "solana-commitment-config",
@@ -1527,17 +1524,6 @@ dependencies = [
  "sha2 0.10.9",
  "subtle",
  "zeroize",
-]
-
-[[package]]
-name = "bip39"
-version = "2.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "90dbd31c98227229239363921e60fcf5e558e43ec69094d46fc4996f08d1d5bc"
-dependencies = [
- "bitcoin_hashes",
- "serde",
- "unicode-normalization",
 ]
 
 [[package]]
@@ -8383,15 +8369,6 @@ name = "unicode-ident"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "537dd038a89878be9b64dd4bd1b260315c1bb94f4d784956b81e27a088d9a09e"
-
-[[package]]
-name = "unicode-normalization"
-version = "0.1.25"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5fd4f6878c9cb28d874b009da9e8d183b5abc80117c40bbd187a1fde336be6e8"
-dependencies = [
- "tinyvec",
-]
 
 [[package]]
 name = "unicode-segmentation"

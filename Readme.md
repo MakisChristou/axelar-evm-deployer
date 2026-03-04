@@ -107,46 +107,69 @@ ITS requires `ITS_SALT`, `ITS_PROXY_SALT`, and optionally `ITS_DEPLOYER_PRIVATE_
 - **Steps 5, 8, 10, 22:** Vote on governance proposals after they're submitted
 - **Step 13:** Merge infrastructure PR and register chain support for verifiers
 
-## Load Testing (Solana → EVM)
+## Load Testing
 
-Sends `call_contract` transactions from Solana to a destination EVM chain and tracks each message through the Amplifier pipeline.
+Cross-chain load tests that send transactions and track each message through the Amplifier pipeline. Source/destination chains and RPCs are auto-detected from the config JSON.
 
-**Source chain is Solana only.** Destination can be any EVM chain in your config.
+### Supported test types
+
+| Type          | Direction       | Status      |
+| ------------- | --------------- | ----------- |
+| `sol-to-evm`  | Solana → EVM    | supported   |
+| `evm-to-sol`  | EVM → Solana    | coming soon |
+| `evm-to-evm`  | EVM → EVM       | coming soon |
 
 ### Quick start
 
 ```bash
 cargo run --release -- test load-test \
   --config ../axelar-contract-deployments/axelar-chains-config/info/devnet-amplifier.json \
-  --destination-chain avalanche-fuji \
-  --private-key $EVM_PRIVATE_KEY \
-  --keypair ~/.config/solana/id.json \
+  --test-type sol-to-evm \
   --time 5 \
   --delay 1000
 ```
 
-This sends 1 tx/sec for 5 seconds, then verifies each message on-chain through 4 checkpoints:
+This auto-detects the Solana source chain and picks the first EVM destination from the config, sends 1 tx/sec for 5 seconds, then verifies each message on-chain through 4 checkpoints:
 
 1. **Voted** — VotingVerifier quorum reached
 2. **Routed** — message appears on destination Cosmos Gateway
 3. **Approved** — `isMessageApproved` returns true on EVM gateway
 4. **Executed** — approval consumed (relayer executed)
 
+### Full command (all overrides)
+
+```bash
+cargo run --release -- test load-test \
+  --config ../axelar-contract-deployments/axelar-chains-config/info/devnet-amplifier.json \
+  --test-type sol-to-evm \
+  --destination-chain avalanche-fuji \
+  --source-chain solana-18 \
+  --private-key $EVM_PRIVATE_KEY \
+  --keypair ~/.config/solana/id.json \
+  --time 5 \
+  --delay 1000 \
+  --contention-mode parallel \
+  --payload 0xdeadbeef \
+  --output-dir results/ \
+  --skip-gmp-verify
+```
+
 ### Options
 
-| Flag                    | Description                                 | Default                              |
-| ----------------------- | ------------------------------------------- | ------------------------------------ |
-| `--config`              | Path to chains config JSON                  | (required, or `CHAINS_CONFIG` env)   |
-| `--destination-chain`   | Axelar ID of destination EVM chain          | (required)                           |
-| `--source-chain`        | Axelar ID of Solana                         | `solana-18`                          |
-| `--private-key`         | EVM private key (deploys SenderReceiver)    | (required, or `EVM_PRIVATE_KEY` env) |
-| `--keypair`             | Path to Solana keypair JSON                 | `~/.config/solana/id.json`           |
-| `--mnemonic`            | Mnemonic to derive multiple Solana keypairs | -                                    |
-| `--addresses-to-derive` | Number of keypairs from mnemonic            | -                                    |
-| `--time`                | Test duration in seconds                    | (required)                           |
-| `--delay`               | Delay between txs in milliseconds           | `10`                                 |
-| `--skip-gmp-verify`     | Skip on-chain verification phase            | `false`                              |
-| `--output-dir`          | Directory for report JSON                   | `output`                             |
+| Flag                  | Description                              | Default                            |
+| --------------------- | ---------------------------------------- | ---------------------------------- |
+| `--config`            | Path to chains config JSON               | (required, or `CHAINS_CONFIG` env) |
+| `--test-type`         | Load test direction (see table above)    | (required)                         |
+| `--time`              | Test duration in seconds                 | (required)                         |
+| `--delay`             | Delay between txs in milliseconds        | `10`                               |
+| `--destination-chain` | Override destination chain axelar ID     | auto-detected from config          |
+| `--source-chain`      | Override source chain axelar ID          | auto-detected from config          |
+| `--private-key`       | EVM private key (deploys SenderReceiver) | `EVM_PRIVATE_KEY` env              |
+| `--keypair`           | Path to Solana keypair JSON              | `~/.config/solana/id.json`         |
+| `--contention-mode`   | `none`, `single-account`, or `parallel`  | `none`                             |
+| `--payload`           | Hex-encoded custom payload               | random test message                |
+| `--output-dir`        | Directory for report JSON                | `output`                           |
+| `--skip-gmp-verify`   | Skip on-chain verification phase         | `false`                            |
 
 ### State
 

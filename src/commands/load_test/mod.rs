@@ -1,8 +1,8 @@
 pub mod metrics;
-mod test;
+pub mod sol_to_evm;
 mod verify;
 
-pub use test::ContentionMode;
+pub use sol_to_evm::ContentionMode;
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -24,17 +24,24 @@ use crate::utils::read_contract_address;
 
 use self::metrics::LoadTestReport;
 
+/// Load test type (extensible for future directions).
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub enum TestType {
+    /// Solana -> EVM cross-chain load test
+    SolToEvm,
+}
+
 /// CLI arguments for the load test command.
 pub struct LoadTestArgs {
     pub config: PathBuf,
+    pub test_type: TestType,
     pub destination_chain: String,
     pub source_chain: String,
+    pub solana_rpc: String,
     pub private_key: String,
     pub time: u64,
     pub delay: u64,
     pub keypair: Option<String>,
-    pub mnemonic: Option<String>,
-    pub addresses_to_derive: Option<usize>,
     pub contention_mode: ContentionMode,
     pub payload: Option<String>,
     pub output_dir: PathBuf,
@@ -66,11 +73,93 @@ fn save_cache(axelar_id: &str, cache: &serde_json::Value) -> Result<()> {
     Ok(())
 }
 
+/// Resolve chains and RPCs from the config JSON based on test type.
+/// Returns (source_chain, destination_chain, solana_rpc, evm_private_key).
+pub fn resolve_from_config(
+    config: &PathBuf,
+    test_type: TestType,
+    source_chain_override: Option<String>,
+    destination_chain_override: Option<String>,
+    private_key_override: Option<String>,
+) -> Result<(String, String, String, String)> {
+    let config_content = std::fs::read_to_string(config)
+        .map_err(|e| eyre::eyre!("failed to read config {}: {e}", config.display()))?;
+    let config_root: serde_json::Value = serde_json::from_str(&config_content)?;
+
+    let chains = config_root
+        .get("chains")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| eyre::eyre!("no 'chains' object in config"))?;
+
+    match test_type {
+        TestType::SolToEvm => {
+            // Source: find SVM chain
+            let source_chain = if let Some(sc) = source_chain_override {
+                sc
+            } else {
+                let svm_chains: Vec<&String> = chains
+                    .iter()
+                    .filter(|(_, v)| v.get("chainType").and_then(|t| t.as_str()) == Some("svm"))
+                    .map(|(k, _)| k)
+                    .collect();
+                match svm_chains.len() {
+                    0 => return Err(eyre::eyre!("no SVM (Solana) chain found in config. Use --source-chain to specify one.")),
+                    1 => svm_chains[0].clone(),
+                    _ => return Err(eyre::eyre!(
+                        "multiple SVM chains found: {}. Use --source-chain to pick one.",
+                        svm_chains.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+                    )),
+                }
+            };
+
+            // Destination: find EVM chain (skip core-* prefixed chains)
+            let destination_chain = if let Some(dc) = destination_chain_override {
+                dc
+            } else {
+                let evm_chains: Vec<&String> = chains
+                    .iter()
+                    .filter(|(k, v)| {
+                        v.get("chainType").and_then(|t| t.as_str()) == Some("evm")
+                            && !k.starts_with("core-")
+                    })
+                    .map(|(k, _)| k)
+                    .collect();
+                match evm_chains.len() {
+                    0 => return Err(eyre::eyre!("no EVM chain found in config. Use --destination-chain to specify one.")),
+                    _ => {
+                        let picked = evm_chains[0].clone();
+                        ui::info(&format!("auto-selected destination chain: {picked} (use --destination-chain to override)"));
+                        picked
+                    }
+                }
+            };
+
+            // Solana RPC from config
+            let solana_rpc = chains
+                .get(&source_chain)
+                .and_then(|v| v.get("rpc"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    eyre::eyre!("no RPC URL for source chain '{source_chain}' in config")
+                })?
+                .to_string();
+
+            // EVM private key
+            let private_key = private_key_override.ok_or_else(|| {
+                eyre::eyre!("EVM private key required. Set EVM_PRIVATE_KEY env var or use --private-key")
+            })?;
+
+            Ok((source_chain, destination_chain, solana_rpc, private_key))
+        }
+    }
+}
+
 pub async fn run(args: LoadTestArgs) -> Result<()> {
     let run_start = Instant::now();
-    let axelar_id = &args.destination_chain;
+    let dest = &args.destination_chain;
+    let src = &args.source_chain;
 
-    ui::section(&format!("Solana Load Test -> {axelar_id}"));
+    ui::section(&format!("Load Test: {src} -> {dest}"));
 
     // --- Read chain info from chains config JSON ---
     let config_content = std::fs::read_to_string(&args.config)
@@ -78,10 +167,13 @@ pub async fn run(args: LoadTestArgs) -> Result<()> {
     let config_root: serde_json::Value = serde_json::from_str(&config_content)?;
 
     let rpc_url = config_root
-        .pointer(&format!("/chains/{axelar_id}/rpc"))
+        .pointer(&format!("/chains/{dest}/rpc"))
         .and_then(|v| v.as_str())
-        .ok_or_else(|| eyre::eyre!("no rpc URL for chain '{axelar_id}' in config"))?;
+        .ok_or_else(|| eyre::eyre!("no rpc URL for chain '{dest}' in config"))?;
 
+    ui::kv("source chain", src);
+    ui::kv("destination chain", dest);
+    ui::kv("solana RPC", &args.solana_rpc);
     ui::kv("EVM RPC", rpc_url);
 
     let signer: PrivateKeySigner = args.private_key.parse()?;
@@ -89,13 +181,13 @@ pub async fn run(args: LoadTestArgs) -> Result<()> {
         .wallet(signer)
         .connect_http(rpc_url.parse()?);
 
-    let gateway_addr = read_contract_address(&args.config, axelar_id, "AxelarGateway")?;
-    let gas_service_addr = read_contract_address(&args.config, axelar_id, "AxelarGasService")?;
+    let gateway_addr = read_contract_address(&args.config, dest, "AxelarGateway")?;
+    let gas_service_addr = read_contract_address(&args.config, dest, "AxelarGasService")?;
 
     ui::address("EVM gateway", &format!("{gateway_addr}"));
 
     // --- Deploy/reuse SenderReceiver on destination EVM chain ---
-    let mut cache = read_cache(axelar_id);
+    let mut cache = read_cache(dest);
 
     let sender_receiver_addr = if let Some(addr_str) = cache
         .get("senderReceiverAddress")
@@ -108,7 +200,7 @@ pub async fn run(args: LoadTestArgs) -> Result<()> {
             let addr =
                 deploy_sender_receiver(&provider, gateway_addr, gas_service_addr).await?;
             cache["senderReceiverAddress"] = json!(format!("{addr}"));
-            save_cache(axelar_id, &cache)?;
+            save_cache(dest, &cache)?;
             addr
         } else {
             ui::info(&format!("SenderReceiver: reusing {addr}"));
@@ -118,7 +210,7 @@ pub async fn run(args: LoadTestArgs) -> Result<()> {
         ui::info("deploying SenderReceiver on destination chain...");
         let addr = deploy_sender_receiver(&provider, gateway_addr, gas_service_addr).await?;
         cache["senderReceiverAddress"] = json!(format!("{addr}"));
-        save_cache(axelar_id, &cache)?;
+        save_cache(dest, &cache)?;
         addr
     };
 
@@ -132,7 +224,11 @@ pub async fn run(args: LoadTestArgs) -> Result<()> {
     println!("PHASE 1: LOAD TEST");
     println!("{}\n", "=".repeat(60));
 
-    let mut report = test::run_load_test_with_metrics(&args, &destination_address).await?;
+    let mut report = match args.test_type {
+        TestType::SolToEvm => {
+            sol_to_evm::run_load_test_with_metrics(&args, &destination_address).await?
+        }
+    };
 
     // --- Phase 2: On-chain verification ---
     println!("\n{}", "=".repeat(60));
