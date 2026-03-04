@@ -31,8 +31,8 @@ const TOTAL_STEPS: usize = 10;
 const DEST_CHAIN: &str = "flow";
 
 // Token parameters
-const TOKEN_NAME: &str = "Axelar EVM Deployer Token";
-const TOKEN_SYMBOL: &str = "AEVD";
+const TOKEN_NAME: &str = "Axe Test Token";
+const TOKEN_SYMBOL: &str = "AXE";
 const TOKEN_DECIMALS: u8 = 18;
 
 pub async fn run(axelar_id: Option<String>) -> Result<()> {
