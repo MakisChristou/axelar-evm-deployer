@@ -28,7 +28,7 @@ fn make_payload(custom: &Option<Vec<u8>>) -> Vec<u8> {
             let mut buf = [0u8; 16];
             rand::thread_rng().fill(&mut buf);
             let suffix = hex::encode(buf);
-            let message = format!("hello from axelar-evm-deployer load test {suffix}");
+            let message = format!("hello from axe load test {suffix}");
             (message,).abi_encode_params()
         }
     }

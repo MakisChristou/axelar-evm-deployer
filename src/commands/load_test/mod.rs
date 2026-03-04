@@ -59,7 +59,7 @@ pub struct LoadTestArgs {
 fn cache_path(axelar_id: &str) -> PathBuf {
     let data_dir = dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("axelar-evm-deployer");
+        .join("axe");
     data_dir.join(format!("load-test-{axelar_id}.json"))
 }
 

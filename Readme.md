@@ -1,6 +1,6 @@
-# axelar-evm-deployer
+# axe
 
-Deploy EVM chains to Axelar and run cross-chain load tests.
+Swiss army knife CLI for Axelar development.
 
 ## Prerequisites
 
@@ -13,7 +13,7 @@ cd axelar-contract-deployments && npm install && cd ..
 
 ```
 workspace/
-├── axelar-evm-deployer/
+├── axe/
 └── axelar-contract-deployments/
 ```
 

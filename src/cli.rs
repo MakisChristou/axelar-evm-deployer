@@ -7,7 +7,7 @@ use crate::commands::load_test::sol_to_evm::ContentionMode;
 use crate::commands::load_test::TestType;
 
 #[derive(Parser)]
-#[command(name = "axelar-evm-deployer")]
+#[command(name = "axe")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,

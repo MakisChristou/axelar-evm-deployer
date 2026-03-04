@@ -9,7 +9,7 @@ use crate::ui;
 pub fn data_dir() -> Result<PathBuf> {
     let dir = dirs::data_dir()
         .ok_or_else(|| eyre::eyre!("could not determine data directory"))?
-        .join("axelar-evm-deployer");
+        .join("axe");
     Ok(dir)
 }
 
