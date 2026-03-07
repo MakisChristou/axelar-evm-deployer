@@ -53,6 +53,13 @@ pub enum Commands {
         #[command(subcommand)]
         subcommand: TestCommands,
     },
+
+    /// Decode EVM calldata (ITS, Gateway, Factory)
+    Decode {
+        /// Hex-encoded calldata (with or without 0x prefix, whitespace is stripped)
+        #[arg(trailing_var_arg = true, num_args = 1..)]
+        calldata: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]

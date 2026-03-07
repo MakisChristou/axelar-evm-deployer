@@ -38,6 +38,10 @@ async fn main() -> Result<()> {
             .await
         }
         cli::Commands::Reset { axelar_id } => commands::reset::run(axelar_id),
+        cli::Commands::Decode { calldata } => {
+            let joined = calldata.join("");
+            commands::decode::run(&joined)
+        }
         cli::Commands::Test { subcommand } => match subcommand {
             cli::TestCommands::Gmp { axelar_id } => commands::test_gmp::run(axelar_id).await,
             cli::TestCommands::Its { axelar_id } => commands::test_its::run(axelar_id).await,

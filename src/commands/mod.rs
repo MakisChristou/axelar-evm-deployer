@@ -1,3 +1,4 @@
+pub mod decode;
 pub mod deploy;
 pub mod init;
 pub mod load_test;
