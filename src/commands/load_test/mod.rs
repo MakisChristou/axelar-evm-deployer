@@ -51,13 +51,10 @@ pub struct LoadTestArgs {
     pub source_chain: String,
     pub solana_rpc: String,
     pub private_key: Option<String>,
-    pub time: u64,
-    pub delay: u64,
+    pub num_txs: u64,
     pub keypair: Option<String>,
     pub payload: Option<String>,
     pub output_dir: PathBuf,
-    /// Whether --source-rpc was provided (skips rate-limit guard)
-    pub source_rpc_override: bool,
 }
 
 /// Cache file for storing SenderReceiver address per chain.

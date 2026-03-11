@@ -90,7 +90,7 @@ axe test load-test \
   --config ../axelar-contract-deployments/axelar-chains-config/info/devnet-amplifier.json \
   --destination-chain avalanche-fuji \
   --source-chain solana-18 \
-  --num-keys 20 --time 30 --delay 500
+  --time 30 --delay 500
 ```
 
 Run `axe test load-test --help` for all options.

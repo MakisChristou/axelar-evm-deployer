@@ -48,8 +48,7 @@ async fn main() -> Result<()> {
             cli::TestCommands::LoadTest {
                 config,
                 test_type,
-                time,
-                delay,
+                num_txs,
                 destination_chain,
                 source_chain,
                 private_key,
@@ -58,7 +57,6 @@ async fn main() -> Result<()> {
                 payload,
                 output_dir,
             } => {
-                let has_rpc_override = source_rpc.is_some();
                 let resolved = commands::load_test::resolve_from_config(
                     &config,
                     test_type,
@@ -75,12 +73,10 @@ async fn main() -> Result<()> {
                     source_chain: resolved.source_chain,
                     solana_rpc: resolved.solana_rpc,
                     private_key: resolved.private_key,
-                    time,
-                    delay,
+                    num_txs,
                     keypair,
                     payload,
                     output_dir,
-                    source_rpc_override: has_rpc_override,
                 })
                 .await
             }

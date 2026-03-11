@@ -81,13 +81,9 @@ pub enum TestCommands {
         #[arg(long, env = "CHAINS_CONFIG")]
         config: PathBuf,
 
-        /// Test duration in seconds
-        #[arg(long, default_value = "10")]
-        time: u64,
-
-        /// Delay between transactions in milliseconds
-        #[arg(long, default_value = "1000")]
-        delay: u64,
+        /// Number of transactions to send
+        #[arg(long, default_value = "5")]
+        num_txs: u64,
 
         /// Load test type (auto-detected from source/destination chain types if omitted)
         #[arg(long, value_enum)]

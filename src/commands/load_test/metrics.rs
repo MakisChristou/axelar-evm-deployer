@@ -53,10 +53,8 @@ pub struct LoadTestReport {
     pub source_chain: String,
     pub destination_chain: String,
     pub destination_address: String,
-    pub duration_secs: u64,
-    pub delay_ms: u64,
+    pub num_txs: u64,
     pub num_keys: usize,
-    pub contention_mode: String,
 
     pub total_submitted: u64,
     pub total_confirmed: u64,

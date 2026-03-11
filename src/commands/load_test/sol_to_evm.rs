@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io::Write;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use eyre::eyre;
 use futures::future::join_all;
@@ -34,9 +34,6 @@ fn make_payload(custom: &Option<Vec<u8>>) -> Vec<u8> {
     }
 }
 
-
-/// Minimum delay (ms) between individual Solana transactions to avoid RPC rate limiting.
-const MIN_TX_DELAY_MS: u64 = 200;
 
 /// Prepare the signing keypairs for the load test.
 ///
@@ -94,30 +91,9 @@ pub async fn run_load_test_with_metrics(
     args: &LoadTestArgs,
     destination_address: &str,
 ) -> eyre::Result<LoadTestReport> {
-    // Enforce minimum delay between Solana txs to avoid RPC rate limiting,
-    // unless a custom --source-rpc is provided (user controls the endpoint).
-    let effective_delay = if args.source_rpc_override {
-        args.delay
-    } else {
-        let clamped = args.delay.max(MIN_TX_DELAY_MS);
-        if clamped != args.delay {
-            ui::warn(&format!(
-                "delay clamped to {}ms minimum (was {}ms) to avoid RPC rate limiting \
-                 (use --source-rpc to bypass)",
-                MIN_TX_DELAY_MS, args.delay
-            ));
-        }
-        clamped
-    };
+    let num_txs = args.num_txs.max(1) as usize;
 
-    // Derive num_keys from expected tx count (1 key per tx to avoid nonce contention)
-    #[allow(clippy::integer_division)]
-    let num_keys = ((args.time * 1000) / effective_delay).max(1) as usize;
-
-    ui::kv("duration", &format!("{}s", args.time));
-    ui::kv("delay", &format!("{}ms", effective_delay));
-    ui::kv("num keys", &num_keys.to_string());
-    ui::kv("contention mode", "Parallel");
+    ui::kv("num txs", &num_txs.to_string());
 
     let tx_output = args.output_dir.join("transactions.txt");
     if let Some(parent) = tx_output.parent() {
@@ -146,8 +122,8 @@ pub async fn run_load_test_with_metrics(
         ));
     }
 
-    // Derive and fund keypairs
-    let keypairs = prepare_keypairs(&args.solana_rpc, num_keys, &main_keypair)?;
+    // Derive and fund keypairs (1 key per tx to avoid nonce contention)
+    let keypairs = prepare_keypairs(&args.solana_rpc, num_txs, &main_keypair)?;
     let keypairs = Arc::new(keypairs);
     let key_count = keypairs.len();
 
@@ -156,59 +132,37 @@ pub async fn run_load_test_with_metrics(
         Option::None => Option::None,
     };
 
-    let duration = Duration::from_secs(args.time);
-    let delay_duration = Duration::from_millis(effective_delay);
-    let min_tx_stagger = if args.source_rpc_override {
-        Duration::ZERO
-    } else {
-        Duration::from_millis(MIN_TX_DELAY_MS)
-    };
-
     let metrics_list: Arc<Mutex<Vec<TxMetrics>>> = Arc::new(Mutex::new(Vec::new()));
     let mut pending_tasks = Vec::new();
 
     let test_start = Instant::now();
-    let start_time = Instant::now();
     let solana_rpc = args.solana_rpc.clone();
 
     println!();
 
-    // Fire one tx per keypair each wave, staggered to avoid rate limiting
-    loop {
-        if start_time.elapsed() >= duration {
-            break;
-        }
-        for i in 0..key_count {
-            if start_time.elapsed() >= duration {
-                break;
-            }
-            let kp = Arc::clone(&keypairs[i]);
-            let dest_chain = args.destination_chain.clone();
-            let dest_addr = destination_address.to_string();
-            let tx_payload = make_payload(&payload);
-            let output_clone = Arc::clone(&output_file);
-            let metrics_clone = Arc::clone(&metrics_list);
-            let rpc = solana_rpc.clone();
+    // Fire all txs in parallel (one per keypair)
+    for i in 0..key_count {
+        let kp = Arc::clone(&keypairs[i]);
+        let dest_chain = args.destination_chain.clone();
+        let dest_addr = destination_address.to_string();
+        let tx_payload = make_payload(&payload);
+        let output_clone = Arc::clone(&output_file);
+        let metrics_clone = Arc::clone(&metrics_list);
+        let rpc = solana_rpc.clone();
 
-            let handle = tokio::spawn(async move {
-                execute_and_record(
-                    &rpc,
-                    kp,
-                    &dest_chain,
-                    &dest_addr,
-                    &tx_payload,
-                    output_clone,
-                    metrics_clone,
-                )
-                .await;
-            });
-            pending_tasks.push(handle);
-            // Stagger between txs within a wave to avoid RPC rate limiting
-            if i + 1 < key_count {
-                tokio::time::sleep(min_tx_stagger).await;
-            }
-        }
-        tokio::time::sleep(delay_duration).await;
+        let handle = tokio::spawn(async move {
+            execute_and_record(
+                &rpc,
+                kp,
+                &dest_chain,
+                &dest_addr,
+                &tx_payload,
+                output_clone,
+                metrics_clone,
+            )
+            .await;
+        });
+        pending_tasks.push(handle);
     }
 
     let total_submitted = pending_tasks.len() as u64;
@@ -235,10 +189,8 @@ pub async fn run_load_test_with_metrics(
         source_chain: args.source_chain.clone(),
         destination_chain: args.destination_chain.clone(),
         destination_address: destination_address.to_string(),
-        duration_secs: args.time,
-        delay_ms: effective_delay,
+        num_txs: args.num_txs,
         num_keys: key_count,
-        contention_mode: "Parallel".to_string(),
         total_submitted,
         total_confirmed,
         total_failed,
@@ -284,12 +236,6 @@ pub async fn run_load_test_with_metrics(
     ui::kv("total submitted", &report.total_submitted.to_string());
     ui::kv("total confirmed", &report.total_confirmed.to_string());
     ui::kv("total failed", &report.total_failed.to_string());
-    ui::kv(
-        "test duration",
-        &format!("{:.2}s", report.test_duration_secs),
-    );
-    ui::kv("TPS (submitted)", &format!("{:.2}", report.tps_submitted));
-    ui::kv("TPS (confirmed)", &format!("{:.2}", report.tps_confirmed));
     ui::kv(
         "landing rate",
         &format!("{:.1}%", report.landing_rate * 100.0),

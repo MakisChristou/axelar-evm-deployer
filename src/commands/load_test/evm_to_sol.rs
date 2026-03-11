@@ -81,8 +81,9 @@ pub async fn run_load_test_with_metrics<P: Provider + Clone + 'static>(
     destination_address: &str,
     provider: &P,
 ) -> eyre::Result<LoadTestReport> {
-    ui::kv("duration", &format!("{}s", args.time));
-    ui::kv("delay", &format!("{}ms", args.delay));
+    let num_txs = args.num_txs.max(1) as usize;
+
+    ui::kv("num txs", &num_txs.to_string());
 
     // Derive the memo program's counter PDA
     let memo_program_id = Pubkey::from_str(MEMO_PROGRAM_ADDRESS)
@@ -104,23 +105,21 @@ pub async fn run_load_test_with_metrics<P: Provider + Clone + 'static>(
         None => None,
     };
 
-    let duration = Duration::from_secs(args.time);
-    let delay_duration = Duration::from_millis(args.delay);
+    /// Minimum delay (ms) between EVM transactions to avoid RPC rate limiting.
+    const EVM_TX_STAGGER_MS: u64 = 200;
+
+    let stagger = Duration::from_millis(EVM_TX_STAGGER_MS);
     let metrics_list: Arc<Mutex<Vec<TxMetrics>>> = Arc::new(Mutex::new(Vec::new()));
     let mut pending_tasks = Vec::new();
     let test_start = Instant::now();
-    let start_time = Instant::now();
 
     let dest_chain = args.destination_chain.clone();
     let dest_addr = destination_address.to_string();
 
     println!();
 
-    // Single-key sequential sending with delay
-    loop {
-        if start_time.elapsed() >= duration {
-            break;
-        }
+    // Send N txs sequentially with a small stagger to avoid rate limiting
+    for i in 0..num_txs {
         let tx_payload = make_executable_payload(&payload, &counter_pda);
         let output_clone = Arc::clone(&output_file);
         let metrics_clone = Arc::clone(&metrics_list);
@@ -144,7 +143,9 @@ pub async fn run_load_test_with_metrics<P: Provider + Clone + 'static>(
             .await;
         });
         pending_tasks.push(handle);
-        tokio::time::sleep(delay_duration).await;
+        if i + 1 < num_txs {
+            tokio::time::sleep(stagger).await;
+        }
     }
 
     let total_submitted = pending_tasks.len() as u64;
@@ -170,10 +171,8 @@ pub async fn run_load_test_with_metrics<P: Provider + Clone + 'static>(
         source_chain: args.source_chain.clone(),
         destination_chain: args.destination_chain.clone(),
         destination_address: dest_addr,
-        duration_secs: args.time,
-        delay_ms: args.delay,
+        num_txs: args.num_txs,
         num_keys: 1,
-        contention_mode: "SingleAccount".to_string(),
         total_submitted,
         total_confirmed,
         total_failed,
@@ -215,9 +214,6 @@ pub async fn run_load_test_with_metrics<P: Provider + Clone + 'static>(
     ui::kv("total submitted", &report.total_submitted.to_string());
     ui::kv("total confirmed", &report.total_confirmed.to_string());
     ui::kv("total failed", &report.total_failed.to_string());
-    ui::kv("test duration", &format!("{:.2}s", report.test_duration_secs));
-    ui::kv("TPS (submitted)", &format!("{:.2}", report.tps_submitted));
-    ui::kv("TPS (confirmed)", &format!("{:.2}", report.tps_confirmed));
     ui::kv(
         "landing rate",
         &format!("{:.1}%", report.landing_rate * 100.0),
