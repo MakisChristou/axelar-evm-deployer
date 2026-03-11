@@ -83,14 +83,14 @@ axe test load-test \
   --config ../axelar-contract-deployments/axelar-chains-config/info/devnet-amplifier.json
 ```
 
-Override anything:
+Override the number of transactions (default: 5):
 
 ```bash
 axe test load-test \
+  --source-chain avalanche-fuji \
+  --destination-chain solana-18 \
   --config ../axelar-contract-deployments/axelar-chains-config/info/devnet-amplifier.json \
-  --destination-chain avalanche-fuji \
-  --source-chain solana-18 \
-  --time 30 --delay 500
+  --num-txs 20
 ```
 
 Run `axe test load-test --help` for all options.
