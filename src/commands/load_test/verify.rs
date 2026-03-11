@@ -12,8 +12,8 @@ use crate::cosmos::{lcd_cosmwasm_smart_query, read_axelar_config, read_axelar_co
 use crate::evm::AxelarAmplifierGateway;
 use crate::ui;
 
-/// Maximum time to wait for each checkpoint (5 minutes).
-const POLL_TIMEOUT: Duration = Duration::from_secs(300);
+/// Maximum total time for all verification phases (3 minutes).
+const VERIFY_TIMEOUT: Duration = Duration::from_secs(180);
 /// Delay between poll attempts.
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -77,6 +77,8 @@ pub async fn verify_onchain<P: Provider>(
     let gw_contract = AxelarAmplifierGateway::new(gateway_addr, provider);
     let contract_addr: Address = destination_address.parse()?;
 
+    let deadline = Instant::now() + VERIFY_TIMEOUT;
+
     // Build pending tx list
     let mut txs: Vec<PendingTx> = confirmed
         .iter()
@@ -107,6 +109,7 @@ pub async fn verify_onchain<P: Provider>(
             source_chain,
             destination_chain,
             destination_address,
+            deadline,
         )
         .await;
     } else {
@@ -114,13 +117,13 @@ pub async fn verify_onchain<P: Provider>(
     }
 
     // === Step 2/4: Routed (Cosmos Gateway) ===
-    batch_poll_routed(&mut txs, &lcd, &cosm_gateway, source_chain).await;
+    batch_poll_routed(&mut txs, &lcd, &cosm_gateway, source_chain, deadline).await;
 
     // === Step 3/4: Approved (EVM gateway) ===
-    batch_poll_approved(&mut txs, &gw_contract, source_chain, destination_chain).await;
+    batch_poll_approved(&mut txs, &gw_contract, source_chain, destination_chain, deadline).await;
 
     // === Step 4/4: Executed (approval consumed) ===
-    batch_poll_executed(&mut txs, &gw_contract, source_chain).await;
+    batch_poll_executed(&mut txs, &gw_contract, source_chain, deadline).await;
 
     // Write timings + compute stats
     let report = compute_verification_report(&txs, metrics);
@@ -139,6 +142,7 @@ async fn batch_poll_voted(
     source_chain: &str,
     destination_chain: &str,
     destination_address: &str,
+    deadline: Instant,
 ) {
     let pending: Vec<usize> = (0..txs.len()).filter(|&i| !txs[i].failed).collect();
     let pending_count = pending.len();
@@ -149,7 +153,6 @@ async fn batch_poll_voted(
     let spinner = ui::wait_spinner(&format!(
         "waiting to be voted (0/{pending_count} done)..."
     ));
-    let deadline = Instant::now() + POLL_TIMEOUT;
     let mut done_count = 0usize;
 
     loop {
@@ -215,6 +218,7 @@ async fn batch_poll_routed(
     lcd: &str,
     cosm_gateway: &str,
     source_chain: &str,
+    deadline: Instant,
 ) {
     let pending: Vec<usize> = (0..txs.len()).filter(|&i| !txs[i].failed).collect();
     let pending_count = pending.len();
@@ -225,7 +229,6 @@ async fn batch_poll_routed(
     let spinner = ui::wait_spinner(&format!(
         "waiting to be routed (0/{pending_count} done)..."
     ));
-    let deadline = Instant::now() + POLL_TIMEOUT;
     let mut done_count = 0usize;
 
     loop {
@@ -280,6 +283,7 @@ async fn batch_poll_approved<P: Provider>(
     gw_contract: &AxelarAmplifierGateway::AxelarAmplifierGatewayInstance<&P>,
     source_chain: &str,
     destination_chain: &str,
+    deadline: Instant,
 ) {
     let pending: Vec<usize> = (0..txs.len()).filter(|&i| !txs[i].failed).collect();
     let pending_count = pending.len();
@@ -290,7 +294,6 @@ async fn batch_poll_approved<P: Provider>(
     let spinner = ui::wait_spinner(&format!(
         "waiting to be approved on {destination_chain} (0/{pending_count} done)..."
     ));
-    let deadline = Instant::now() + POLL_TIMEOUT;
     let mut done_count = 0usize;
 
     loop {
@@ -353,6 +356,7 @@ async fn batch_poll_executed<P: Provider>(
     txs: &mut [PendingTx],
     gw_contract: &AxelarAmplifierGateway::AxelarAmplifierGatewayInstance<&P>,
     source_chain: &str,
+    deadline: Instant,
 ) {
     let pending: Vec<usize> = (0..txs.len())
         .filter(|&i| !txs[i].failed && txs[i].timing.executed_ok.is_none())
@@ -365,7 +369,6 @@ async fn batch_poll_executed<P: Provider>(
     let spinner = ui::wait_spinner(&format!(
         "waiting to be executed (0/{pending_count} done)..."
     ));
-    let deadline = Instant::now() + POLL_TIMEOUT;
     let mut done_count = 0usize;
 
     loop {
@@ -661,6 +664,8 @@ pub async fn verify_onchain_solana(
         return Ok(VerificationReport::default());
     }
 
+    let deadline = Instant::now() + VERIFY_TIMEOUT;
+
     let (lcd, _, _, _) = read_axelar_config(config)?;
 
     let voting_verifier = read_axelar_contract_field(
@@ -715,6 +720,7 @@ pub async fn verify_onchain_solana(
             source_chain,
             destination_chain,
             destination_address,
+            deadline,
         )
         .await;
     } else {
@@ -722,13 +728,13 @@ pub async fn verify_onchain_solana(
     }
 
     // Step 2/4: Routed (reused)
-    batch_poll_routed(&mut txs, &lcd, &cosm_gateway, source_chain).await;
+    batch_poll_routed(&mut txs, &lcd, &cosm_gateway, source_chain, deadline).await;
 
     // Step 3/4: Approved on Solana
-    batch_poll_solana_approved(&mut txs, &command_ids, solana_rpc, destination_chain).await;
+    batch_poll_solana_approved(&mut txs, &command_ids, solana_rpc, destination_chain, deadline).await;
 
     // Step 4/4: Executed on Solana
-    batch_poll_solana_executed(&mut txs, &command_ids, solana_rpc).await;
+    batch_poll_solana_executed(&mut txs, &command_ids, solana_rpc, deadline).await;
 
     // Compute stats (same as verify_onchain)
     let report = compute_verification_report(&txs, metrics);
@@ -745,6 +751,7 @@ async fn batch_poll_solana_approved(
     command_ids: &[[u8; 32]],
     solana_rpc: &str,
     destination_chain: &str,
+    deadline: Instant,
 ) {
     let pending: Vec<usize> = (0..txs.len()).filter(|&i| !txs[i].failed).collect();
     let pending_count = pending.len();
@@ -755,7 +762,6 @@ async fn batch_poll_solana_approved(
     let spinner = ui::wait_spinner(&format!(
         "waiting to be approved on {destination_chain} (0/{pending_count} done)..."
     ));
-    let deadline = Instant::now() + POLL_TIMEOUT;
     let mut done_count = 0usize;
 
     let rpc_client = solana_client::rpc_client::RpcClient::new_with_commitment(
@@ -815,6 +821,7 @@ async fn batch_poll_solana_executed(
     txs: &mut [PendingTx],
     command_ids: &[[u8; 32]],
     solana_rpc: &str,
+    deadline: Instant,
 ) {
     let pending: Vec<usize> = (0..txs.len())
         .filter(|&i| !txs[i].failed && txs[i].timing.executed_ok.is_none())
@@ -827,7 +834,6 @@ async fn batch_poll_solana_executed(
     let spinner = ui::wait_spinner(&format!(
         "waiting to be executed (0/{pending_count} done)..."
     ));
-    let deadline = Instant::now() + POLL_TIMEOUT;
     let mut done_count = 0usize;
 
     let rpc_client = solana_client::rpc_client::RpcClient::new_with_commitment(
