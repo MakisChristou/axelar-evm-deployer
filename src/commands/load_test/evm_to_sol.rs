@@ -4,20 +4,22 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use alloy::{
-    primitives::{keccak256, Address, Bytes, FixedBytes},
-    providers::Provider,
+    primitives::{Address, Bytes, FixedBytes, keccak256},
+    providers::{Provider, ProviderBuilder},
+    signers::local::PrivateKeySigner,
     sol,
     sol_types::{SolEvent, SolValue},
 };
 use eyre::eyre;
 use futures::future::join_all;
-use indicatif::ProgressBar;
 use rand::Rng;
 use solana_sdk::pubkey::Pubkey;
 use tokio::sync::Mutex;
+use tokio::sync::Semaphore;
 
-use super::metrics::{LoadTestReport, TxMetrics};
 use super::LoadTestArgs;
+use super::keypairs;
+use super::metrics::{LoadTestReport, TxMetrics};
 use crate::evm::{AxelarAmplifierGateway, ContractCall};
 use crate::ui;
 
@@ -70,16 +72,17 @@ fn make_executable_payload(custom: &Option<Vec<u8>>, counter_pda: &Pubkey) -> Ve
     full_payload
 }
 
-/// Run EVM->Sol load test and return metrics report.
+/// Run EVM->Sol load test with parallel sends from derived wallets.
 ///
-/// Calls gateway.callContract() directly with ExecutablePayload-formatted payloads.
+/// Derives N EVM signers from the main private key, funds them, then fires
+/// all callContract() txs in parallel (one per derived wallet).
 #[allow(clippy::too_many_arguments, clippy::float_arithmetic)]
-pub async fn run_load_test_with_metrics<P: Provider + Clone + 'static>(
+pub async fn run_load_test_with_metrics(
     args: &LoadTestArgs,
     gateway_addr: Address,
-    signer_address: Address,
+    main_key: &[u8; 32],
+    evm_rpc_url: &str,
     destination_address: &str,
-    provider: &P,
 ) -> eyre::Result<LoadTestReport> {
     let num_txs = args.num_txs.max(1) as usize;
 
@@ -93,65 +96,119 @@ pub async fn run_load_test_with_metrics<P: Provider + Clone + 'static>(
         None => None,
     };
 
-    /// Minimum delay (ms) between EVM transactions to avoid RPC rate limiting.
-    const EVM_TX_STAGGER_MS: u64 = 200;
+    // Derive N EVM signers from main private key
+    let derived = keypairs::derive_evm_signers(main_key, num_txs)?;
+    ui::info(&format!("derived {} EVM signing keys", derived.len()));
 
-    let stagger = Duration::from_millis(EVM_TX_STAGGER_MS);
+    // Fund derived wallets from main wallet
+    let main_signer = PrivateKeySigner::from_bytes(&(*main_key).into())
+        .map_err(|e| eyre!("invalid main EVM key: {e}"))?;
+    let funding_provider = ProviderBuilder::new()
+        .wallet(main_signer.clone())
+        .connect_http(evm_rpc_url.parse()?);
+    keypairs::ensure_funded_evm(&funding_provider, &main_signer, &derived).await?;
+
+    // Fire txs in parallel, capped to avoid overwhelming the RPC.
+    // Each send does multiple RPC calls (estimate gas, nonce, send, receipt),
+    // so even 10 concurrent senders means ~40+ RPC calls in flight.
+    const MAX_CONCURRENT_SENDS: usize = 50;
+    const MAX_RETRIES: u32 = 5;
+
     let metrics_list: Arc<Mutex<Vec<TxMetrics>>> = Arc::new(Mutex::new(Vec::new()));
-    let mut pending_tasks = Vec::new();
+    let confirmed_counter = Arc::new(AtomicU64::new(0));
+    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_SENDS));
+    let spinner = ui::wait_spinner(&format!("sending (0/{num_txs} confirmed)..."));
     let test_start = Instant::now();
 
+    let mut tasks = Vec::with_capacity(num_txs);
     let dest_chain = args.destination_chain.clone();
     let dest_addr = destination_address.to_string();
 
-    let confirmed_counter = Arc::new(AtomicU64::new(0));
-    let spinner = ui::wait_spinner(&format!("sending (0/{num_txs} confirmed)..."));
-
-    // Send N txs sequentially with a small stagger to avoid rate limiting
-    for i in 0..num_txs {
+    for signer in &derived {
         let tx_payload = make_executable_payload(&payload, &counter_pda);
         let metrics_clone = Arc::clone(&metrics_list);
-        let dest_chain = dest_chain.clone();
-        let dest_addr = dest_addr.clone();
-        let provider = provider.clone();
-        let gw_addr = gateway_addr;
-        let signer_addr = signer_address;
         let counter = Arc::clone(&confirmed_counter);
+        let sem = Arc::clone(&semaphore);
         let sp = spinner.clone();
         let total = num_txs;
+        let dc = dest_chain.clone();
+        let da = dest_addr.clone();
+        let gw = gateway_addr;
+
+        // Each task gets its own provider with its own signer — no nonce contention
+        let provider = ProviderBuilder::new()
+            .wallet(signer.clone())
+            .connect_http(evm_rpc_url.parse()?);
+        let signer_addr = signer.address();
 
         let handle = tokio::spawn(async move {
-            execute_and_record_evm(
-                &provider,
-                gw_addr,
-                signer_addr,
-                &dest_chain,
-                &dest_addr,
-                &tx_payload,
-                metrics_clone,
-                counter,
-                sp,
-                total,
-            )
-            .await;
+            let _permit = sem.acquire().await.unwrap();
+
+            // Retry with exponential backoff on rate-limit (429) errors
+            let mut m = None;
+            for attempt in 0..=MAX_RETRIES {
+                let result =
+                    execute_and_record_evm(&provider, gw, signer_addr, &dc, &da, &tx_payload).await;
+
+                if result.success || attempt == MAX_RETRIES {
+                    m = Some(result);
+                    break;
+                }
+
+                // Only retry on 429 errors
+                let is_rate_limited = result.error.as_deref().is_some_and(|e| e.contains("429"));
+                if !is_rate_limited {
+                    m = Some(result);
+                    break;
+                }
+
+                // Exponential backoff: 1s, 2s, 4s, 8s, 16s
+                let backoff = Duration::from_secs(1 << attempt);
+                tokio::time::sleep(backoff).await;
+            }
+
+            let m = m.unwrap();
+            if m.success {
+                let done = counter.fetch_add(1, Ordering::Relaxed) + 1;
+                sp.set_message(format!("sending ({done}/{total} confirmed)..."));
+            }
+            metrics_clone.lock().await.push(m);
         });
-        pending_tasks.push(handle);
-        if i + 1 < num_txs {
-            tokio::time::sleep(stagger).await;
-        }
+        tasks.push(handle);
     }
 
-    let total_submitted = pending_tasks.len() as u64;
+    let total_submitted = tasks.len() as u64;
+    join_all(tasks).await;
     let test_duration = test_start.elapsed().as_secs_f64();
 
-    join_all(pending_tasks).await;
     let confirmed_count = confirmed_counter.load(Ordering::Relaxed);
     spinner.finish_and_clear();
-    ui::success(&format!("sent {confirmed_count}/{total_submitted} confirmed"));
+    ui::success(&format!(
+        "sent {confirmed_count}/{total_submitted} confirmed"
+    ));
 
     let metrics = metrics_list.lock().await.clone();
     let total_confirmed = metrics.iter().filter(|m| m.success).count() as u64;
     let total_failed = metrics.iter().filter(|m| !m.success).count() as u64;
+
+    // Show error breakdown if there were failures
+    if total_failed > 0 {
+        let mut error_counts: std::collections::HashMap<String, u64> =
+            std::collections::HashMap::new();
+        for m in metrics.iter().filter(|m| !m.success) {
+            let reason = m
+                .error
+                .as_deref()
+                .unwrap_or("unknown")
+                .chars()
+                .take(120)
+                .collect::<String>();
+            *error_counts.entry(reason).or_default() += 1;
+        }
+        for (reason, count) in &error_counts {
+            ui::warn(&format!("{count} txs failed: {reason}"));
+        }
+    }
 
     let latencies: Vec<u64> = metrics.iter().filter_map(|m| m.latency_ms).collect();
 
@@ -161,7 +218,7 @@ pub async fn run_load_test_with_metrics<P: Provider + Clone + 'static>(
         destination_chain: args.destination_chain.clone(),
         destination_address: dest_addr,
         num_txs: args.num_txs,
-        num_keys: 1,
+        num_keys: num_txs,
         total_submitted,
         total_confirmed,
         total_failed,
@@ -198,8 +255,7 @@ pub async fn run_load_test_with_metrics<P: Provider + Clone + 'static>(
     Ok(report)
 }
 
-/// Send a single callContract tx on the EVM gateway and record metrics.
-#[allow(clippy::too_many_arguments, clippy::semicolon_outside_block)]
+/// Send a single callContract tx on the EVM gateway and return metrics.
 async fn execute_and_record_evm<P: Provider>(
     provider: &P,
     gateway_addr: Address,
@@ -207,11 +263,7 @@ async fn execute_and_record_evm<P: Provider>(
     dest_chain: &str,
     dest_addr: &str,
     payload: &[u8],
-    metrics_list: Arc<Mutex<Vec<TxMetrics>>>,
-    confirmed_counter: Arc<AtomicU64>,
-    spinner: ProgressBar,
-    total: usize,
-) {
+) -> TxMetrics {
     let submit_start = Instant::now();
     let payload_hash = alloy::hex::encode(keccak256(payload));
 
@@ -225,11 +277,8 @@ async fn execute_and_record_evm<P: Provider>(
     match call.send().await {
         Ok(pending) => {
             let tx_hash = *pending.tx_hash();
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(120),
-                pending.get_receipt(),
-            )
-            .await
+            match tokio::time::timeout(std::time::Duration::from_secs(120), pending.get_receipt())
+                .await
             {
                 Ok(Ok(receipt)) => {
                     #[allow(clippy::cast_possible_truncation)]
@@ -253,8 +302,8 @@ async fn execute_and_record_evm<P: Provider>(
                     // message_id format matching Axelar convention
                     let message_id = format!("{tx_hash:#x}-{event_index}");
 
-                    let metrics = TxMetrics {
-                        signature: message_id.clone(),
+                    TxMetrics {
+                        signature: message_id,
                         submit_time_ms: 0,
                         confirm_time_ms: Some(latency_ms),
                         latency_ms: Some(latency_ms),
@@ -267,34 +316,20 @@ async fn execute_and_record_evm<P: Provider>(
                         source_address: format!("{signer_address}"),
                         send_instant: Some(submit_start),
                         amplifier_timing: None,
-                    };
-
-                    let done = confirmed_counter.fetch_add(1, Ordering::Relaxed) + 1;
-                    spinner.set_message(format!("sending ({done}/{total} confirmed)..."));
-                    metrics_list.lock().await.push(metrics);
+                    }
                 }
-                Ok(Err(e)) => {
-                    record_failure(submit_start, &e.to_string(), &metrics_list).await;
-                }
-                Err(_) => {
-                    record_failure(submit_start, "tx timed out", &metrics_list).await;
-                }
+                Ok(Err(e)) => make_failure(submit_start, &e.to_string()),
+                Err(_) => make_failure(submit_start, "tx timed out"),
             }
         }
-        Err(e) => {
-            record_failure(submit_start, &e.to_string(), &metrics_list).await;
-        }
+        Err(e) => make_failure(submit_start, &e.to_string()),
     }
 }
 
-async fn record_failure(
-    submit_start: Instant,
-    error: &str,
-    metrics_list: &Arc<Mutex<Vec<TxMetrics>>>,
-) {
+fn make_failure(submit_start: Instant, error: &str) -> TxMetrics {
     #[allow(clippy::cast_possible_truncation)]
     let elapsed_ms = submit_start.elapsed().as_millis() as u64;
-    let metrics = TxMetrics {
+    TxMetrics {
         signature: String::new(),
         submit_time_ms: elapsed_ms,
         confirm_time_ms: None,
@@ -308,6 +343,5 @@ async fn record_failure(
         source_address: String::new(),
         send_instant: None,
         amplifier_timing: None,
-    };
-    metrics_list.lock().await.push(metrics);
+    }
 }

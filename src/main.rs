@@ -71,6 +71,7 @@ async fn main() -> Result<()> {
                     destination_chain: resolved.destination_chain,
                     source_chain: resolved.source_chain,
                     solana_rpc: resolved.solana_rpc,
+                    source_rpc: resolved.source_rpc,
                     private_key: resolved.private_key,
                     num_txs,
                     keypair,

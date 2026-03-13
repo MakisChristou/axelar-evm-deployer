@@ -54,6 +54,7 @@ pub struct LoadTestArgs {
     pub destination_chain: String,
     pub source_chain: String,
     pub solana_rpc: String,
+    pub source_rpc: Option<String>,
     pub private_key: Option<String>,
     pub num_txs: u64,
     pub keypair: Option<String>,
@@ -128,6 +129,7 @@ pub struct ResolvedConfig {
     pub source_chain: String,
     pub destination_chain: String,
     pub solana_rpc: String,
+    pub source_rpc: Option<String>,
     pub private_key: Option<String>,
 }
 
@@ -203,13 +205,12 @@ pub fn resolve_from_config(
             .to_string(),
     };
 
-    let solana_rpc = source_rpc_override.unwrap_or(solana_rpc);
-
     Ok(ResolvedConfig {
         test_type,
         source_chain,
         destination_chain,
         solana_rpc,
+        source_rpc: source_rpc_override,
         private_key: private_key_override,
     })
 }
@@ -387,7 +388,11 @@ pub async fn run(args: LoadTestArgs) -> Result<()> {
     }
 }
 
-async fn run_sol_to_evm(args: LoadTestArgs, run_start: Instant) -> Result<()> {
+async fn run_sol_to_evm(mut args: LoadTestArgs, run_start: Instant) -> Result<()> {
+    // --source-rpc overrides the Solana (source) RPC
+    if let Some(rpc) = args.source_rpc.take() {
+        args.solana_rpc = rpc;
+    }
     let dest = &args.destination_chain;
     let src = &args.source_chain;
 
@@ -400,6 +405,10 @@ async fn run_sol_to_evm(args: LoadTestArgs, run_start: Instant) -> Result<()> {
         .pointer(&format!("/chains/{dest}/rpc"))
         .and_then(|v| v.as_str())
         .ok_or_else(|| eyre::eyre!("no rpc URL for chain '{dest}' in config"))?;
+
+    // Validate RPCs before doing any work
+    validate_solana_rpc(&args.solana_rpc).await?;
+    validate_evm_rpc(rpc_url).await?;
 
     // Check that verification contracts exist for this chain pair before doing any work
     if read_axelar_contract_field(
@@ -510,10 +519,18 @@ async fn run_evm_to_sol(args: LoadTestArgs, run_start: Instant) -> Result<()> {
         .map_err(|e| eyre::eyre!("failed to read config {}: {e}", args.config.display()))?;
     let config_root: serde_json::Value = serde_json::from_str(&config_content)?;
 
-    let evm_rpc_url = config_root
-        .pointer(&format!("/chains/{src}/rpc"))
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| eyre::eyre!("no rpc URL for source chain '{src}' in config"))?;
+    let evm_rpc_url = match &args.source_rpc {
+        Some(rpc) => rpc.clone(),
+        None => config_root
+            .pointer(&format!("/chains/{src}/rpc"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| eyre::eyre!("no rpc URL for source chain '{src}' in config"))?
+            .to_string(),
+    };
+
+    // Validate RPCs before doing any work
+    validate_evm_rpc(&evm_rpc_url).await?;
+    validate_solana_rpc(&args.solana_rpc).await?;
 
     // Check that verification contracts exist for this chain pair before doing any work
     if read_axelar_contract_field(
@@ -545,9 +562,16 @@ async fn run_evm_to_sol(args: LoadTestArgs, run_start: Instant) -> Result<()> {
     let signer_address = signer.address();
     let read_provider = ProviderBuilder::new().connect_http(evm_rpc_url.parse()?);
     check_evm_balance(&read_provider, signer_address).await?;
-    let provider = ProviderBuilder::new()
-        .wallet(signer)
-        .connect_http(evm_rpc_url.parse()?);
+
+    // Extract 32-byte private key for deriving sub-wallets
+    let main_key: [u8; 32] = signer.to_bytes().into();
+
+    #[allow(clippy::float_arithmetic)]
+    {
+        let balance: u128 = read_provider.get_balance(signer_address).await?.to();
+        let eth = balance as f64 / 1e18;
+        ui::kv("wallet", &format!("{signer_address} ({eth:.6} ETH)"));
+    }
 
     // Destination on Solana: memo program
     let destination_address = evm_to_sol::MEMO_PROGRAM_ADDRESS;
@@ -556,9 +580,9 @@ async fn run_evm_to_sol(args: LoadTestArgs, run_start: Instant) -> Result<()> {
     let mut report = evm_to_sol::run_load_test_with_metrics(
         &args,
         gateway_addr,
-        signer_address,
+        &main_key,
+        &evm_rpc_url,
         destination_address,
-        &provider,
     )
     .await?;
 
@@ -602,6 +626,34 @@ fn list_gateway_chains(config_root: &serde_json::Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Validate that an RPC endpoint speaks EVM JSON-RPC (eth_chainId).
+async fn validate_evm_rpc(rpc_url: &str) -> Result<()> {
+    let provider = ProviderBuilder::new().connect_http(
+        rpc_url
+            .parse()
+            .map_err(|e| eyre::eyre!("invalid RPC URL '{rpc_url}': {e}"))?,
+    );
+    provider.get_chain_id().await.map_err(|_| {
+        eyre::eyre!(
+            "RPC '{rpc_url}' does not appear to be an EVM endpoint \
+             (eth_chainId failed). Check that you're using the correct RPC URL."
+        )
+    })?;
+    Ok(())
+}
+
+/// Validate that an RPC endpoint speaks Solana JSON-RPC (getVersion).
+async fn validate_solana_rpc(rpc_url: &str) -> Result<()> {
+    let client = solana_client::nonblocking::rpc_client::RpcClient::new(rpc_url.to_string());
+    client.get_version().await.map_err(|_| {
+        eyre::eyre!(
+            "RPC '{rpc_url}' does not appear to be a Solana endpoint \
+             (getVersion failed). Check that you're using the correct RPC URL."
+        )
+    })?;
+    Ok(())
 }
 
 async fn check_evm_balance<P: alloy::providers::Provider>(

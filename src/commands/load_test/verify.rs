@@ -13,8 +13,9 @@ use crate::evm::AxelarAmplifierGateway;
 use crate::solana::solana_call_contract_index;
 use crate::ui;
 
-/// Maximum total time for all verification phases (5 minutes).
-const VERIFY_TIMEOUT: Duration = Duration::from_secs(300);
+/// If no transaction completes a phase for this long, we stop waiting.
+/// Resets every time a tx makes progress, so large batches naturally get more time.
+const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(180);
 /// Delay between poll attempts.
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -78,8 +79,6 @@ pub async fn verify_onchain<P: Provider>(
     let gw_contract = AxelarAmplifierGateway::new(gateway_addr, provider);
     let contract_addr: Address = destination_address.parse()?;
 
-    let deadline = Instant::now() + VERIFY_TIMEOUT;
-
     // Build pending tx list
     let mut txs: Vec<PendingTx> = confirmed
         .iter()
@@ -110,7 +109,6 @@ pub async fn verify_onchain<P: Provider>(
             source_chain,
             destination_chain,
             destination_address,
-            deadline,
             "axelar",
         )
         .await;
@@ -119,13 +117,13 @@ pub async fn verify_onchain<P: Provider>(
     }
 
     // === Step 2/4: Routed (Cosmos Gateway) ===
-    batch_poll_routed(&mut txs, &lcd, &cosm_gateway, source_chain, deadline, "axelar").await;
+    batch_poll_routed(&mut txs, &lcd, &cosm_gateway, source_chain, "axelar").await;
 
     // === Step 3/4: Approved (EVM gateway) ===
-    batch_poll_approved(&mut txs, &gw_contract, source_chain, destination_chain, deadline).await;
+    batch_poll_approved(&mut txs, &gw_contract, source_chain, destination_chain).await;
 
     // === Step 4/4: Executed (approval consumed) ===
-    batch_poll_executed(&mut txs, &gw_contract, source_chain, deadline, destination_chain).await;
+    batch_poll_executed(&mut txs, &gw_contract, source_chain, destination_chain).await;
 
     // Write timings + compute stats
     let report = compute_verification_report(&txs, metrics);
@@ -144,7 +142,6 @@ async fn batch_poll_voted(
     source_chain: &str,
     destination_chain: &str,
     destination_address: &str,
-    deadline: Instant,
     annotation: &str,
 ) {
     let pending: Vec<usize> = (0..txs.len()).filter(|&i| !txs[i].failed).collect();
@@ -157,6 +154,7 @@ async fn batch_poll_voted(
         "waiting to be voted (0/{pending_count} done)..."
     ));
     let mut done_count = 0usize;
+    let mut last_progress = Instant::now();
 
     loop {
         for &i in &pending {
@@ -179,6 +177,7 @@ async fn batch_poll_voted(
                     txs[i].timing.voted_secs =
                         Some(txs[i].send_instant.elapsed().as_secs_f64());
                     done_count += 1;
+                    last_progress = Instant::now();
                     spinner.set_message(format!(
                         "waiting to be voted ({done_count}/{pending_count} done)..."
                     ));
@@ -190,7 +189,7 @@ async fn batch_poll_voted(
             }
         }
 
-        if done_count >= pending_count || Instant::now() >= deadline {
+        if done_count >= pending_count || last_progress.elapsed() >= INACTIVITY_TIMEOUT {
             break;
         }
         tokio::time::sleep(POLL_INTERVAL).await;
@@ -221,7 +220,6 @@ async fn batch_poll_routed(
     lcd: &str,
     cosm_gateway: &str,
     source_chain: &str,
-    deadline: Instant,
     annotation: &str,
 ) {
     let pending: Vec<usize> = (0..txs.len()).filter(|&i| !txs[i].failed).collect();
@@ -234,6 +232,7 @@ async fn batch_poll_routed(
         "waiting to be routed (0/{pending_count} done)..."
     ));
     let mut done_count = 0usize;
+    let mut last_progress = Instant::now();
 
     loop {
         for &i in &pending {
@@ -245,6 +244,7 @@ async fn batch_poll_routed(
                     txs[i].timing.routed_secs =
                         Some(txs[i].send_instant.elapsed().as_secs_f64());
                     done_count += 1;
+                    last_progress = Instant::now();
                     spinner.set_message(format!(
                         "waiting to be routed ({done_count}/{pending_count} done)..."
                     ));
@@ -256,7 +256,7 @@ async fn batch_poll_routed(
             }
         }
 
-        if done_count >= pending_count || Instant::now() >= deadline {
+        if done_count >= pending_count || last_progress.elapsed() >= INACTIVITY_TIMEOUT {
             break;
         }
         tokio::time::sleep(POLL_INTERVAL).await;
@@ -287,7 +287,6 @@ async fn batch_poll_approved<P: Provider>(
     gw_contract: &AxelarAmplifierGateway::AxelarAmplifierGatewayInstance<&P>,
     source_chain: &str,
     destination_chain: &str,
-    deadline: Instant,
 ) {
     let pending: Vec<usize> = (0..txs.len()).filter(|&i| !txs[i].failed).collect();
     let pending_count = pending.len();
@@ -299,6 +298,7 @@ async fn batch_poll_approved<P: Provider>(
         "waiting to be approved on {destination_chain} (0/{pending_count} done)..."
     ));
     let mut done_count = 0usize;
+    let mut last_progress = Instant::now();
 
     loop {
         for &i in &pending {
@@ -319,6 +319,7 @@ async fn batch_poll_approved<P: Provider>(
                     txs[i].timing.approved_secs =
                         Some(txs[i].send_instant.elapsed().as_secs_f64());
                     done_count += 1;
+                    last_progress = Instant::now();
                     spinner.set_message(format!(
                         "waiting to be approved on {destination_chain} ({done_count}/{pending_count} done)..."
                     ));
@@ -332,6 +333,7 @@ async fn batch_poll_approved<P: Provider>(
                     txs[i].timing.executed_secs = Some(elapsed);
                     txs[i].timing.executed_ok = Some(true);
                     done_count += 1;
+                    last_progress = Instant::now();
                     spinner.set_message(format!(
                         "waiting to be approved on {destination_chain} ({done_count}/{pending_count} done)..."
                     ));
@@ -342,7 +344,7 @@ async fn batch_poll_approved<P: Provider>(
             }
         }
 
-        if done_count >= pending_count || Instant::now() >= deadline {
+        if done_count >= pending_count || last_progress.elapsed() >= INACTIVITY_TIMEOUT {
             break;
         }
         tokio::time::sleep(POLL_INTERVAL).await;
@@ -372,21 +374,24 @@ async fn batch_poll_executed<P: Provider>(
     txs: &mut [PendingTx],
     gw_contract: &AxelarAmplifierGateway::AxelarAmplifierGatewayInstance<&P>,
     source_chain: &str,
-    deadline: Instant,
     annotation: &str,
 ) {
+    // Count txs already marked executed during the approved step
+    let already_executed = txs.iter().filter(|t| t.timing.executed_ok.is_some()).count();
     let pending: Vec<usize> = (0..txs.len())
         .filter(|&i| !txs[i].failed && txs[i].timing.executed_ok.is_none())
         .collect();
-    let pending_count = pending.len();
-    if pending_count == 0 {
+    let total_count = already_executed + pending.len();
+    if pending.is_empty() {
+        ui::success_annotated(&format!("executed {total_count}/{total_count}"), annotation);
         return;
     }
 
     let spinner = ui::wait_spinner(&format!(
-        "waiting to be executed (0/{pending_count} done)..."
+        "waiting to be executed ({already_executed}/{total_count} done)..."
     ));
-    let mut done_count = 0usize;
+    let mut done_count = already_executed;
+    let mut last_progress = Instant::now();
 
     loop {
         for &i in &pending {
@@ -408,8 +413,9 @@ async fn batch_poll_executed<P: Provider>(
                         Some(txs[i].send_instant.elapsed().as_secs_f64());
                     txs[i].timing.executed_ok = Some(true);
                     done_count += 1;
+                    last_progress = Instant::now();
                     spinner.set_message(format!(
-                        "waiting to be executed ({done_count}/{pending_count} done)..."
+                        "waiting to be executed ({done_count}/{total_count} done)..."
                     ));
                 }
                 Ok(true) => {} // still approved, not yet executed
@@ -419,7 +425,7 @@ async fn batch_poll_executed<P: Provider>(
             }
         }
 
-        if done_count >= pending_count || Instant::now() >= deadline {
+        if done_count >= total_count || last_progress.elapsed() >= INACTIVITY_TIMEOUT {
             break;
         }
         tokio::time::sleep(POLL_INTERVAL).await;
@@ -433,12 +439,12 @@ async fn batch_poll_executed<P: Provider>(
         }
     }
 
-    let timed_out = pending_count - done_count;
+    let timed_out = total_count - done_count;
     spinner.finish_and_clear();
     if timed_out > 0 {
-        ui::success_annotated(&format!("executed {done_count}/{pending_count} ({timed_out} timed out)"), annotation);
+        ui::success_annotated(&format!("executed {done_count}/{total_count} ({timed_out} timed out)"), annotation);
     } else {
-        ui::success_annotated(&format!("executed {done_count}/{pending_count}"), annotation);
+        ui::success_annotated(&format!("executed {done_count}/{total_count}"), annotation);
     }
 }
 
@@ -681,8 +687,6 @@ pub async fn verify_onchain_solana(
         return Ok(VerificationReport::default());
     }
 
-    let deadline = Instant::now() + VERIFY_TIMEOUT;
-
     let (lcd, _, _, _) = read_axelar_config(config)?;
 
     let voting_verifier = read_axelar_contract_field(
@@ -737,7 +741,6 @@ pub async fn verify_onchain_solana(
             source_chain,
             destination_chain,
             destination_address,
-            deadline,
             "axelar",
         )
         .await;
@@ -746,13 +749,13 @@ pub async fn verify_onchain_solana(
     }
 
     // Step 2/4: Routed (reused)
-    batch_poll_routed(&mut txs, &lcd, &cosm_gateway, source_chain, deadline, "axelar").await;
+    batch_poll_routed(&mut txs, &lcd, &cosm_gateway, source_chain, "axelar").await;
 
     // Step 3/4: Approved on Solana
-    batch_poll_solana_approved(&mut txs, &command_ids, solana_rpc, destination_chain, deadline).await;
+    batch_poll_solana_approved(&mut txs, &command_ids, solana_rpc, destination_chain).await;
 
     // Step 4/4: Executed on Solana
-    batch_poll_solana_executed(&mut txs, &command_ids, solana_rpc, destination_chain, deadline).await;
+    batch_poll_solana_executed(&mut txs, &command_ids, solana_rpc, destination_chain).await;
 
     // Compute stats (same as verify_onchain)
     let report = compute_verification_report(&txs, metrics);
@@ -769,7 +772,6 @@ async fn batch_poll_solana_approved(
     command_ids: &[[u8; 32]],
     solana_rpc: &str,
     destination_chain: &str,
-    deadline: Instant,
 ) {
     let pending: Vec<usize> = (0..txs.len()).filter(|&i| !txs[i].failed).collect();
     let pending_count = pending.len();
@@ -781,6 +783,7 @@ async fn batch_poll_solana_approved(
         "waiting to be approved on {destination_chain} (0/{pending_count} done)..."
     ));
     let mut done_count = 0usize;
+    let mut last_progress = Instant::now();
 
     let rpc_client = solana_client::rpc_client::RpcClient::new_with_commitment(
         solana_rpc,
@@ -798,6 +801,7 @@ async fn batch_poll_solana_approved(
                     txs[i].timing.approved_secs =
                         Some(txs[i].send_instant.elapsed().as_secs_f64());
                     done_count += 1;
+                    last_progress = Instant::now();
                     spinner.set_message(format!(
                         "waiting to be approved on {destination_chain} ({done_count}/{pending_count} done)..."
                     ));
@@ -809,7 +813,7 @@ async fn batch_poll_solana_approved(
             }
         }
 
-        if done_count >= pending_count || Instant::now() >= deadline {
+        if done_count >= pending_count || last_progress.elapsed() >= INACTIVITY_TIMEOUT {
             break;
         }
         tokio::time::sleep(POLL_INTERVAL).await;
@@ -840,7 +844,6 @@ async fn batch_poll_solana_executed(
     command_ids: &[[u8; 32]],
     solana_rpc: &str,
     annotation: &str,
-    deadline: Instant,
 ) {
     let pending: Vec<usize> = (0..txs.len())
         .filter(|&i| !txs[i].failed && txs[i].timing.executed_ok.is_none())
@@ -854,6 +857,7 @@ async fn batch_poll_solana_executed(
         "waiting to be executed (0/{pending_count} done)..."
     ));
     let mut done_count = 0usize;
+    let mut last_progress = Instant::now();
 
     let rpc_client = solana_client::rpc_client::RpcClient::new_with_commitment(
         solana_rpc,
@@ -872,6 +876,7 @@ async fn batch_poll_solana_executed(
                         Some(txs[i].send_instant.elapsed().as_secs_f64());
                     txs[i].timing.executed_ok = Some(true);
                     done_count += 1;
+                    last_progress = Instant::now();
                     spinner.set_message(format!(
                         "waiting to be executed ({done_count}/{pending_count} done)..."
                     ));
@@ -884,7 +889,7 @@ async fn batch_poll_solana_executed(
             }
         }
 
-        if done_count >= pending_count || Instant::now() >= deadline {
+        if done_count >= pending_count || last_progress.elapsed() >= INACTIVITY_TIMEOUT {
             break;
         }
         tokio::time::sleep(POLL_INTERVAL).await;

@@ -101,7 +101,8 @@ axe test load-test \
   --source-chain avalanche-fuji \
   --destination-chain solana-18 \
   --config ../axelar-contract-deployments/axelar-chains-config/info/devnet-amplifier.json \
-  --num-txs 20
+  --num-txs 50 \
+  --source-rpc https://example.avalanche.fuji.rpc.com
 ```
 
 ## Load Test (stagenet)

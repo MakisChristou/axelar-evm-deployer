@@ -1,5 +1,8 @@
 use anchor_lang::prelude::system_instruction;
 use alloy::primitives::keccak256;
+use alloy::primitives::U256;
+use alloy::providers::Provider;
+use alloy::signers::local::PrivateKeySigner;
 use eyre::{Result, eyre};
 use indicatif::{ProgressBar, ProgressStyle};
 use solana_client::rpc_client::RpcClient;
@@ -126,6 +129,118 @@ pub fn ensure_funded(
     ));
 
     Ok(balances)
+}
+
+/// Deterministically derive `count` EVM signers from a main private key.
+///
+/// Uses the same `keccak256(main_key || index)` pattern as `derive_keypairs()`.
+/// Each 32-byte hash is a valid secp256k1 private key.
+pub fn derive_evm_signers(main_key: &[u8; 32], count: usize) -> Result<Vec<PrivateKeySigner>> {
+    (0..count)
+        .map(|i| {
+            let mut seed_input = Vec::with_capacity(40);
+            seed_input.extend_from_slice(main_key);
+            seed_input.extend_from_slice(&(i as u64).to_le_bytes());
+            let hash = keccak256(&seed_input);
+            PrivateKeySigner::from_bytes(&hash)
+                .map_err(|e| eyre!("failed to derive EVM signer {i}: {e}"))
+        })
+        .collect()
+}
+
+/// When a derived EVM key drops below this balance, it gets topped up.
+const MIN_WEI_PER_KEY: u128 = 500_000_000_000_000; // 0.0005 ETH
+
+/// Top-up target for derived EVM keys.
+const TARGET_WEI_PER_KEY: u128 = 1_000_000_000_000_000; // 0.001 ETH
+
+/// Check that all derived EVM signers are funded, and fund any that aren't.
+#[allow(clippy::cast_precision_loss, clippy::float_arithmetic)]
+pub async fn ensure_funded_evm<P: Provider>(
+    provider: &P,
+    main_signer: &PrivateKeySigner,
+    derived: &[PrivateKeySigner],
+) -> Result<()> {
+    use alloy::network::TransactionBuilder;
+    use alloy::rpc::types::TransactionRequest;
+
+    let mut to_fund: Vec<(usize, u128)> = Vec::new();
+
+    let check_pb = ProgressBar::new(derived.len() as u64);
+    check_pb.set_style(
+        ProgressStyle::with_template("  {bar:40.cyan/dim} {pos}/{len} keys checked")
+            .unwrap()
+            .progress_chars("=> "),
+    );
+    for (i, signer) in derived.iter().enumerate() {
+        let balance = provider.get_balance(signer.address()).await.unwrap_or_default();
+        let bal: u128 = balance.to();
+        if bal < MIN_WEI_PER_KEY {
+            to_fund.push((i, TARGET_WEI_PER_KEY - bal));
+        }
+        check_pb.inc(1);
+    }
+    check_pb.finish_and_clear();
+
+    if to_fund.is_empty() {
+        ui::success(&format!(
+            "all {} derived EVM keys are funded (>= {:.4} ETH each)",
+            derived.len(),
+            MIN_WEI_PER_KEY as f64 / 1e18,
+        ));
+        return Ok(());
+    }
+
+    // Check main wallet has enough
+    let main_balance: u128 = provider.get_balance(main_signer.address()).await?.to();
+    let total_needed: u128 = to_fund.iter().map(|(_, deficit)| deficit).sum();
+    if main_balance < total_needed {
+        let needed_eth = total_needed as f64 / 1e18;
+        let have_eth = main_balance as f64 / 1e18;
+        return Err(eyre!(
+            "main wallet has {have_eth:.6} ETH but needs {needed_eth:.6} ETH to fund {} keys.\n  \
+             Fund the main wallet first.",
+            to_fund.len(),
+        ));
+    }
+
+    ui::info(&format!(
+        "funding {}/{} keys from main wallet ({:.6} ETH)...",
+        to_fund.len(),
+        derived.len(),
+        total_needed as f64 / 1e18,
+    ));
+
+    let pb = ProgressBar::new(to_fund.len() as u64);
+    pb.set_style(
+        ProgressStyle::with_template("  {bar:40.cyan/dim} {pos}/{len} keys funded")
+            .unwrap()
+            .progress_chars("=> "),
+    );
+
+    for (i, amount) in &to_fund {
+        let tx = TransactionRequest::default()
+            .with_to(derived[*i].address())
+            .with_value(U256::from(*amount));
+        let pending = provider
+            .send_transaction(tx)
+            .await
+            .map_err(|e| eyre!("failed to fund key {i}: {e}"))?;
+        pending
+            .get_receipt()
+            .await
+            .map_err(|e| eyre!("funding tx for key {i} failed: {e}"))?;
+        pb.inc(1);
+    }
+    pb.finish_and_clear();
+
+    ui::success(&format!(
+        "funded {} EVM keys ({:.6} ETH total)",
+        to_fund.len(),
+        total_needed as f64 / 1e18,
+    ));
+
+    Ok(())
 }
 
 /// Transfer SOL from one keypair to a destination pubkey.
