@@ -115,7 +115,7 @@ axe test load-test \
   --source-chain solana-stagenet-3 \
   --destination-chain flow \
   --config ../axelar-contract-deployments/axelar-chains-config/info/stagenet.json \
-  --num-txs 1
+  --num-txs 100
 ```
 
 Run `axe test load-test --help` for all options.

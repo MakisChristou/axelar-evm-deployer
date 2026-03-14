@@ -88,6 +88,7 @@ pub struct VerificationReport {
     pub avg_routed_secs: Option<f64>,
     pub avg_approved_secs: Option<f64>,
     pub avg_executed_secs: Option<f64>,
+    pub min_executed_secs: Option<f64>,
     pub max_executed_secs: Option<f64>,
     /// Number of txs that timed out before completing all phases.
     pub stuck: u64,

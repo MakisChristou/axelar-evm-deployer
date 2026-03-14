@@ -1,9 +1,11 @@
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use alloy::primitives::{keccak256, Address, FixedBytes};
 use alloy::providers::Provider;
 use eyre::Result;
+use futures::future::join_all;
 use serde_json::json;
 use solana_sdk::pubkey::Pubkey;
 
@@ -19,6 +21,29 @@ const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(180);
 /// Delay between poll attempts.
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
+// ---------------------------------------------------------------------------
+// Phase tracking
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    Voted,
+    Routed,
+    Approved,
+    Executed,
+    Done,
+}
+
+enum ApprovalResult {
+    Approved,
+    AlreadyExecuted,
+    NotYet,
+}
+
+// ---------------------------------------------------------------------------
+// Per-tx state
+// ---------------------------------------------------------------------------
+
 /// Per-tx state tracked during batch verification.
 struct PendingTx {
     idx: usize,
@@ -31,7 +56,410 @@ struct PendingTx {
     timing: AmplifierTiming,
     failed: bool,
     fail_reason: Option<String>,
+    phase: Phase,
 }
+
+// ---------------------------------------------------------------------------
+// Destination checker abstraction
+// ---------------------------------------------------------------------------
+
+enum DestinationChecker<'a, P: Provider> {
+    Evm {
+        gw_contract: &'a AxelarAmplifierGateway::AxelarAmplifierGatewayInstance<&'a P>,
+    },
+    Solana {
+        rpc_client: Arc<solana_client::rpc_client::RpcClient>,
+        command_ids: Vec<[u8; 32]>,
+        _phantom: std::marker::PhantomData<&'a P>,
+    },
+}
+
+impl<P: Provider> DestinationChecker<'_, P> {
+    async fn check_approved(
+        &self,
+        tx: &PendingTx,
+        idx: usize,
+        source_chain: &str,
+    ) -> Result<ApprovalResult> {
+        match self {
+            Self::Evm { gw_contract } => {
+                let approved = check_evm_is_message_approved(
+                    gw_contract,
+                    source_chain,
+                    &tx.message_id,
+                    &tx.source_address,
+                    tx.contract_addr,
+                    tx.payload_hash,
+                )
+                .await?;
+                if approved {
+                    Ok(ApprovalResult::Approved)
+                } else {
+                    // tx is already routed, so false = already executed
+                    Ok(ApprovalResult::AlreadyExecuted)
+                }
+            }
+            Self::Solana {
+                rpc_client,
+                command_ids,
+                ..
+            } => {
+                let client = rpc_client.clone();
+                let cmd_id = command_ids[idx];
+                let result = tokio::task::spawn_blocking(move || {
+                    check_solana_incoming_message(&client, &cmd_id)
+                })
+                .await??;
+                match result {
+                    Some(0) => Ok(ApprovalResult::Approved),
+                    Some(_) => Ok(ApprovalResult::AlreadyExecuted),
+                    None => Ok(ApprovalResult::NotYet),
+                }
+            }
+        }
+    }
+
+    async fn check_executed(
+        &self,
+        tx: &PendingTx,
+        idx: usize,
+        source_chain: &str,
+    ) -> Result<bool> {
+        match self {
+            Self::Evm { gw_contract } => {
+                let approved = check_evm_is_message_approved(
+                    gw_contract,
+                    source_chain,
+                    &tx.message_id,
+                    &tx.source_address,
+                    tx.contract_addr,
+                    tx.payload_hash,
+                )
+                .await?;
+                // false = approval consumed = executed
+                Ok(!approved)
+            }
+            Self::Solana {
+                rpc_client,
+                command_ids,
+                ..
+            } => {
+                let client = rpc_client.clone();
+                let cmd_id = command_ids[idx];
+                let result = tokio::task::spawn_blocking(move || {
+                    check_solana_incoming_message(&client, &cmd_id)
+                })
+                .await??;
+                match result {
+                    Some(status) if status != 0 => Ok(true),
+                    _ => Ok(false),
+                }
+            }
+        }
+    }
+
+    fn approval_label(&self) -> &str {
+        match self {
+            Self::Evm { .. } => "EVM approval",
+            Self::Solana { .. } => "Solana approval",
+        }
+    }
+
+    fn execution_label(&self) -> &str {
+        match self {
+            Self::Evm { .. } => "EVM execution",
+            Self::Solana { .. } => "Solana execution",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Check outcome — returned from parallel checks, applied to txs afterward
+// ---------------------------------------------------------------------------
+
+enum CheckOutcome {
+    /// No change (not ready yet, or tx was already terminal).
+    NotYet,
+    /// Phase completed — record timing and advance.
+    PhaseComplete { elapsed: f64 },
+    /// Voted phase: no VotingVerifier, just advance to Routed.
+    SkipVoting,
+    /// Approved check found the tx already executed — skip to Done.
+    AlreadyExecuted { elapsed: f64 },
+    /// Check returned an error.
+    Error(String),
+}
+
+// ---------------------------------------------------------------------------
+// Unified polling pipeline
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+async fn poll_pipeline<P: Provider>(
+    txs: &mut [PendingTx],
+    lcd: &str,
+    voting_verifier: Option<&str>,
+    cosm_gateway: &str,
+    source_chain: &str,
+    destination_chain: &str,
+    destination_address: &str,
+    checker: &DestinationChecker<'_, P>,
+) {
+    let total = txs.len();
+    if total == 0 {
+        return;
+    }
+
+    let spinner = ui::wait_spinner("verifying pipeline (starting)...");
+    let mut last_progress = Instant::now();
+
+    loop {
+        // Collect indices of non-terminal txs
+        let active: Vec<usize> = (0..txs.len())
+            .filter(|&i| !txs[i].failed && txs[i].phase != Phase::Done)
+            .collect();
+
+        if active.is_empty() {
+            break;
+        }
+
+        // Fire all checks concurrently
+        let futs: Vec<_> = active
+            .iter()
+            .map(|&i| {
+                // Extract data needed for the check (avoids borrowing txs during await)
+                let phase = txs[i].phase;
+                let message_id = txs[i].message_id.clone();
+                let source_address = txs[i].source_address.clone();
+                let contract_addr = txs[i].contract_addr;
+                let payload_hash = txs[i].payload_hash;
+                let payload_hash_hex = txs[i].payload_hash_hex.clone();
+                let send_instant = txs[i].send_instant;
+
+                async move {
+                    let outcome = match phase {
+                        Phase::Voted => {
+                            if let Some(vv) = voting_verifier {
+                                match check_voting_verifier(
+                                    lcd,
+                                    vv,
+                                    source_chain,
+                                    &message_id,
+                                    &source_address,
+                                    destination_chain,
+                                    destination_address,
+                                    &payload_hash_hex,
+                                )
+                                .await
+                                {
+                                    Ok(true) => CheckOutcome::PhaseComplete {
+                                        elapsed: send_instant.elapsed().as_secs_f64(),
+                                    },
+                                    Ok(false) => CheckOutcome::NotYet,
+                                    Err(e) => {
+                                        CheckOutcome::Error(format!("VotingVerifier: {e}"))
+                                    }
+                                }
+                            } else {
+                                CheckOutcome::SkipVoting
+                            }
+                        }
+                        Phase::Routed => {
+                            match check_cosmos_routed(lcd, cosm_gateway, source_chain, &message_id)
+                                .await
+                            {
+                                Ok(true) => CheckOutcome::PhaseComplete {
+                                    elapsed: send_instant.elapsed().as_secs_f64(),
+                                },
+                                Ok(false) => CheckOutcome::NotYet,
+                                Err(e) => CheckOutcome::Error(format!("Gateway: {e}")),
+                            }
+                        }
+                        Phase::Approved => {
+                            // Build a temporary PendingTx-like view for the checker
+                            let tmp = PendingTx {
+                                idx: 0,
+                                message_id: message_id.clone(),
+                                send_instant,
+                                source_address,
+                                contract_addr,
+                                payload_hash,
+                                payload_hash_hex,
+                                timing: AmplifierTiming::default(),
+                                failed: false,
+                                fail_reason: None,
+                                phase,
+                            };
+                            match checker.check_approved(&tmp, i, source_chain).await {
+                                Ok(ApprovalResult::Approved) => CheckOutcome::PhaseComplete {
+                                    elapsed: send_instant.elapsed().as_secs_f64(),
+                                },
+                                Ok(ApprovalResult::AlreadyExecuted) => {
+                                    CheckOutcome::AlreadyExecuted {
+                                        elapsed: send_instant.elapsed().as_secs_f64(),
+                                    }
+                                }
+                                Ok(ApprovalResult::NotYet) => CheckOutcome::NotYet,
+                                Err(e) => CheckOutcome::Error(format!(
+                                    "{}: {e}",
+                                    checker.approval_label()
+                                )),
+                            }
+                        }
+                        Phase::Executed => {
+                            let tmp = PendingTx {
+                                idx: 0,
+                                message_id: message_id.clone(),
+                                send_instant,
+                                source_address,
+                                contract_addr,
+                                payload_hash,
+                                payload_hash_hex,
+                                timing: AmplifierTiming::default(),
+                                failed: false,
+                                fail_reason: None,
+                                phase,
+                            };
+                            match checker.check_executed(&tmp, i, source_chain).await {
+                                Ok(true) => CheckOutcome::PhaseComplete {
+                                    elapsed: send_instant.elapsed().as_secs_f64(),
+                                },
+                                Ok(false) => CheckOutcome::NotYet,
+                                Err(e) => CheckOutcome::Error(format!(
+                                    "{}: {e}",
+                                    checker.execution_label()
+                                )),
+                            }
+                        }
+                        Phase::Done => CheckOutcome::NotYet,
+                    };
+                    (i, outcome)
+                }
+            })
+            .collect();
+
+        let results = join_all(futs).await;
+
+        // Apply results back to txs
+        let mut error_msg = None;
+        for (i, outcome) in results {
+            match outcome {
+                CheckOutcome::NotYet => {}
+                CheckOutcome::PhaseComplete { elapsed } => {
+                    match txs[i].phase {
+                        Phase::Voted => {
+                            txs[i].timing.voted_secs = Some(elapsed);
+                            txs[i].phase = Phase::Routed;
+                        }
+                        Phase::Routed => {
+                            txs[i].timing.routed_secs = Some(elapsed);
+                            txs[i].phase = Phase::Approved;
+                        }
+                        Phase::Approved => {
+                            txs[i].timing.approved_secs = Some(elapsed);
+                            txs[i].phase = Phase::Executed;
+                        }
+                        Phase::Executed => {
+                            txs[i].timing.executed_secs = Some(elapsed);
+                            txs[i].timing.executed_ok = Some(true);
+                            txs[i].phase = Phase::Done;
+                        }
+                        Phase::Done => {}
+                    }
+                    last_progress = Instant::now();
+                }
+                CheckOutcome::SkipVoting => {
+                    txs[i].phase = Phase::Routed;
+                    last_progress = Instant::now();
+                }
+                CheckOutcome::AlreadyExecuted { elapsed } => {
+                    if txs[i].timing.approved_secs.is_none() {
+                        txs[i].timing.approved_secs = Some(elapsed);
+                    }
+                    txs[i].timing.executed_secs = Some(elapsed);
+                    txs[i].timing.executed_ok = Some(true);
+                    txs[i].phase = Phase::Done;
+                    last_progress = Instant::now();
+                }
+                CheckOutcome::Error(msg) => {
+                    error_msg = Some(msg);
+                }
+            }
+        }
+
+        // Update spinner with multi-phase progress
+        let (voted, routed, approved, executed) = phase_counts(txs);
+        if let Some(ref err) = error_msg {
+            spinner.set_message(format!(
+                "voted: {voted}/{total}  routed: {routed}/{total}  approved: {approved}/{total}  executed: {executed}/{total}  (err: {err})"
+            ));
+        } else {
+            spinner.set_message(format!(
+                "voted: {voted}/{total}  routed: {routed}/{total}  approved: {approved}/{total}  executed: {executed}/{total}"
+            ));
+        }
+
+        if last_progress.elapsed() >= INACTIVITY_TIMEOUT {
+            break;
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+
+    // Mark remaining non-done txs as failed
+    for tx in txs.iter_mut() {
+        if tx.failed || tx.phase == Phase::Done {
+            continue;
+        }
+        tx.failed = true;
+        let label = match tx.phase {
+            Phase::Voted => "VotingVerifier",
+            Phase::Routed => "cosmos routing",
+            Phase::Approved => checker.approval_label(),
+            Phase::Executed => checker.execution_label(),
+            Phase::Done => unreachable!(),
+        };
+        if tx.phase == Phase::Executed {
+            tx.timing.executed_ok = Some(false);
+        }
+        tx.fail_reason = Some(format!("{label}: timed out"));
+    }
+
+    let (voted, routed, approved, executed) = phase_counts(txs);
+    spinner.finish_and_clear();
+    ui::success_annotated(
+        &format!(
+            "voted: {voted}/{total}  routed: {routed}/{total}  approved: {approved}/{total}  executed: {executed}/{total}"
+        ),
+        destination_chain,
+    );
+}
+
+/// Count how many txs have reached each phase (cumulative).
+fn phase_counts(txs: &[PendingTx]) -> (usize, usize, usize, usize) {
+    let mut voted = 0;
+    let mut routed = 0;
+    let mut approved = 0;
+    let mut executed = 0;
+    for tx in txs {
+        if tx.timing.voted_secs.is_some() {
+            voted += 1;
+        }
+        if tx.timing.routed_secs.is_some() {
+            routed += 1;
+        }
+        if tx.timing.approved_secs.is_some() {
+            approved += 1;
+        }
+        if tx.timing.executed_secs.is_some() {
+            executed += 1;
+        }
+    }
+    (voted, routed, approved, executed)
+}
+
+// ---------------------------------------------------------------------------
+// Public entry points
+// ---------------------------------------------------------------------------
 
 /// Verify transactions on-chain through 4 Amplifier pipeline checkpoints:
 ///
@@ -62,10 +490,8 @@ pub async fn verify_onchain<P: Provider>(
         return Ok(VerificationReport::default());
     }
 
-    // Read Cosmos config
     let (lcd, _, _, _) = read_axelar_config(config)?;
 
-    // Contract addresses (VotingVerifier is optional)
     let voting_verifier = read_axelar_contract_field(
         config,
         &format!("/axelar/contracts/VotingVerifier/{source_chain}/address"),
@@ -79,7 +505,12 @@ pub async fn verify_onchain<P: Provider>(
     let gw_contract = AxelarAmplifierGateway::new(gateway_addr, provider);
     let contract_addr: Address = destination_address.parse()?;
 
-    // Build pending tx list
+    let initial_phase = if voting_verifier.is_some() {
+        Phase::Voted
+    } else {
+        Phase::Routed
+    };
+
     let mut txs: Vec<PendingTx> = confirmed
         .iter()
         .map(|&idx| {
@@ -96,356 +527,133 @@ pub async fn verify_onchain<P: Provider>(
                 timing: AmplifierTiming::default(),
                 failed: false,
                 fail_reason: None,
+                phase: initial_phase,
             }
         })
         .collect();
 
-    // === Step 1/4: Voted (VotingVerifier) ===
-    if let Some(ref vv) = voting_verifier {
-        batch_poll_voted(
-            &mut txs,
-            &lcd,
-            vv,
-            source_chain,
-            destination_chain,
-            destination_address,
-            "axelar",
-        )
-        .await;
-    } else {
-        ui::info("VotingVerifier not in config, skipping voted step");
-    }
+    let checker = DestinationChecker::Evm {
+        gw_contract: &gw_contract,
+    };
 
-    // === Step 2/4: Routed (Cosmos Gateway) ===
-    batch_poll_routed(&mut txs, &lcd, &cosm_gateway, source_chain, "axelar").await;
+    poll_pipeline(
+        &mut txs,
+        &lcd,
+        voting_verifier.as_deref(),
+        &cosm_gateway,
+        source_chain,
+        destination_chain,
+        destination_address,
+        &checker,
+    )
+    .await;
 
-    // === Step 3/4: Approved (EVM gateway) ===
-    batch_poll_approved(&mut txs, &gw_contract, source_chain, destination_chain).await;
-
-    // === Step 4/4: Executed (approval consumed) ===
-    batch_poll_executed(&mut txs, &gw_contract, source_chain, destination_chain).await;
-
-    // Write timings + compute stats
     let report = compute_verification_report(&txs, metrics);
-
     Ok(report)
 }
 
-// ---------------------------------------------------------------------------
-// Step 1: Voted — VotingVerifier verification_statuses
-// ---------------------------------------------------------------------------
-
-async fn batch_poll_voted(
-    txs: &mut [PendingTx],
-    lcd: &str,
-    voting_verifier: &str,
+/// Verify EVM->Solana transactions through the Amplifier pipeline:
+///
+/// 1. **Voted** — VotingVerifier verification (source EVM chain)
+/// 2. **Routed** — Cosmos Gateway outgoing_messages (dest Solana chain)
+/// 3. **Approved** — Solana IncomingMessage PDA exists
+/// 4. **Executed** — Solana IncomingMessage PDA status = executed
+#[allow(clippy::too_many_arguments)]
+pub async fn verify_onchain_solana(
+    config: &Path,
     source_chain: &str,
     destination_chain: &str,
     destination_address: &str,
-    annotation: &str,
-) {
-    let pending: Vec<usize> = (0..txs.len()).filter(|&i| !txs[i].failed).collect();
-    let pending_count = pending.len();
-    if pending_count == 0 {
-        return;
-    }
-
-    let spinner = ui::wait_spinner(&format!(
-        "waiting to be voted (0/{pending_count} done)..."
-    ));
-    let mut done_count = 0usize;
-    let mut last_progress = Instant::now();
-
-    loop {
-        for &i in &pending {
-            if txs[i].timing.voted_secs.is_some() || txs[i].failed {
-                continue;
-            }
-            match check_voting_verifier(
-                lcd,
-                voting_verifier,
-                source_chain,
-                &txs[i].message_id,
-                &txs[i].source_address,
-                destination_chain,
-                destination_address,
-                &txs[i].payload_hash_hex,
-            )
-            .await
-            {
-                Ok(true) => {
-                    txs[i].timing.voted_secs =
-                        Some(txs[i].send_instant.elapsed().as_secs_f64());
-                    done_count += 1;
-                    last_progress = Instant::now();
-                    spinner.set_message(format!(
-                        "waiting to be voted ({done_count}/{pending_count} done)..."
-                    ));
-                }
-                Ok(false) => {}
-                Err(e) => {
-                    spinner.set_message(format!("VotingVerifier query error: {e}"));
-                }
-            }
-        }
-
-        if done_count >= pending_count || last_progress.elapsed() >= INACTIVITY_TIMEOUT {
-            break;
-        }
-        tokio::time::sleep(POLL_INTERVAL).await;
-    }
-    // Mark timed-out txs as failed
-    for &i in &pending {
-        if txs[i].timing.voted_secs.is_none() && !txs[i].failed {
-            txs[i].failed = true;
-            txs[i].fail_reason = Some("VotingVerifier: timed out".into());
-        }
-    }
-
-    let timed_out = pending_count - done_count;
-    spinner.finish_and_clear();
-    if timed_out > 0 {
-        ui::success_annotated(&format!("voted {done_count}/{pending_count} ({timed_out} timed out)"), annotation);
-    } else {
-        ui::success_annotated(&format!("voted {done_count}/{pending_count}"), annotation);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Step 2: Routed — Cosmos Gateway outgoing_messages
-// ---------------------------------------------------------------------------
-
-async fn batch_poll_routed(
-    txs: &mut [PendingTx],
-    lcd: &str,
-    cosm_gateway: &str,
-    source_chain: &str,
-    annotation: &str,
-) {
-    let pending: Vec<usize> = (0..txs.len()).filter(|&i| !txs[i].failed).collect();
-    let pending_count = pending.len();
-    if pending_count == 0 {
-        return;
-    }
-
-    let spinner = ui::wait_spinner(&format!(
-        "waiting to be routed (0/{pending_count} done)..."
-    ));
-    let mut done_count = 0usize;
-    let mut last_progress = Instant::now();
-
-    loop {
-        for &i in &pending {
-            if txs[i].timing.routed_secs.is_some() || txs[i].failed {
-                continue;
-            }
-            match check_cosmos_routed(lcd, cosm_gateway, source_chain, &txs[i].message_id).await {
-                Ok(true) => {
-                    txs[i].timing.routed_secs =
-                        Some(txs[i].send_instant.elapsed().as_secs_f64());
-                    done_count += 1;
-                    last_progress = Instant::now();
-                    spinner.set_message(format!(
-                        "waiting to be routed ({done_count}/{pending_count} done)..."
-                    ));
-                }
-                Ok(false) => {}
-                Err(e) => {
-                    spinner.set_message(format!("Gateway query error: {e}"));
-                }
-            }
-        }
-
-        if done_count >= pending_count || last_progress.elapsed() >= INACTIVITY_TIMEOUT {
-            break;
-        }
-        tokio::time::sleep(POLL_INTERVAL).await;
-    }
-    // Mark timed-out txs as failed
-    for &i in &pending {
-        if txs[i].timing.routed_secs.is_none() && !txs[i].failed {
-            txs[i].failed = true;
-            txs[i].fail_reason = Some("cosmos routing: timed out".into());
-        }
-    }
-
-    let timed_out = pending_count - done_count;
-    spinner.finish_and_clear();
-    if timed_out > 0 {
-        ui::success_annotated(&format!("routed {done_count}/{pending_count} ({timed_out} timed out)"), annotation);
-    } else {
-        ui::success_annotated(&format!("routed {done_count}/{pending_count}"), annotation);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Step 3: Approved — EVM isMessageApproved
-// ---------------------------------------------------------------------------
-
-async fn batch_poll_approved<P: Provider>(
-    txs: &mut [PendingTx],
-    gw_contract: &AxelarAmplifierGateway::AxelarAmplifierGatewayInstance<&P>,
-    source_chain: &str,
-    destination_chain: &str,
-) {
-    let pending: Vec<usize> = (0..txs.len()).filter(|&i| !txs[i].failed).collect();
-    let pending_count = pending.len();
-    if pending_count == 0 {
-        return;
-    }
-
-    let spinner = ui::wait_spinner(&format!(
-        "waiting to be approved on {destination_chain} (0/{pending_count} done)..."
-    ));
-    let mut done_count = 0usize;
-    let mut last_progress = Instant::now();
-
-    loop {
-        for &i in &pending {
-            if txs[i].timing.approved_secs.is_some() || txs[i].failed {
-                continue;
-            }
-            match check_evm_is_message_approved(
-                gw_contract,
-                source_chain,
-                &txs[i].message_id,
-                &txs[i].source_address,
-                txs[i].contract_addr,
-                txs[i].payload_hash,
-            )
-            .await
-            {
-                Ok(true) => {
-                    txs[i].timing.approved_secs =
-                        Some(txs[i].send_instant.elapsed().as_secs_f64());
-                    done_count += 1;
-                    last_progress = Instant::now();
-                    spinner.set_message(format!(
-                        "waiting to be approved on {destination_chain} ({done_count}/{pending_count} done)..."
-                    ));
-                }
-                Ok(false) => {
-                    // Already executed (approval consumed) — count as approved+executed
-                    let elapsed = txs[i].send_instant.elapsed().as_secs_f64();
-                    if txs[i].timing.approved_secs.is_none() {
-                        txs[i].timing.approved_secs = Some(elapsed);
-                    }
-                    txs[i].timing.executed_secs = Some(elapsed);
-                    txs[i].timing.executed_ok = Some(true);
-                    done_count += 1;
-                    last_progress = Instant::now();
-                    spinner.set_message(format!(
-                        "waiting to be approved on {destination_chain} ({done_count}/{pending_count} done)..."
-                    ));
-                }
-                Err(e) => {
-                    spinner.set_message(format!("EVM isMessageApproved error: {e}"));
-                }
-            }
-        }
-
-        if done_count >= pending_count || last_progress.elapsed() >= INACTIVITY_TIMEOUT {
-            break;
-        }
-        tokio::time::sleep(POLL_INTERVAL).await;
-    }
-    // Mark timed-out txs as failed
-    for &i in &pending {
-        if txs[i].timing.approved_secs.is_none() && !txs[i].failed {
-            txs[i].failed = true;
-            txs[i].fail_reason = Some("EVM approval: timed out".into());
-        }
-    }
-
-    let timed_out = pending_count - done_count;
-    spinner.finish_and_clear();
-    if timed_out > 0 {
-        ui::success_annotated(&format!("approved {done_count}/{pending_count} ({timed_out} timed out)"), destination_chain);
-    } else {
-        ui::success_annotated(&format!("approved {done_count}/{pending_count}"), destination_chain);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Step 4: Executed — approval consumed
-// ---------------------------------------------------------------------------
-
-async fn batch_poll_executed<P: Provider>(
-    txs: &mut [PendingTx],
-    gw_contract: &AxelarAmplifierGateway::AxelarAmplifierGatewayInstance<&P>,
-    source_chain: &str,
-    annotation: &str,
-) {
-    // Count txs already marked executed during the approved step
-    let already_executed = txs.iter().filter(|t| t.timing.executed_ok.is_some()).count();
-    let pending: Vec<usize> = (0..txs.len())
-        .filter(|&i| !txs[i].failed && txs[i].timing.executed_ok.is_none())
+    solana_rpc: &str,
+    metrics: &mut [TxMetrics],
+) -> Result<VerificationReport> {
+    let confirmed: Vec<usize> = metrics
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.success && !m.signature.is_empty())
+        .map(|(i, _)| i)
         .collect();
-    let total_count = already_executed + pending.len();
-    if pending.is_empty() {
-        ui::success_annotated(&format!("executed {total_count}/{total_count}"), annotation);
-        return;
+
+    let total = confirmed.len();
+    if total == 0 {
+        ui::warn("no confirmed transactions to verify");
+        return Ok(VerificationReport::default());
     }
 
-    let spinner = ui::wait_spinner(&format!(
-        "waiting to be executed ({already_executed}/{total_count} done)..."
-    ));
-    let mut done_count = already_executed;
-    let mut last_progress = Instant::now();
+    let (lcd, _, _, _) = read_axelar_config(config)?;
 
-    loop {
-        for &i in &pending {
-            if txs[i].timing.executed_secs.is_some() || txs[i].failed {
-                continue;
-            }
-            match check_evm_is_message_approved(
-                gw_contract,
-                source_chain,
-                &txs[i].message_id,
-                &txs[i].source_address,
-                txs[i].contract_addr,
-                txs[i].payload_hash,
-            )
-            .await
-            {
-                Ok(false) => {
-                    txs[i].timing.executed_secs =
-                        Some(txs[i].send_instant.elapsed().as_secs_f64());
-                    txs[i].timing.executed_ok = Some(true);
-                    done_count += 1;
-                    last_progress = Instant::now();
-                    spinner.set_message(format!(
-                        "waiting to be executed ({done_count}/{total_count} done)..."
-                    ));
-                }
-                Ok(true) => {} // still approved, not yet executed
-                Err(e) => {
-                    spinner.set_message(format!("EVM isMessageApproved error: {e}"));
-                }
-            }
-        }
+    let voting_verifier = read_axelar_contract_field(
+        config,
+        &format!("/axelar/contracts/VotingVerifier/{source_chain}/address"),
+    )
+    .ok();
+    let cosm_gateway = read_axelar_contract_field(
+        config,
+        &format!("/axelar/contracts/Gateway/{destination_chain}/address"),
+    )?;
 
-        if done_count >= total_count || last_progress.elapsed() >= INACTIVITY_TIMEOUT {
-            break;
-        }
-        tokio::time::sleep(POLL_INTERVAL).await;
-    }
-    // Mark timed-out txs as failed
-    for &i in &pending {
-        if txs[i].timing.executed_secs.is_none() && !txs[i].failed {
-            txs[i].failed = true;
-            txs[i].timing.executed_ok = Some(false);
-            txs[i].fail_reason = Some("EVM execution: timed out".into());
-        }
-    }
-
-    let timed_out = total_count - done_count;
-    spinner.finish_and_clear();
-    if timed_out > 0 {
-        ui::success_annotated(&format!("executed {done_count}/{total_count} ({timed_out} timed out)"), annotation);
+    let initial_phase = if voting_verifier.is_some() {
+        Phase::Voted
     } else {
-        ui::success_annotated(&format!("executed {done_count}/{total_count}"), annotation);
-    }
+        Phase::Routed
+    };
+
+    let mut txs: Vec<PendingTx> = confirmed
+        .iter()
+        .map(|&idx| {
+            let tx = &metrics[idx];
+            let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
+            PendingTx {
+                idx,
+                message_id: tx.signature.clone(),
+                send_instant: tx.send_instant.unwrap_or_else(Instant::now),
+                source_address: tx.source_address.clone(),
+                contract_addr: Address::ZERO,
+                payload_hash,
+                payload_hash_hex: tx.payload_hash.clone(),
+                timing: AmplifierTiming::default(),
+                failed: false,
+                fail_reason: None,
+                phase: initial_phase,
+            }
+        })
+        .collect();
+
+    let command_ids: Vec<[u8; 32]> = confirmed
+        .iter()
+        .map(|&idx| {
+            let message_id = &metrics[idx].signature;
+            let input = [source_chain.as_bytes(), b"-", message_id.as_bytes()].concat();
+            keccak256(&input).into()
+        })
+        .collect();
+
+    let rpc_client = Arc::new(solana_client::rpc_client::RpcClient::new_with_commitment(
+        solana_rpc,
+        solana_commitment_config::CommitmentConfig::confirmed(),
+    ));
+
+    let checker: DestinationChecker<'_, alloy::providers::RootProvider> =
+        DestinationChecker::Solana {
+            rpc_client,
+            command_ids,
+            _phantom: std::marker::PhantomData,
+        };
+
+    poll_pipeline(
+        &mut txs,
+        &lcd,
+        voting_verifier.as_deref(),
+        &cosm_gateway,
+        source_chain,
+        destination_chain,
+        destination_address,
+        &checker,
+    )
+    .await;
+
+    let report = compute_verification_report(&txs, metrics);
+    Ok(report)
 }
 
 // ---------------------------------------------------------------------------
@@ -480,8 +688,6 @@ async fn check_voting_verifier(
 
     let resp = lcd_cosmwasm_smart_query(lcd, voting_verifier, &query).await?;
     let resp_str = serde_json::to_string(&resp)?;
-    // Look for "succeeded" in any casing — covers SucceededOnSourceChain,
-    // succeeded_on_source_chain, etc.
     Ok(resp_str.to_lowercase().contains("succeeded"))
 }
 
@@ -594,6 +800,7 @@ fn compute_verification_report(
     let avg_routed = avg_option(all_timings.iter().filter_map(|t| t.routed_secs));
     let avg_approved = avg_option(all_timings.iter().filter_map(|t| t.approved_secs));
     let avg_executed = avg_option(all_timings.iter().filter_map(|t| t.executed_secs));
+    let min_executed = min_option(all_timings.iter().filter_map(|t| t.executed_secs));
     let max_executed = max_option(all_timings.iter().filter_map(|t| t.executed_secs));
 
     VerificationReport {
@@ -607,6 +814,7 @@ fn compute_verification_report(
         avg_routed_secs: avg_routed,
         avg_approved_secs: avg_approved,
         avg_executed_secs: avg_executed,
+        min_executed_secs: min_executed,
         max_executed_secs: max_executed,
         stuck: stuck_count,
         stuck_at,
@@ -651,265 +859,12 @@ fn avg_option(iter: impl Iterator<Item = f64>) -> Option<f64> {
     }
 }
 
+fn min_option(iter: impl Iterator<Item = f64>) -> Option<f64> {
+    iter.reduce(f64::min)
+}
+
 fn max_option(iter: impl Iterator<Item = f64>) -> Option<f64> {
     iter.reduce(f64::max)
-}
-
-// ===========================================================================
-// EVM -> Solana verification
-// ===========================================================================
-
-/// Verify EVM->Solana transactions through the Amplifier pipeline:
-///
-/// 1. **Voted** — VotingVerifier verification (source EVM chain)
-/// 2. **Routed** — Cosmos Gateway outgoing_messages (dest Solana chain)
-/// 3. **Approved** — Solana IncomingMessage PDA exists
-/// 4. **Executed** — Solana IncomingMessage PDA status = executed
-#[allow(clippy::too_many_arguments)]
-pub async fn verify_onchain_solana(
-    config: &Path,
-    source_chain: &str,
-    destination_chain: &str,
-    destination_address: &str,
-    solana_rpc: &str,
-    metrics: &mut [TxMetrics],
-) -> Result<VerificationReport> {
-    let confirmed: Vec<usize> = metrics
-        .iter()
-        .enumerate()
-        .filter(|(_, m)| m.success && !m.signature.is_empty())
-        .map(|(i, _)| i)
-        .collect();
-
-    let total = confirmed.len();
-    if total == 0 {
-        ui::warn("no confirmed transactions to verify");
-        return Ok(VerificationReport::default());
-    }
-
-    let (lcd, _, _, _) = read_axelar_config(config)?;
-
-    let voting_verifier = read_axelar_contract_field(
-        config,
-        &format!("/axelar/contracts/VotingVerifier/{source_chain}/address"),
-    )
-    .ok();
-    let cosm_gateway = read_axelar_contract_field(
-        config,
-        &format!("/axelar/contracts/Gateway/{destination_chain}/address"),
-    )?;
-
-    // For EVM->Sol, message_id is stored directly in TxMetrics.signature
-    let mut txs: Vec<PendingTx> = confirmed
-        .iter()
-        .map(|&idx| {
-            let tx = &metrics[idx];
-            let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
-            let message_id = tx.signature.clone();
-
-            PendingTx {
-                idx,
-                message_id,
-                send_instant: tx.send_instant.unwrap_or_else(Instant::now),
-                source_address: tx.source_address.clone(),
-                contract_addr: Address::ZERO,
-                payload_hash,
-                payload_hash_hex: tx.payload_hash.clone(),
-                timing: AmplifierTiming::default(),
-                failed: false,
-                fail_reason: None,
-            }
-        })
-        .collect();
-
-    // Precompute command_ids for Solana PDA lookups
-    let command_ids: Vec<[u8; 32]> = confirmed
-        .iter()
-        .map(|&idx| {
-            let message_id = &metrics[idx].signature;
-            let input = [source_chain.as_bytes(), b"-", message_id.as_bytes()].concat();
-            keccak256(&input).into()
-        })
-        .collect();
-
-    // Step 1/4: Voted (reused)
-    if let Some(ref vv) = voting_verifier {
-        batch_poll_voted(
-            &mut txs,
-            &lcd,
-            vv,
-            source_chain,
-            destination_chain,
-            destination_address,
-            "axelar",
-        )
-        .await;
-    } else {
-        ui::info("VotingVerifier not in config, skipping voted step");
-    }
-
-    // Step 2/4: Routed (reused)
-    batch_poll_routed(&mut txs, &lcd, &cosm_gateway, source_chain, "axelar").await;
-
-    // Step 3/4: Approved on Solana
-    batch_poll_solana_approved(&mut txs, &command_ids, solana_rpc, destination_chain).await;
-
-    // Step 4/4: Executed on Solana
-    batch_poll_solana_executed(&mut txs, &command_ids, solana_rpc, destination_chain).await;
-
-    // Compute stats (same as verify_onchain)
-    let report = compute_verification_report(&txs, metrics);
-
-    Ok(report)
-}
-
-// ---------------------------------------------------------------------------
-// Step 3 (Solana): Approved — IncomingMessage PDA exists
-// ---------------------------------------------------------------------------
-
-async fn batch_poll_solana_approved(
-    txs: &mut [PendingTx],
-    command_ids: &[[u8; 32]],
-    solana_rpc: &str,
-    destination_chain: &str,
-) {
-    let pending: Vec<usize> = (0..txs.len()).filter(|&i| !txs[i].failed).collect();
-    let pending_count = pending.len();
-    if pending_count == 0 {
-        return;
-    }
-
-    let spinner = ui::wait_spinner(&format!(
-        "waiting to be approved on {destination_chain} (0/{pending_count} done)..."
-    ));
-    let mut done_count = 0usize;
-    let mut last_progress = Instant::now();
-
-    let rpc_client = solana_client::rpc_client::RpcClient::new_with_commitment(
-        solana_rpc,
-        solana_commitment_config::CommitmentConfig::confirmed(),
-    );
-
-    loop {
-        for &i in &pending {
-            if txs[i].timing.approved_secs.is_some() || txs[i].failed {
-                continue;
-            }
-            match check_solana_incoming_message(&rpc_client, &command_ids[i]) {
-                Ok(Some(_status)) => {
-                    // PDA exists = message approved (or already executed)
-                    txs[i].timing.approved_secs =
-                        Some(txs[i].send_instant.elapsed().as_secs_f64());
-                    done_count += 1;
-                    last_progress = Instant::now();
-                    spinner.set_message(format!(
-                        "waiting to be approved on {destination_chain} ({done_count}/{pending_count} done)..."
-                    ));
-                }
-                Ok(None) => {} // PDA doesn't exist yet
-                Err(e) => {
-                    spinner.set_message(format!("Solana PDA query error: {e}"));
-                }
-            }
-        }
-
-        if done_count >= pending_count || last_progress.elapsed() >= INACTIVITY_TIMEOUT {
-            break;
-        }
-        tokio::time::sleep(POLL_INTERVAL).await;
-    }
-    // Mark timed-out txs as failed
-    for &i in &pending {
-        if txs[i].timing.approved_secs.is_none() && !txs[i].failed {
-            txs[i].failed = true;
-            txs[i].fail_reason = Some("Solana approval: timed out".into());
-        }
-    }
-
-    let timed_out = pending_count - done_count;
-    spinner.finish_and_clear();
-    if timed_out > 0 {
-        ui::success_annotated(&format!("approved {done_count}/{pending_count} ({timed_out} timed out)"), destination_chain);
-    } else {
-        ui::success_annotated(&format!("approved {done_count}/{pending_count}"), destination_chain);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Step 4 (Solana): Executed — IncomingMessage PDA status = 1
-// ---------------------------------------------------------------------------
-
-async fn batch_poll_solana_executed(
-    txs: &mut [PendingTx],
-    command_ids: &[[u8; 32]],
-    solana_rpc: &str,
-    annotation: &str,
-) {
-    let pending: Vec<usize> = (0..txs.len())
-        .filter(|&i| !txs[i].failed && txs[i].timing.executed_ok.is_none())
-        .collect();
-    let pending_count = pending.len();
-    if pending_count == 0 {
-        return;
-    }
-
-    let spinner = ui::wait_spinner(&format!(
-        "waiting to be executed (0/{pending_count} done)..."
-    ));
-    let mut done_count = 0usize;
-    let mut last_progress = Instant::now();
-
-    let rpc_client = solana_client::rpc_client::RpcClient::new_with_commitment(
-        solana_rpc,
-        solana_commitment_config::CommitmentConfig::confirmed(),
-    );
-
-    loop {
-        for &i in &pending {
-            if txs[i].timing.executed_secs.is_some() || txs[i].failed {
-                continue;
-            }
-            match check_solana_incoming_message(&rpc_client, &command_ids[i]) {
-                Ok(Some(status)) if status != 0 => {
-                    // status != 0 means executed (MessageStatus::is_executed)
-                    txs[i].timing.executed_secs =
-                        Some(txs[i].send_instant.elapsed().as_secs_f64());
-                    txs[i].timing.executed_ok = Some(true);
-                    done_count += 1;
-                    last_progress = Instant::now();
-                    spinner.set_message(format!(
-                        "waiting to be executed ({done_count}/{pending_count} done)..."
-                    ));
-                }
-                Ok(Some(_)) => {} // status=0, still approved not executed
-                Ok(None) => {}    // PDA doesn't exist (shouldn't happen after approval)
-                Err(e) => {
-                    spinner.set_message(format!("Solana PDA query error: {e}"));
-                }
-            }
-        }
-
-        if done_count >= pending_count || last_progress.elapsed() >= INACTIVITY_TIMEOUT {
-            break;
-        }
-        tokio::time::sleep(POLL_INTERVAL).await;
-    }
-    // Mark timed-out txs as failed
-    for &i in &pending {
-        if txs[i].timing.executed_secs.is_none() && !txs[i].failed {
-            txs[i].failed = true;
-            txs[i].timing.executed_ok = Some(false);
-            txs[i].fail_reason = Some("Solana execution: timed out".into());
-        }
-    }
-
-    let timed_out = pending_count - done_count;
-    spinner.finish_and_clear();
-    if timed_out > 0 {
-        ui::success_annotated(&format!("executed {done_count}/{pending_count} ({timed_out} timed out)"), annotation);
-    } else {
-        ui::success_annotated(&format!("executed {done_count}/{pending_count}"), annotation);
-    }
 }
 
 // ---------------------------------------------------------------------------

@@ -715,14 +715,26 @@ fn print_final_report(report: &LoadTestReport) {
         println!();
 
         // End-to-end line
-        match (v.avg_executed_secs, v.max_executed_secs) {
-            (Some(avg), Some(max)) => {
+        match (v.avg_executed_secs, v.min_executed_secs, v.max_executed_secs) {
+            (Some(avg), Some(min), Some(max)) => {
+                println!("  end-to-end       avg {avg:.1}s \u{2502} min {min:.1}s \u{2502} max {max:.1}s");
+            }
+            (Some(avg), _, Some(max)) => {
                 println!("  end-to-end       avg {avg:.1}s \u{2502} max {max:.1}s");
             }
-            (Some(avg), None) => {
+            (Some(avg), _, _) => {
                 println!("  end-to-end       avg {avg:.1}s");
             }
             _ => {}
+        }
+
+        // Throughput
+        if let (Some(min), Some(max)) = (v.min_executed_secs, v.max_executed_secs) {
+            let window = max - min;
+            if window > 0.0 && v.successful > 1 {
+                let throughput = v.successful as f64 / window;
+                println!("  throughput       {throughput:.1} tx/s");
+            }
         }
 
         // Segment breakdown

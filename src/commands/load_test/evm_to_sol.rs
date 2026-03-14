@@ -111,7 +111,7 @@ pub async fn run_load_test_with_metrics(
     // Fire txs in parallel, capped to avoid overwhelming the RPC.
     // Each send does multiple RPC calls (estimate gas, nonce, send, receipt),
     // so even 10 concurrent senders means ~40+ RPC calls in flight.
-    const MAX_CONCURRENT_SENDS: usize = 50;
+    const MAX_CONCURRENT_SENDS: usize = 100;
     const MAX_RETRIES: u32 = 5;
 
     let metrics_list: Arc<Mutex<Vec<TxMetrics>>> = Arc::new(Mutex::new(Vec::new()));
