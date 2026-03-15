@@ -14,10 +14,12 @@ use super::{
     LoadTestArgs, finish_report, read_its_cache, save_its_cache, validate_evm_rpc,
     validate_solana_rpc,
 };
+use alloy::primitives::Address;
 use crate::cosmos::read_axelar_contract_field;
 use crate::solana;
 use crate::ui;
 use crate::utils::read_contract_address;
+use std::path::Path;
 
 const TOKEN_NAME: &str = "AXE Load Test";
 const TOKEN_SYMBOL: &str = "AXELT";
@@ -120,7 +122,11 @@ pub async fn run(args: LoadTestArgs, run_start: Instant) -> eyre::Result<()> {
         num_txs,
         gas_value,
         args.token_id.as_deref(),
-    )?;
+        &args.config,
+        evm_gateway_addr,
+        &evm_rpc_url,
+    )
+    .await?;
 
     ui::kv("token ID", &hex::encode(token_id));
     ui::address("mint", &mint.to_string());
@@ -137,6 +143,13 @@ pub async fn run(args: LoadTestArgs, run_start: Instant) -> eyre::Result<()> {
         &mint,
         &token_id,
         AMOUNT_PER_TX,
+    )?;
+
+    // --- ITS hub routing info ---
+    // ITS always routes through "axelar" hub. The GMP destination is the AxelarnetGateway.
+    let axelarnet_gw_addr = read_axelar_contract_field(
+        &args.config,
+        "/axelar/contracts/AxelarnetGateway/address",
     )?;
 
     // --- Parallel sends ---
@@ -159,6 +172,7 @@ pub async fn run(args: LoadTestArgs, run_start: Instant) -> eyre::Result<()> {
         let m = mint;
         let gv = gas_value;
         let kp = kp.clone();
+        let gmp_dest_addr = axelarnet_gw_addr.clone();
 
         let handle = tokio::spawn(async move {
             let submit_start = Instant::now();
@@ -187,6 +201,9 @@ pub async fn run(args: LoadTestArgs, run_start: Instant) -> eyre::Result<()> {
                     metrics.signature = format!("{}-1.4", metrics.signature);
                     metrics.source_address = source_addr;
                     metrics.send_instant = Some(submit_start);
+                    // ITS always routes through the hub
+                    metrics.gmp_destination_chain = "axelar".to_string();
+                    metrics.gmp_destination_address = gmp_dest_addr.clone();
                     let done = counter.fetch_add(1, Ordering::Relaxed) + 1;
                     sp.set_message(format!("sending ({done}/{total} confirmed)..."));
                     metrics_clone.lock().await.push(metrics);
@@ -318,8 +335,10 @@ pub async fn run(args: LoadTestArgs, run_start: Instant) -> eyre::Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Deploy or reuse ITS token. Returns (token_id, salt, mint).
+/// When deploying fresh, waits for the remote deploy to propagate through the
+/// ITS hub and execute on the EVM destination before returning.
 #[allow(clippy::too_many_arguments)]
-fn setup_its_token(
+async fn setup_its_token(
     solana_rpc: &str,
     keypair: &Keypair,
     src: &str,
@@ -327,6 +346,9 @@ fn setup_its_token(
     num_txs: usize,
     gas_value: u64,
     token_id_override: Option<&str>,
+    config: &Path,
+    evm_gateway_addr: Address,
+    evm_rpc_url: &str,
 ) -> eyre::Result<([u8; 32], [u8; 32], solana_sdk::pubkey::Pubkey)> {
     if let Some(tid_hex) = token_id_override {
         let tid_bytes = hex::decode(tid_hex.strip_prefix("0x").unwrap_or(tid_hex))
@@ -409,7 +431,20 @@ fn setup_its_token(
         solana_rpc, keypair, &salt, dest, gas_value,
     )?;
     ui::tx_hash("remote deploy tx", &remote_sig);
-    ui::success("remote deploy confirmed");
+    ui::success("remote deploy tx confirmed on Solana");
+
+    // Wait for the remote deploy to propagate through the hub and execute on EVM.
+    // The deploy message ID is {signature}-1.3 (empirically determined).
+    let deploy_message_id = format!("{remote_sig}-1.3");
+    super::verify::wait_for_its_remote_deploy(
+        config,
+        src,
+        dest,
+        &deploy_message_id,
+        evm_gateway_addr,
+        evm_rpc_url,
+    )
+    .await?;
 
     // Save cache
     let cache = serde_json::json!({

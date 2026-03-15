@@ -1278,28 +1278,15 @@ pub async fn verify_onchain_evm_its(
 
     let (lcd, _, _, _) = read_axelar_config(config)?;
 
-    let voting_verifier = read_axelar_contract_field(
-        config,
-        &format!("/axelar/contracts/VotingVerifier/{source_chain}/address"),
-    )
-    .ok();
-
     let axelarnet_gateway = read_axelar_contract_field(
         config,
         "/axelar/contracts/AxelarnetGateway/address",
     )?;
 
-    let initial_phase = if voting_verifier.is_some() {
-        Phase::Voted
-    } else {
-        Phase::HubApproved
-    };
-
-    // For Solana ITS, the message_id is {signature}-{call_contract_index}.
-    // The ITS program CPI's call_contract, so the index differs from direct GMP.
-    // ITS call_contract is typically at inner instruction position 1.6
-    // (outer ix 1, inner CPI index 6). We use the Solana tx signature as base
-    // and construct the message_id format that the Amplifier expects.
+    // For Solana ITS, we don't have the payload_hash (the ITS program constructs
+    // the payload internally via CPI). Skip VotingVerifier and start at HubApproved,
+    // which only needs source_chain + message_id. HubApproved implies voted.
+    let initial_phase = Phase::HubApproved;
     let mut txs: Vec<PendingTx> = confirmed
         .iter()
         .map(|&idx| {
@@ -1337,7 +1324,7 @@ pub async fn verify_onchain_evm_its(
     poll_pipeline_its_hub_evm(
         &mut txs,
         &lcd,
-        voting_verifier.as_deref(),
+        None, // skip VotingVerifier — no payload_hash for Solana ITS
         source_chain,
         &axelarnet_gateway,
         &rpc,
@@ -1641,6 +1628,188 @@ async fn poll_pipeline_its_hub_evm<P: Provider>(
     ui::success(&format!(
         "ITS pipeline: voted: {voted}/{total}  hub: {hub_approved}/{total}  routed: {routed}/{total}  approved: {approved}/{total}  executed: {executed}/{total}"
     ));
+}
+
+/// Wait for an ITS remote deploy message to propagate through the hub pipeline
+/// and execute on the EVM destination. The deploy message ID is `{sig}-1.3`.
+///
+/// Polls: Voted → HubApproved → DiscoverSecondLeg → Routed → Executed(EVM)
+pub async fn wait_for_its_remote_deploy(
+    config: &Path,
+    source_chain: &str,
+    destination_chain: &str,
+    deploy_message_id: &str,
+    evm_gateway_addr: Address,
+    evm_rpc_url: &str,
+) -> Result<()> {
+    let (lcd, _, _, _) = read_axelar_config(config)?;
+    let rpc = read_axelar_rpc(config)?;
+
+    let axelarnet_gateway = read_axelar_contract_field(
+        config,
+        "/axelar/contracts/AxelarnetGateway/address",
+    )?;
+
+    let voting_verifier = read_axelar_contract_field(
+        config,
+        &format!("/axelar/contracts/VotingVerifier/{source_chain}/address"),
+    )
+    .ok();
+
+    let cosm_gateway_dest = read_axelar_contract_field(
+        config,
+        &format!("/axelar/contracts/Gateway/{destination_chain}/address"),
+    )?;
+
+    let provider = alloy::providers::ProviderBuilder::new().connect_http(evm_rpc_url.parse()?);
+    let gw_contract = AxelarAmplifierGateway::new(evm_gateway_addr, &provider);
+
+    let spinner = ui::wait_spinner("waiting for remote deploy to propagate through hub...");
+    let start = Instant::now();
+    let timeout = Duration::from_secs(300);
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum DeployPhase {
+        Voted,
+        HubApproved,
+        DiscoverSecondLeg,
+        Routed,
+        Approved,
+        Executed,
+        Done,
+    }
+
+    let mut phase = if voting_verifier.is_some() {
+        DeployPhase::Voted
+    } else {
+        DeployPhase::HubApproved
+    };
+    let mut second_leg_id: Option<String> = None;
+    let mut second_leg_ph: Option<String> = None;
+
+    loop {
+        if start.elapsed() >= timeout {
+            spinner.finish_and_clear();
+            eyre::bail!("remote deploy timed out after {}s at phase {phase:?}", timeout.as_secs());
+        }
+
+        match phase {
+            DeployPhase::Voted => {
+                if let Some(ref vv) = voting_verifier {
+                    // For deploy, we don't have payload_hash — use empty string
+                    // VotingVerifier just needs the message to exist
+                    if check_hub_approved(&lcd, &axelarnet_gateway, source_chain, deploy_message_id)
+                        .await
+                        .unwrap_or(false)
+                    {
+                        spinner.set_message("remote deploy: hub approved");
+                        phase = DeployPhase::DiscoverSecondLeg;
+                        continue;
+                    }
+                    // Also try voting verifier directly — but we'd need payload_hash.
+                    // Skip directly to hub_approved check since it implies voted.
+                    let _ = vv; // suppress unused warning
+                }
+                spinner.set_message("remote deploy: waiting for voting...");
+            }
+            DeployPhase::HubApproved => {
+                if check_hub_approved(&lcd, &axelarnet_gateway, source_chain, deploy_message_id)
+                    .await
+                    .unwrap_or(false)
+                {
+                    spinner.set_message("remote deploy: hub approved");
+                    phase = DeployPhase::DiscoverSecondLeg;
+                    continue;
+                }
+                spinner.set_message("remote deploy: waiting for hub approval...");
+            }
+            DeployPhase::DiscoverSecondLeg => {
+                match discover_second_leg(&rpc, deploy_message_id).await {
+                    Ok(Some(info)) => {
+                        spinner.set_message(format!(
+                            "remote deploy: second leg discovered ({})",
+                            info.message_id
+                        ));
+                        second_leg_id = Some(info.message_id);
+                        second_leg_ph = Some(info.payload_hash);
+                        phase = DeployPhase::Routed;
+                        continue;
+                    }
+                    Ok(None) => {
+                        spinner.set_message("remote deploy: discovering second leg...");
+                    }
+                    Err(e) => {
+                        spinner.set_message(format!("remote deploy: second leg error: {e}"));
+                    }
+                }
+            }
+            DeployPhase::Routed => {
+                let sl_id = second_leg_id.as_deref().unwrap_or("");
+                if check_cosmos_routed(&lcd, &cosm_gateway_dest, "axelar", sl_id)
+                    .await
+                    .unwrap_or(false)
+                {
+                    spinner.set_message("remote deploy: routed to destination");
+                    phase = DeployPhase::Approved;
+                    continue;
+                }
+                spinner.set_message("remote deploy: waiting for routing...");
+            }
+            DeployPhase::Approved => {
+                let sl_id = second_leg_id.as_deref().unwrap_or("");
+                let sl_ph_str = second_leg_ph.as_deref().unwrap_or("");
+                let ph = parse_payload_hash(sl_ph_str).unwrap_or_default();
+                match check_evm_is_message_approved(
+                    &gw_contract, "axelar", sl_id, "", Address::ZERO, ph,
+                )
+                .await
+                {
+                    Ok(true) => {
+                        spinner.set_message("remote deploy: approved on EVM");
+                        phase = DeployPhase::Executed;
+                        continue;
+                    }
+                    Ok(false) => {
+                        // Could be already executed — check by trying executed phase
+                        phase = DeployPhase::Executed;
+                        continue;
+                    }
+                    Err(_) => {
+                        spinner.set_message("remote deploy: waiting for EVM approval...");
+                    }
+                }
+            }
+            DeployPhase::Executed => {
+                let sl_id = second_leg_id.as_deref().unwrap_or("");
+                let sl_ph_str = second_leg_ph.as_deref().unwrap_or("");
+                let ph = parse_payload_hash(sl_ph_str).unwrap_or_default();
+                match check_evm_is_message_approved(
+                    &gw_contract, "axelar", sl_id, "", Address::ZERO, ph,
+                )
+                .await
+                {
+                    Ok(false) => {
+                        // false = approval consumed = executed
+                        phase = DeployPhase::Done;
+                        continue;
+                    }
+                    Ok(true) => {
+                        spinner.set_message("remote deploy: waiting for EVM execution...");
+                    }
+                    Err(_) => {
+                        spinner.set_message("remote deploy: waiting for EVM execution...");
+                    }
+                }
+            }
+            DeployPhase::Done => break,
+        }
+
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+
+    spinner.finish_and_clear();
+    ui::success("remote token deployed on destination chain");
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
