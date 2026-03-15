@@ -70,6 +70,10 @@ struct PendingTx {
     second_leg_message_id: Option<String>,
     /// Second-leg payload_hash discovered from hub execution tx (ITS only).
     second_leg_payload_hash: Option<String>,
+    /// Second-leg source_address (e.g. ITS Hub contract on Axelar).
+    second_leg_source_address: Option<String>,
+    /// Second-leg destination_address (e.g. ITS proxy on destination chain).
+    second_leg_destination_address: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -203,6 +207,8 @@ enum CheckOutcome {
     SecondLegDiscovered {
         message_id: String,
         payload_hash: String,
+        source_address: String,
+        destination_address: String,
     },
     /// Check returned an error.
     Error(String),
@@ -343,6 +349,8 @@ async fn poll_pipeline<P: Provider>(
                                 phase,
                                 second_leg_message_id: None,
                                 second_leg_payload_hash: None,
+                                second_leg_source_address: None,
+                                second_leg_destination_address: None,
                             };
                             match checker.check_approved(&tmp, i, source_chain).await {
                                 Ok(ApprovalResult::Approved) => CheckOutcome::PhaseComplete {
@@ -377,6 +385,8 @@ async fn poll_pipeline<P: Provider>(
                                 phase,
                                 second_leg_message_id: None,
                                 second_leg_payload_hash: None,
+                                second_leg_source_address: None,
+                                second_leg_destination_address: None,
                             };
                             match checker.check_executed(&tmp, i, source_chain).await {
                                 Ok(true) => CheckOutcome::PhaseComplete {
@@ -542,8 +552,9 @@ struct SecondLegInfo {
     source_chain: String,
     #[allow(dead_code)]
     destination_chain: String,
-    #[allow(dead_code)]
     payload_hash: String,
+    source_address: String,
+    destination_address: String,
 }
 
 /// Discover the second-leg message_id by searching for the hub execution tx
@@ -609,6 +620,8 @@ async fn discover_second_leg(rpc: &str, first_leg_message_id: &str) -> Result<Op
                 source_chain: src,
                 destination_chain: dst,
                 payload_hash: ph,
+                source_address: get_attr("source_address").unwrap_or_default(),
+                destination_address: get_attr("destination_address").unwrap_or_default(),
             }));
         }
     }
@@ -714,6 +727,8 @@ async fn poll_pipeline_its_hub(
                                 Ok(Some(info)) => CheckOutcome::SecondLegDiscovered {
                                     message_id: info.message_id,
                                     payload_hash: info.payload_hash,
+                                    source_address: info.source_address,
+                                    destination_address: info.destination_address,
                                 },
                                 Ok(None) => CheckOutcome::NotYet,
                                 Err(e) => {
@@ -832,9 +847,13 @@ async fn poll_pipeline_its_hub(
                 CheckOutcome::SecondLegDiscovered {
                     message_id: sl_msg_id,
                     payload_hash: sl_ph,
+                    source_address: sl_src,
+                    destination_address: sl_dst,
                 } => {
                     txs[i].second_leg_message_id = Some(sl_msg_id.clone());
                     txs[i].second_leg_payload_hash = Some(sl_ph.clone());
+                    txs[i].second_leg_source_address = Some(sl_src.clone());
+                    txs[i].second_leg_destination_address = Some(sl_dst.clone());
                     txs[i].phase = Phase::Routed;
                     last_progress = Instant::now();
                 }
@@ -1005,6 +1024,8 @@ pub async fn verify_onchain<P: Provider>(
                 phase: initial_phase,
                 second_leg_message_id: None,
                 second_leg_payload_hash: None,
+                second_leg_source_address: None,
+                second_leg_destination_address: None,
             }
         })
         .collect();
@@ -1098,6 +1119,8 @@ pub async fn verify_onchain_solana(
                 phase: initial_phase,
                 second_leg_message_id: None,
                 second_leg_payload_hash: None,
+                second_leg_source_address: None,
+                second_leg_destination_address: None,
             }
         })
         .collect();
@@ -1216,6 +1239,8 @@ pub async fn verify_onchain_solana_its(
                 phase: initial_phase,
                 second_leg_message_id: None,
                 second_leg_payload_hash: None,
+                second_leg_source_address: None,
+                second_leg_destination_address: None,
             }
         })
         .collect();
@@ -1308,6 +1333,8 @@ pub async fn verify_onchain_evm_its(
                 phase: initial_phase,
                 second_leg_message_id: None,
                 second_leg_payload_hash: None,
+                second_leg_source_address: None,
+                second_leg_destination_address: None,
             }
         })
         .collect();
@@ -1381,6 +1408,8 @@ async fn poll_pipeline_its_hub_evm<P: Provider>(
                 let dest_address = txs[i].gmp_destination_address.clone();
                 let second_leg_id = txs[i].second_leg_message_id.clone();
                 let second_leg_ph = txs[i].second_leg_payload_hash.clone();
+                let second_leg_src = txs[i].second_leg_source_address.clone();
+                let second_leg_dst = txs[i].second_leg_destination_address.clone();
 
                 async move {
                     let outcome = match phase {
@@ -1433,6 +1462,8 @@ async fn poll_pipeline_its_hub_evm<P: Provider>(
                                 Ok(Some(info)) => CheckOutcome::SecondLegDiscovered {
                                     message_id: info.message_id,
                                     payload_hash: info.payload_hash,
+                                    source_address: info.source_address,
+                                    destination_address: info.destination_address,
                                 },
                                 Ok(None) => CheckOutcome::NotYet,
                                 Err(e) => {
@@ -1456,15 +1487,18 @@ async fn poll_pipeline_its_hub_evm<P: Provider>(
                             let sl_id = second_leg_id.as_deref().unwrap_or("");
                             let sl_ph = second_leg_ph.as_deref().unwrap_or("");
                             let ph = parse_payload_hash(sl_ph).unwrap_or_default();
-                            // For EVM second-leg: source_chain = "axelar"
-                            // contract_addr = ITS proxy on destination (we use Address::ZERO as placeholder;
-                            // isMessageApproved checks by message_id regardless)
+                            let sl_src_addr = second_leg_src.as_deref().unwrap_or("");
+                            let sl_dst_addr: Address = second_leg_dst
+                                .as_deref()
+                                .unwrap_or("")
+                                .parse()
+                                .unwrap_or(Address::ZERO);
                             match check_evm_is_message_approved(
                                 gw_contract,
                                 "axelar",
                                 sl_id,
-                                &source_address, // source_address for second-leg
-                                Address::ZERO,   // destination contract
+                                sl_src_addr,
+                                sl_dst_addr,
                                 ph,
                             )
                             .await
@@ -1472,10 +1506,7 @@ async fn poll_pipeline_its_hub_evm<P: Provider>(
                                 Ok(true) => CheckOutcome::PhaseComplete {
                                     elapsed: send_instant.elapsed().as_secs_f64(),
                                 },
-                                Ok(false) => {
-                                    // Check if already executed
-                                    CheckOutcome::NotYet
-                                }
+                                Ok(false) => CheckOutcome::NotYet,
                                 Err(e) => {
                                     CheckOutcome::Error(format!("EVM approval: {e}"))
                                 }
@@ -1485,12 +1516,18 @@ async fn poll_pipeline_its_hub_evm<P: Provider>(
                             let sl_id = second_leg_id.as_deref().unwrap_or("");
                             let sl_ph = second_leg_ph.as_deref().unwrap_or("");
                             let ph = parse_payload_hash(sl_ph).unwrap_or_default();
+                            let sl_src_addr = second_leg_src.as_deref().unwrap_or("");
+                            let sl_dst_addr: Address = second_leg_dst
+                                .as_deref()
+                                .unwrap_or("")
+                                .parse()
+                                .unwrap_or(Address::ZERO);
                             match check_evm_is_message_approved(
                                 gw_contract,
                                 "axelar",
                                 sl_id,
-                                &source_address,
-                                Address::ZERO,
+                                sl_src_addr,
+                                sl_dst_addr,
                                 ph,
                             )
                             .await
@@ -1501,7 +1538,7 @@ async fn poll_pipeline_its_hub_evm<P: Provider>(
                                         elapsed: send_instant.elapsed().as_secs_f64(),
                                     }
                                 }
-                                Ok(true) => CheckOutcome::NotYet, // still approved, not yet executed
+                                Ok(true) => CheckOutcome::NotYet,
                                 Err(e) => {
                                     CheckOutcome::Error(format!("EVM execution: {e}"))
                                 }
@@ -1559,9 +1596,13 @@ async fn poll_pipeline_its_hub_evm<P: Provider>(
                 CheckOutcome::SecondLegDiscovered {
                     message_id: sl_msg_id,
                     payload_hash: sl_ph,
+                    source_address: sl_src,
+                    destination_address: sl_dst,
                 } => {
                     txs[i].second_leg_message_id = Some(sl_msg_id.clone());
                     txs[i].second_leg_payload_hash = Some(sl_ph.clone());
+                    txs[i].second_leg_source_address = Some(sl_src.clone());
+                    txs[i].second_leg_destination_address = Some(sl_dst.clone());
                     txs[i].phase = Phase::Routed;
                     last_progress = Instant::now();
                 }
