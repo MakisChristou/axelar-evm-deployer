@@ -26,7 +26,15 @@ use crate::utils::read_contract_address;
 const TOKEN_NAME: &str = "AXE Load Test";
 const TOKEN_SYMBOL: &str = "AXELT";
 const TOKEN_DECIMALS: u8 = 18;
-const DEFAULT_GAS_VALUE_WEI: u128 = 10_000_000_000_000_000; // 0.01 ETH
+/// Default gas value for ITS cross-chain transfers.
+/// Flow: 0.1 ETH (higher gas costs). Others: 0.01 ETH.
+fn default_gas_value_wei(source_chain: &str) -> u128 {
+    if source_chain.starts_with("flow") {
+        200_000_000_000_000_000 // 0.2 FLOW
+    } else {
+        10_000_000_000_000_000 // 0.01 ETH
+    }
+}
 const MAX_CONCURRENT_SENDS: usize = 100;
 const MAX_RETRIES: u32 = 5;
 
@@ -107,7 +115,7 @@ pub async fn run(args: LoadTestArgs, run_start: Instant) -> eyre::Result<()> {
     // --- Gas value ---
     let gas_value_wei: u128 = match &args.gas_value {
         Some(v) => v.parse().map_err(|e| eyre!("invalid --gas-value: {e}"))?,
-        None => DEFAULT_GAS_VALUE_WEI,
+        None => default_gas_value_wei(src),
     };
     let gas_value = U256::from(gas_value_wei);
 
@@ -499,7 +507,8 @@ async fn execute_interchain_transfer<P: Provider>(
             amount,
             Bytes::new(), // empty metadata
             gas_value,
-        );
+        )
+        .value(gas_value);
 
     match call.send().await {
         Ok(pending) => {

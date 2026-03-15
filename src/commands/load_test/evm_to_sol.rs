@@ -1,4 +1,3 @@
-use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -20,11 +19,30 @@ use tokio::sync::Semaphore;
 use super::LoadTestArgs;
 use super::keypairs;
 use super::metrics::{LoadTestReport, TxMetrics};
-use crate::evm::{AxelarAmplifierGateway, ContractCall};
+use crate::evm::{ContractCall, SenderReceiver};
 use crate::ui;
 
-/// Solana memo program address (devnet).
-pub const MEMO_PROGRAM_ADDRESS: &str = "memKnP9ex71TveNFpsFNVqAYGEe1v9uHVsHNdFPW6FY";
+/// Solana memo program address (resolved at compile time via feature flags).
+pub fn memo_program_id() -> Pubkey {
+    solana_axelar_memo::id()
+}
+
+/// Default gas value sent with sendPayload for cross-chain gas.
+/// devnet-amplifier: 0 (relayer doesn't check gas).
+/// Flow: 0.1 ETH (higher gas costs).
+/// Other environments: 0.02 ETH.
+#[cfg(feature = "devnet-amplifier")]
+fn default_gas_value_wei(_source_chain: &str) -> u128 {
+    0
+}
+#[cfg(not(feature = "devnet-amplifier"))]
+fn default_gas_value_wei(source_chain: &str) -> u128 {
+    if source_chain.starts_with("flow") {
+        200_000_000_000_000_000 // 0.2 FLOW
+    } else {
+        20_000_000_000_000_000 // 0.02 ETH
+    }
+}
 
 // Solana ExecutablePayload ABI types (matches axelar-amplifier-solana gateway)
 sol! {
@@ -79,7 +97,7 @@ fn make_executable_payload(custom: &Option<Vec<u8>>, counter_pda: &Pubkey) -> Ve
 #[allow(clippy::too_many_arguments, clippy::float_arithmetic)]
 pub async fn run_load_test_with_metrics(
     args: &LoadTestArgs,
-    gateway_addr: Address,
+    sender_receiver_addr: Address,
     main_key: &[u8; 32],
     evm_rpc_url: &str,
     destination_address: &str,
@@ -87,8 +105,7 @@ pub async fn run_load_test_with_metrics(
     let num_txs = args.num_txs.max(1) as usize;
 
     // Derive the memo program's counter PDA
-    let memo_program_id = Pubkey::from_str(MEMO_PROGRAM_ADDRESS)
-        .map_err(|e| eyre!("invalid memo program address: {e}"))?;
+    let memo_program_id = memo_program_id();
     let (counter_pda, _) = Pubkey::find_program_address(&[b"counter"], &memo_program_id);
 
     let payload: Option<Vec<u8>> = match &args.payload {
@@ -106,7 +123,11 @@ pub async fn run_load_test_with_metrics(
     let funding_provider = ProviderBuilder::new()
         .wallet(main_signer.clone())
         .connect_http(evm_rpc_url.parse()?);
-    keypairs::ensure_funded_evm(&funding_provider, &main_signer, &derived).await?;
+    let gas_value_wei: u128 = match &args.gas_value {
+        Some(v) => v.parse().map_err(|e| eyre!("invalid --gas-value: {e}"))?,
+        None => default_gas_value_wei(&args.source_chain),
+    };
+    keypairs::ensure_funded_evm_with_extra(&funding_provider, &main_signer, &derived, gas_value_wei).await?;
 
     // Fire txs in parallel, capped to avoid overwhelming the RPC.
     // Each send does multiple RPC calls (estimate gas, nonce, send, receipt),
@@ -133,14 +154,13 @@ pub async fn run_load_test_with_metrics(
         let total = num_txs;
         let dc = dest_chain.clone();
         let da = dest_addr.clone();
-        let gw = gateway_addr;
+        let sr = sender_receiver_addr;
+        let gv = gas_value_wei;
 
         // Each task gets its own provider with its own signer — no nonce contention
         let provider = ProviderBuilder::new()
             .wallet(signer.clone())
             .connect_http(evm_rpc_url.parse()?);
-        let signer_addr = signer.address();
-
         let handle = tokio::spawn(async move {
             let _permit = sem.acquire().await.unwrap();
 
@@ -148,7 +168,7 @@ pub async fn run_load_test_with_metrics(
             let mut m = None;
             for attempt in 0..=MAX_RETRIES {
                 let result =
-                    execute_and_record_evm(&provider, gw, signer_addr, &dc, &da, &tx_payload).await;
+                    execute_and_record_evm(&provider, sr, &dc, &da, &tx_payload, gv).await;
 
                 if result.success || attempt == MAX_RETRIES {
                     m = Some(result);
@@ -255,24 +275,29 @@ pub async fn run_load_test_with_metrics(
     Ok(report)
 }
 
-/// Send a single callContract tx on the EVM gateway and return metrics.
+/// Send a single callContract tx via SenderReceiver.sendPayload() and return metrics.
+/// Gas payment + callContract happen atomically in the SenderReceiver contract.
+#[allow(clippy::too_many_arguments)]
 async fn execute_and_record_evm<P: Provider>(
     provider: &P,
-    gateway_addr: Address,
-    signer_address: Address,
+    sender_receiver_addr: Address,
     dest_chain: &str,
     dest_addr: &str,
     payload: &[u8],
+    gas_value_wei: u128,
 ) -> TxMetrics {
     let submit_start = Instant::now();
     let payload_hash = alloy::hex::encode(keccak256(payload));
 
-    let gateway = AxelarAmplifierGateway::new(gateway_addr, provider);
-    let call = gateway.callContract(
-        dest_chain.to_string(),
-        dest_addr.to_string(),
-        Bytes::from(payload.to_vec()),
-    );
+    let sr = SenderReceiver::new(sender_receiver_addr, provider);
+    let gas_value = alloy::primitives::U256::from(gas_value_wei);
+    let call = sr
+        .sendPayload(
+            dest_chain.to_string(),
+            dest_addr.to_string(),
+            Bytes::from(payload.to_vec()),
+        )
+        .value(gas_value);
 
     match call.send().await {
         Ok(pending) => {
@@ -313,7 +338,7 @@ async fn execute_and_record_evm<P: Provider>(
                         error: None,
                         payload: payload.to_vec(),
                         payload_hash,
-                        source_address: format!("{signer_address}"),
+                        source_address: format!("{sender_receiver_addr}"),
                         gmp_destination_chain: String::new(),
                         gmp_destination_address: String::new(),
                         send_instant: Some(submit_start),

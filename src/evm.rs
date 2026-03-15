@@ -41,6 +41,11 @@ sol! {
             string calldata destinationAddress,
             string calldata message_
         ) external payable;
+        function sendPayload(
+            string calldata destinationChain,
+            string calldata destinationAddress,
+            bytes calldata payload
+        ) external payable;
         function message() external view returns (string);
         function execute(
             bytes32 commandId,
@@ -71,6 +76,17 @@ sol! {
             address contractAddress,
             bytes32 payloadHash
         ) external view returns (bool);
+    }
+
+    #[sol(rpc)]
+    contract AxelarGasService {
+        function payNativeGasForContractCall(
+            address sender,
+            string calldata destinationChain,
+            string calldata destinationAddress,
+            bytes calldata payload,
+            address refundAddress
+        ) external payable;
     }
 
     /// Legacy init-based proxy (AxelarGasServiceProxy, AxelarDepositServiceProxy)

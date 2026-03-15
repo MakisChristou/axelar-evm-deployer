@@ -30,6 +30,24 @@ contract SenderReceiver is AxelarExecutable {
         gateway().callContract(destinationChain, destinationAddress, payload);
     }
 
+    function sendPayload(
+        string calldata destinationChain,
+        string calldata destinationAddress,
+        bytes calldata payload
+    ) external payable {
+        if (msg.value > 0) {
+            gasService.payNativeGasForContractCall{value: msg.value}(
+                address(this),
+                destinationChain,
+                destinationAddress,
+                payload,
+                msg.sender
+            );
+        }
+
+        gateway().callContract(destinationChain, destinationAddress, payload);
+    }
+
     function _execute(
         bytes32 commandId,
         string calldata sourceChain,

@@ -11,7 +11,7 @@ use std::time::Instant;
 
 
 use alloy::{
-    primitives::Bytes,
+    primitives::{Address, Bytes},
     providers::{Provider, ProviderBuilder},
     rpc::types::TransactionRequest,
     signers::local::PrivateKeySigner,
@@ -603,9 +603,11 @@ async fn run_evm_to_sol(args: LoadTestArgs, run_start: Instant) -> Result<()> {
     ui::kv("destination", dest);
 
     let gateway_addr = read_contract_address(&args.config, src, "AxelarGateway")?;
-    ui::address("EVM gateway (source)", &format!("{gateway_addr}"));
+    let gas_service_addr = read_contract_address(&args.config, src, "AxelarGasService")
+        .unwrap_or(Address::ZERO);
+    ui::address("EVM gateway", &format!("{gateway_addr}"));
 
-    // --- Set up EVM signer (no SenderReceiver needed, calls gateway directly) ---
+    // --- Set up EVM signer ---
     let private_key = args.private_key.as_ref().ok_or_else(|| {
         eyre::eyre!(
             "EVM private key required. Set EVM_PRIVATE_KEY env var or use --private-key"
@@ -615,6 +617,10 @@ async fn run_evm_to_sol(args: LoadTestArgs, run_start: Instant) -> Result<()> {
     let signer_address = signer.address();
     let read_provider = ProviderBuilder::new().connect_http(evm_rpc_url.parse()?);
     check_evm_balance(&read_provider, signer_address).await?;
+
+    let write_provider = ProviderBuilder::new()
+        .wallet(signer.clone())
+        .connect_http(evm_rpc_url.parse()?);
 
     // Extract 32-byte private key for deriving sub-wallets
     let main_key: [u8; 32] = signer.to_bytes().into();
@@ -626,13 +632,44 @@ async fn run_evm_to_sol(args: LoadTestArgs, run_start: Instant) -> Result<()> {
         ui::kv("wallet", &format!("{signer_address} ({eth:.6} ETH)"));
     }
 
-    // Destination on Solana: memo program
-    let destination_address = evm_to_sol::MEMO_PROGRAM_ADDRESS;
+    // --- Deploy/reuse SenderReceiver on source chain ---
+    let cache_key = &format!("{src}-evm-to-sol");
+    let cache = read_cache(cache_key);
+    let sender_receiver_addr =
+        if let Some(addr_str) = cache.get("senderReceiverAddress").and_then(|v| v.as_str()) {
+            let addr: Address = addr_str.parse()?;
+            let code = read_provider.get_code_at(addr).await?;
+            if code.is_empty() {
+                ui::warn("cached SenderReceiver has no code, redeploying...");
+                let new_addr =
+                    deploy_sender_receiver(&write_provider, gateway_addr, gas_service_addr).await?;
+                let mut cache = cache;
+                cache["senderReceiverAddress"] = json!(format!("{new_addr}"));
+                save_cache(cache_key, &cache)?;
+                new_addr
+            } else {
+                ui::info(&format!("SenderReceiver: reusing {addr}"));
+                addr
+            }
+        } else {
+            ui::info("deploying SenderReceiver on source chain...");
+            let addr =
+                deploy_sender_receiver(&write_provider, gateway_addr, gas_service_addr).await?;
+            let mut cache = cache;
+            cache["senderReceiverAddress"] = json!(format!("{addr}"));
+            save_cache(cache_key, &cache)?;
+            addr
+        };
+    ui::address("SenderReceiver", &format!("{sender_receiver_addr}"));
+
+    // Destination on Solana: memo program (resolved per feature flag)
+    let destination_address = evm_to_sol::memo_program_id().to_string();
+    let destination_address = destination_address.as_str();
     ui::kv("destination program", destination_address);
 
     let mut report = evm_to_sol::run_load_test_with_metrics(
         &args,
-        gateway_addr,
+        sender_receiver_addr,
         &main_key,
         &evm_rpc_url,
         destination_address,
