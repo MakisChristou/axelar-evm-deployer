@@ -68,13 +68,11 @@ Deploys an interchain token locally, deploys it remotely to a destination chain 
 # Load Tests
 The axe test load-test command sends cross-chain transactions through the Axelar amplifier pipeline and verifies them end-to-end.
 
-Sol → EVM: Derives N independent Solana keypairs (one per transaction), funds them, then sends all N CallContract transactions in parallel to avoid nonce contention. Each tx calls the Solana
-Axelar Gateway with an ABI-encoded payload destined for a SenderReceiver contract on the EVM destination chain.
+**GMP (default):** Sol → EVM derives N independent Solana keypairs, funds them, then sends all N CallContract transactions in parallel. EVM → Sol sends N callContract transactions from a single EVM signer with a 200ms stagger.
 
-EVM → Sol: Sends N callContract transactions from a single EVM signer with a 200ms stagger between submissions to avoid RPC rate limits. Payloads target the Solana memo program.
+**ITS (`--protocol its`):** Deploys an interchain token on the source chain, deploys the remote counterpart on the destination, then sends N InterchainTransfer transactions through the ITS Hub. Supports both EVM → Sol and Sol → EVM directions.
 
-Verification: After all transactions are submitted, a shared 3-minute timeout covers four sequential polling phases: voted (VotingVerifier quorum on Axelar), routed (Cosmos Gateway routing),
-approved (destination chain gateway/PDA), and executed (approval consumed). Results are printed as a timing summary and saved to report.json.
+**Verification:** After all transactions are submitted, polling covers the full pipeline: voted → routed → approved → executed (GMP), or voted → hub-approved → second-leg discovery → routed → approved → executed (ITS). Results are printed as a timing summary and saved to report.json.
 
 ## Load Test (SOL -> EVM)
 
@@ -105,6 +103,26 @@ axe test load-test \
   --source-rpc https://example.avalanche.fuji.rpc.com
 ```
 
+## Load Test ITS (SOL -> EVM)
+
+```bash
+axe test load-test \
+  --source-chain solana-18 \
+  --destination-chain avalanche-fuji \
+  --protocol its \
+  --config ../axelar-contract-deployments/axelar-chains-config/info/devnet-amplifier.json
+```
+
+## Load Test ITS (EVM -> SOL)
+
+```bash
+axe test load-test \
+  --source-chain avalanche-fuji \
+  --destination-chain solana-18 \
+  --protocol its \
+  --config ../axelar-contract-deployments/axelar-chains-config/info/devnet-amplifier.json
+```
+
 ## Load Test (stagenet)
 
 On stagenet/testnet/mainnet the relayer requires gas payment. Build with the appropriate feature flag:
@@ -114,6 +132,18 @@ cargo install --path . --no-default-features --features stagenet
 axe test load-test \
   --source-chain solana-stagenet-3 \
   --destination-chain flow \
+  --config ../axelar-contract-deployments/axelar-chains-config/info/stagenet.json \
+  --num-txs 100
+```
+
+## Load Test ITS (stagenet)
+
+```bash
+cargo install --path . --no-default-features --features stagenet
+axe test load-test \
+  --source-chain solana-stagenet-3 \
+  --destination-chain flow \
+  --protocol its \
   --config ../axelar-contract-deployments/axelar-chains-config/info/stagenet.json \
   --num-txs 100
 ```
