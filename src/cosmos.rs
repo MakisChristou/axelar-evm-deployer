@@ -442,6 +442,26 @@ pub fn read_axelar_contract_field(target_json: &Path, pointer: &str) -> Result<S
         .ok_or_else(|| eyre::eyre!("field not found: {pointer}"))
 }
 
+/// Read Axelar RPC url from target json (`/axelar/rpc`).
+pub fn read_axelar_rpc(target_json: &Path) -> Result<String> {
+    let content = fs::read_to_string(target_json)?;
+    let root: Value = serde_json::from_str(&content)?;
+    root.pointer("/axelar/rpc")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| eyre::eyre!("no axelar.rpc in target json"))
+}
+
+/// Query Tendermint RPC `tx_search` for a single event key/value pair.
+/// Returns the parsed JSON response.
+pub async fn rpc_tx_search_event(rpc: &str, event_key: &str, event_value: &str) -> Result<Value> {
+    let url = format!(
+        "{rpc}/tx_search?query=\"{event_key}='{event_value}'\"&per_page=1"
+    );
+    let resp = reqwest::get(&url).await?.json::<Value>().await?;
+    Ok(resp)
+}
+
 /// Fetch the current verifier set from Axelar chain via LCD REST endpoint.
 /// Returns (signers sorted by address, threshold, nonce, verifierSetId)
 pub async fn fetch_verifier_set(

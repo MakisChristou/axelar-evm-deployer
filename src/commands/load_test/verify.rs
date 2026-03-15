@@ -10,7 +10,10 @@ use serde_json::json;
 use solana_sdk::pubkey::Pubkey;
 
 use super::metrics::{AmplifierTiming, FailureCategory, TxMetrics, VerificationReport};
-use crate::cosmos::{lcd_cosmwasm_smart_query, read_axelar_config, read_axelar_contract_field};
+use crate::cosmos::{
+    lcd_cosmwasm_smart_query, read_axelar_config, read_axelar_contract_field, read_axelar_rpc,
+    rpc_tx_search_event,
+};
 use crate::evm::AxelarAmplifierGateway;
 use crate::solana::solana_call_contract_index;
 use crate::ui;
@@ -30,6 +33,7 @@ enum Phase {
     Voted,
     Routed,
     HubApproved,
+    DiscoverSecondLeg,
     Approved,
     Executed,
     Done,
@@ -62,6 +66,10 @@ struct PendingTx {
     failed: bool,
     fail_reason: Option<String>,
     phase: Phase,
+    /// Second-leg message_id discovered from hub execution tx (ITS only).
+    second_leg_message_id: Option<String>,
+    /// Second-leg payload_hash discovered from hub execution tx (ITS only).
+    second_leg_payload_hash: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -191,6 +199,11 @@ enum CheckOutcome {
     SkipVoting,
     /// Approved check found the tx already executed — skip to Done.
     AlreadyExecuted { elapsed: f64 },
+    /// Second-leg discovered — carries the extracted info.
+    SecondLegDiscovered {
+        message_id: String,
+        payload_hash: String,
+    },
     /// Check returned an error.
     Error(String),
 }
@@ -311,6 +324,7 @@ async fn poll_pipeline<P: Provider>(
                                 CheckOutcome::SkipVoting
                             }
                         }
+                        Phase::DiscoverSecondLeg => CheckOutcome::NotYet,
                         Phase::Approved => {
                             // Build a temporary PendingTx-like view for the checker
                             let tmp = PendingTx {
@@ -327,6 +341,8 @@ async fn poll_pipeline<P: Provider>(
                                 failed: false,
                                 fail_reason: None,
                                 phase,
+                                second_leg_message_id: None,
+                                second_leg_payload_hash: None,
                             };
                             match checker.check_approved(&tmp, i, source_chain).await {
                                 Ok(ApprovalResult::Approved) => CheckOutcome::PhaseComplete {
@@ -359,6 +375,8 @@ async fn poll_pipeline<P: Provider>(
                                 failed: false,
                                 fail_reason: None,
                                 phase,
+                                second_leg_message_id: None,
+                                second_leg_payload_hash: None,
                             };
                             match checker.check_executed(&tmp, i, source_chain).await {
                                 Ok(true) => CheckOutcome::PhaseComplete {
@@ -403,6 +421,9 @@ async fn poll_pipeline<P: Provider>(
                             txs[i].timing.hub_approved_secs = Some(elapsed);
                             txs[i].phase = Phase::Approved;
                         }
+                        Phase::DiscoverSecondLeg => {
+                            // Not used in GMP pipeline
+                        }
                         Phase::Approved => {
                             txs[i].timing.approved_secs = Some(elapsed);
                             txs[i].phase = Phase::Executed;
@@ -431,6 +452,9 @@ async fn poll_pipeline<P: Provider>(
                         _ => Phase::Routed,
                     };
                     last_progress = Instant::now();
+                }
+                CheckOutcome::SecondLegDiscovered { .. } => {
+                    // Not used in GMP pipeline
                 }
                 CheckOutcome::AlreadyExecuted { elapsed } => {
                     if txs[i].timing.approved_secs.is_none() {
@@ -480,6 +504,7 @@ async fn poll_pipeline<P: Provider>(
             Phase::Voted => "VotingVerifier",
             Phase::Routed => "cosmos routing",
             Phase::HubApproved => "hub approval",
+            Phase::DiscoverSecondLeg => "second-leg discovery",
             Phase::Approved => checker.approval_label(),
             Phase::Executed => checker.execution_label(),
             Phase::Done => unreachable!(),
@@ -510,25 +535,108 @@ async fn poll_pipeline<P: Provider>(
 // ITS hub-only pipeline (Voted → HubApproved)
 // ---------------------------------------------------------------------------
 
-/// Simplified polling pipeline for ITS first-leg verification.
-///
-/// Tracks only two phases:
-/// 1. **Voted** — VotingVerifier (destination = "axelar" / AxelarnetGateway)
-/// 2. **Hub Approved** — AxelarnetGateway `executable_messages`
-///
-/// The second-leg (axelar → destination chain) has a different message_id
-/// that we cannot derive, so Approved/Executed on the destination are not tracked.
+/// Second-leg message info extracted from hub execution tx.
+struct SecondLegInfo {
+    message_id: String,
+    #[allow(dead_code)]
+    source_chain: String,
+    #[allow(dead_code)]
+    destination_chain: String,
+    #[allow(dead_code)]
+    payload_hash: String,
+}
+
+/// Discover the second-leg message_id by searching for the hub execution tx
+/// that consumed the first-leg message, then extracting routing event attributes.
+async fn discover_second_leg(rpc: &str, first_leg_message_id: &str) -> Result<Option<SecondLegInfo>> {
+    let resp = rpc_tx_search_event(
+        rpc,
+        "wasm-message_executed.message_id",
+        first_leg_message_id,
+    )
+    .await?;
+
+    let txs = resp
+        .pointer("/result/txs")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    if txs.is_empty() {
+        return Ok(None);
+    }
+
+    // Search through events for wasm-routing attributes
+    let events = txs[0]
+        .pointer("/tx_result/events")
+        .and_then(|v| v.as_array());
+
+    let events = match events {
+        Some(e) => e,
+        None => return Ok(None),
+    };
+
+    for event in events {
+        let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if event_type != "wasm-routing" {
+            continue;
+        }
+
+        let attrs = match event.get("attributes").and_then(|v| v.as_array()) {
+            Some(a) => a,
+            None => continue,
+        };
+
+        let get_attr = |key: &str| -> Option<String> {
+            attrs.iter().find_map(|a| {
+                let k = a.get("key").and_then(|v| v.as_str())?;
+                if k == key {
+                    a.get("value").and_then(|v| v.as_str()).map(|s| s.to_string())
+                } else {
+                    None
+                }
+            })
+        };
+
+        if let (Some(msg_id), Some(src), Some(dst), Some(ph)) = (
+            get_attr("message_id"),
+            get_attr("source_chain"),
+            get_attr("destination_chain"),
+            get_attr("payload_hash"),
+        ) {
+            return Ok(Some(SecondLegInfo {
+                message_id: msg_id,
+                source_chain: src,
+                destination_chain: dst,
+                payload_hash: ph,
+            }));
+        }
+    }
+
+    Ok(None)
+}
+
+/// Full ITS polling pipeline: Voted → HubApproved → DiscoverSecondLeg → Routed → Approved → Executed.
+#[allow(clippy::too_many_arguments)]
 async fn poll_pipeline_its_hub(
     txs: &mut [PendingTx],
     lcd: &str,
     voting_verifier: Option<&str>,
     source_chain: &str,
     axelarnet_gateway: &str,
+    rpc: &str,
+    cosm_gateway_dest: &str,
+    solana_rpc: &str,
 ) {
     let total = txs.len();
     if total == 0 {
         return;
     }
+
+    let sol_rpc_client = Arc::new(solana_client::rpc_client::RpcClient::new_with_commitment(
+        solana_rpc,
+        solana_commitment_config::CommitmentConfig::confirmed(),
+    ));
 
     let spinner = ui::wait_spinner("verifying ITS pipeline (starting)...");
     let mut last_progress = Instant::now();
@@ -552,6 +660,8 @@ async fn poll_pipeline_its_hub(
                 let send_instant = txs[i].send_instant;
                 let dest_chain = txs[i].gmp_destination_chain.clone();
                 let dest_address = txs[i].gmp_destination_address.clone();
+                let second_leg_id = txs[i].second_leg_message_id.clone();
+                let sol_client = sol_rpc_client.clone();
 
                 async move {
                     let outcome = match phase {
@@ -599,8 +709,76 @@ async fn poll_pipeline_its_hub(
                                 }
                             }
                         }
-                        // Done or other phases — no-op
-                        _ => CheckOutcome::NotYet,
+                        Phase::DiscoverSecondLeg => {
+                            match discover_second_leg(rpc, &message_id).await {
+                                Ok(Some(info)) => CheckOutcome::SecondLegDiscovered {
+                                    message_id: info.message_id,
+                                    payload_hash: info.payload_hash,
+                                },
+                                Ok(None) => CheckOutcome::NotYet,
+                                Err(e) => {
+                                    CheckOutcome::Error(format!("second-leg discovery: {e}"))
+                                }
+                            }
+                        }
+                        Phase::Routed => {
+                            let sl_id = second_leg_id.as_deref().unwrap_or("");
+                            match check_cosmos_routed(lcd, cosm_gateway_dest, "axelar", sl_id)
+                                .await
+                            {
+                                Ok(true) => CheckOutcome::PhaseComplete {
+                                    elapsed: send_instant.elapsed().as_secs_f64(),
+                                },
+                                Ok(false) => CheckOutcome::NotYet,
+                                Err(e) => CheckOutcome::Error(format!("Gateway routing: {e}")),
+                            }
+                        }
+                        Phase::Approved => {
+                            let sl_id = second_leg_id.as_deref().unwrap_or("");
+                            let input = [b"axelar-".as_slice(), sl_id.as_bytes()].concat();
+                            let cmd_id: [u8; 32] = keccak256(&input).into();
+                            let client = sol_client;
+                            match tokio::task::spawn_blocking(move || {
+                                check_solana_incoming_message(&client, &cmd_id)
+                            })
+                            .await
+                            {
+                                Ok(Ok(Some(0))) => CheckOutcome::PhaseComplete {
+                                    elapsed: send_instant.elapsed().as_secs_f64(),
+                                },
+                                Ok(Ok(Some(_))) => CheckOutcome::AlreadyExecuted {
+                                    elapsed: send_instant.elapsed().as_secs_f64(),
+                                },
+                                Ok(Ok(None)) => CheckOutcome::NotYet,
+                                Ok(Err(e)) => {
+                                    CheckOutcome::Error(format!("Solana approval: {e}"))
+                                }
+                                Err(e) => CheckOutcome::Error(format!("Solana approval: {e}")),
+                            }
+                        }
+                        Phase::Executed => {
+                            let sl_id = second_leg_id.as_deref().unwrap_or("");
+                            let input = [b"axelar-".as_slice(), sl_id.as_bytes()].concat();
+                            let cmd_id: [u8; 32] = keccak256(&input).into();
+                            let client = sol_client;
+                            match tokio::task::spawn_blocking(move || {
+                                check_solana_incoming_message(&client, &cmd_id)
+                            })
+                            .await
+                            {
+                                Ok(Ok(Some(status))) if status != 0 => {
+                                    CheckOutcome::PhaseComplete {
+                                        elapsed: send_instant.elapsed().as_secs_f64(),
+                                    }
+                                }
+                                Ok(Ok(_)) => CheckOutcome::NotYet,
+                                Ok(Err(e)) => {
+                                    CheckOutcome::Error(format!("Solana execution: {e}"))
+                                }
+                                Err(e) => CheckOutcome::Error(format!("Solana execution: {e}")),
+                            }
+                        }
+                        Phase::Done => CheckOutcome::NotYet,
                     };
                     (i, outcome)
                 }
@@ -610,10 +788,12 @@ async fn poll_pipeline_its_hub(
         let results = join_all(futs).await;
 
         let mut error_msg = None;
-        for (i, outcome) in results {
+        for (i, outcome) in &results {
+            let i = *i;
             match outcome {
                 CheckOutcome::NotYet => {}
                 CheckOutcome::PhaseComplete { elapsed } => {
+                    let elapsed = *elapsed;
                     match txs[i].phase {
                         Phase::Voted => {
                             txs[i].timing.voted_secs = Some(elapsed);
@@ -622,9 +802,26 @@ async fn poll_pipeline_its_hub(
                         }
                         Phase::HubApproved => {
                             txs[i].timing.hub_approved_secs = Some(elapsed);
+                            txs[i].phase = Phase::DiscoverSecondLeg;
+                        }
+                        Phase::DiscoverSecondLeg => {
+                            // Should not happen — DiscoverSecondLeg uses SecondLegDiscovered
+                            txs[i].phase = Phase::Routed;
+                        }
+                        Phase::Routed => {
+                            txs[i].timing.routed_secs = Some(elapsed);
+                            txs[i].phase = Phase::Approved;
+                        }
+                        Phase::Approved => {
+                            txs[i].timing.approved_secs = Some(elapsed);
+                            txs[i].phase = Phase::Executed;
+                        }
+                        Phase::Executed => {
+                            txs[i].timing.executed_secs = Some(elapsed);
+                            txs[i].timing.executed_ok = Some(true);
                             txs[i].phase = Phase::Done;
                         }
-                        _ => {}
+                        Phase::Done => {}
                     }
                     last_progress = Instant::now();
                 }
@@ -632,27 +829,41 @@ async fn poll_pipeline_its_hub(
                     txs[i].phase = Phase::HubApproved;
                     last_progress = Instant::now();
                 }
-                CheckOutcome::AlreadyExecuted { .. } | CheckOutcome::Error(_) => {
-                    if let CheckOutcome::Error(msg) = outcome {
-                        error_msg = Some(msg);
+                CheckOutcome::SecondLegDiscovered {
+                    message_id: sl_msg_id,
+                    payload_hash: sl_ph,
+                } => {
+                    txs[i].second_leg_message_id = Some(sl_msg_id.clone());
+                    txs[i].second_leg_payload_hash = Some(sl_ph.clone());
+                    txs[i].phase = Phase::Routed;
+                    last_progress = Instant::now();
+                }
+                CheckOutcome::AlreadyExecuted { elapsed } => {
+                    let elapsed = *elapsed;
+                    if txs[i].timing.approved_secs.is_none() {
+                        txs[i].timing.approved_secs = Some(elapsed);
                     }
+                    txs[i].timing.executed_secs = Some(elapsed);
+                    txs[i].timing.executed_ok = Some(true);
+                    txs[i].phase = Phase::Done;
+                    last_progress = Instant::now();
+                }
+                CheckOutcome::Error(msg) => {
+                    error_msg = Some(msg.clone());
                 }
             }
         }
 
-        let voted = txs.iter().filter(|t| t.timing.voted_secs.is_some()).count();
-        let hub = txs
-            .iter()
-            .filter(|t| t.timing.hub_approved_secs.is_some())
-            .count();
+        let (voted, _, hub_approved, approved, executed) = phase_counts(txs);
+        let routed = txs.iter().filter(|t| t.timing.routed_secs.is_some()).count();
 
         if let Some(ref err) = error_msg {
             spinner.set_message(format!(
-                "voted: {voted}/{total}  hub approved: {hub}/{total}  (err: {err})"
+                "voted: {voted}/{total}  hub: {hub_approved}/{total}  routed: {routed}/{total}  approved: {approved}/{total}  executed: {executed}/{total}  (err: {err})"
             ));
         } else {
             spinner.set_message(format!(
-                "voted: {voted}/{total}  hub approved: {hub}/{total}"
+                "voted: {voted}/{total}  hub: {hub_approved}/{total}  routed: {routed}/{total}  approved: {approved}/{total}  executed: {executed}/{total}"
             ));
         }
 
@@ -671,20 +882,24 @@ async fn poll_pipeline_its_hub(
         let label = match tx.phase {
             Phase::Voted => "VotingVerifier",
             Phase::HubApproved => "hub approval",
-            _ => "pipeline",
+            Phase::DiscoverSecondLeg => "second-leg discovery",
+            Phase::Routed => "cosmos routing",
+            Phase::Approved => "Solana approval",
+            Phase::Executed => "Solana execution",
+            Phase::Done => unreachable!(),
         };
+        if tx.phase == Phase::Executed {
+            tx.timing.executed_ok = Some(false);
+        }
         tx.fail_reason = Some(format!("{label}: timed out"));
     }
 
-    let voted = txs.iter().filter(|t| t.timing.voted_secs.is_some()).count();
-    let hub = txs
-        .iter()
-        .filter(|t| t.timing.hub_approved_secs.is_some())
-        .count();
+    let (voted, _, hub_approved, approved, executed) = phase_counts(txs);
+    let routed = txs.iter().filter(|t| t.timing.routed_secs.is_some()).count();
 
     spinner.finish_and_clear();
     ui::success(&format!(
-        "ITS pipeline: voted: {voted}/{total}  hub approved: {hub}/{total}"
+        "ITS pipeline: voted: {voted}/{total}  hub: {hub_approved}/{total}  routed: {routed}/{total}  approved: {approved}/{total}  executed: {executed}/{total}"
     ));
 }
 
@@ -788,6 +1003,8 @@ pub async fn verify_onchain<P: Provider>(
                 failed: false,
                 fail_reason: None,
                 phase: initial_phase,
+                second_leg_message_id: None,
+                second_leg_payload_hash: None,
             }
         })
         .collect();
@@ -879,6 +1096,8 @@ pub async fn verify_onchain_solana(
                 failed: false,
                 fail_reason: None,
                 phase: initial_phase,
+                second_leg_message_id: None,
+                second_leg_payload_hash: None,
             }
         })
         .collect();
@@ -932,17 +1151,17 @@ pub async fn verify_onchain_solana(
 /// Phases tracked:
 /// 1. **Voted** — VotingVerifier (dest = "axelar" / AxelarnetGateway)
 /// 2. **Hub Approved** — AxelarnetGateway executable_messages
-///
-/// Routed / Approved / Executed on Solana are skipped for now because the
-/// second-leg message (axelar → solana) has a different message_id that we
-/// cannot derive from the first-leg ContractCall alone.
+/// 3. **Discover Second Leg** — find second-leg message_id from hub execution tx
+/// 4. **Routed** — Cosmos Gateway outgoing_messages (second-leg)
+/// 5. **Approved** — Solana IncomingMessage PDA exists
+/// 6. **Executed** — Solana IncomingMessage PDA status = executed
 #[allow(clippy::too_many_arguments)]
 pub async fn verify_onchain_solana_its(
     config: &Path,
     source_chain: &str,
-    _destination_chain: &str,
+    destination_chain: &str,
     _destination_address: &str,
-    _solana_rpc: &str,
+    solana_rpc: &str,
     metrics: &mut [TxMetrics],
 ) -> Result<VerificationReport> {
     let confirmed: Vec<usize> = metrics
@@ -995,20 +1214,27 @@ pub async fn verify_onchain_solana_its(
                 failed: false,
                 fail_reason: None,
                 phase: initial_phase,
+                second_leg_message_id: None,
+                second_leg_payload_hash: None,
             }
         })
         .collect();
 
-    // ITS ContractCall has destination_chain="axelar" and
-    // destination_address=ITS Hub contract — use per-tx values from the event.
-    // Stop at HubApproved — we can't track the second-leg message on Solana
-    // because it has a different source_chain ("axelar") and message_id.
+    let rpc = read_axelar_rpc(config)?;
+    let cosm_gateway_dest = read_axelar_contract_field(
+        config,
+        &format!("/axelar/contracts/Gateway/{destination_chain}/address"),
+    )?;
+
     poll_pipeline_its_hub(
         &mut txs,
         &lcd,
         voting_verifier.as_deref(),
         source_chain,
         &axelarnet_gateway,
+        &rpc,
+        &cosm_gateway_dest,
+        solana_rpc,
     )
     .await;
 
@@ -1211,6 +1437,7 @@ fn stuck_phase(tx: &PendingTx) -> String {
         Phase::Voted => "voted".into(),
         Phase::Routed => "routed".into(),
         Phase::HubApproved => "hub approved".into(),
+        Phase::DiscoverSecondLeg => "second-leg discovery".into(),
         Phase::Approved => "approved".into(),
         Phase::Executed => "executed".into(),
         Phase::Done => "done".into(),
