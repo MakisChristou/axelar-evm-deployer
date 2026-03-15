@@ -24,7 +24,7 @@ use std::path::Path;
 const TOKEN_NAME: &str = "AXE Load Test";
 const TOKEN_SYMBOL: &str = "AXELT";
 const TOKEN_DECIMALS: u8 = 18;
-const AMOUNT_PER_TX: u64 = 1_000_000_000_000_000_000; // 1 token (10^18)
+const AMOUNT_PER_TX: u64 = 1_000_000; // 0.000000000001 tokens (with 18 decimals)
 
 /// Default gas value for ITS transfer on Solana (in lamports).
 /// devnet-amplifier doesn't require gas, stagenet/mainnet do.
