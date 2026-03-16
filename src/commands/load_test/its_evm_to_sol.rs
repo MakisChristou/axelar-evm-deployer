@@ -133,7 +133,9 @@ pub async fn run(args: LoadTestArgs, run_start: Instant) -> eyre::Result<()> {
     // Amount must survive ITS hub decimal truncation between EVM (18 decimals) and Solana.
     // Use 1 full token (10^18) to ensure the truncated amount is non-zero.
     let amount_per_tx = U256::from(1_000_000_000_000_000_000u128); // 10^18 = 1 token
-    let total_supply = amount_per_tx * U256::from(num_txs + 10); // extra buffer
+    // Distribute 1000x per key so cached tokens last across many runs.
+    let amount_per_key = amount_per_tx * U256::from(1000);
+    let total_supply = amount_per_key * U256::from(num_txs + 10);
 
     let its_service = InterchainTokenService::new(its_proxy_addr, &write_provider);
 
@@ -163,7 +165,7 @@ pub async fn run(args: LoadTestArgs, run_start: Instant) -> eyre::Result<()> {
         if let Some((tid, addr)) = cached {
             // Verify token still exists and deployer has enough balance
             let token = ERC20::new(addr, &write_provider);
-            let needed = amount_per_tx * U256::from(num_txs);
+            let needed = amount_per_key * U256::from(num_txs);
             let balance = token.balanceOf(deployer_address).call().await.unwrap_or_default();
             if balance >= needed {
                 ui::info(&format!("reusing cached ITS token: {addr}"));
@@ -233,7 +235,7 @@ pub async fn run(args: LoadTestArgs, run_start: Instant) -> eyre::Result<()> {
     keypairs::ensure_funded_evm(&funding_provider, &signer, &derived).await?;
 
     // --- Distribute ITS tokens to derived wallets ---
-    distribute_tokens(&write_provider, token_addr, &derived, amount_per_tx).await?;
+    distribute_tokens(&write_provider, token_addr, &derived, amount_per_key).await?;
 
     // --- Parallel interchainTransfer sends via ITS Service ---
     // Each derived key calls ITS.interchainTransfer(tokenId, destChain, destAddr, amount, metadata, gasValue)

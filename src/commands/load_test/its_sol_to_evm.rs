@@ -25,6 +25,8 @@ const TOKEN_NAME: &str = "AXE Load Test";
 const TOKEN_SYMBOL: &str = "AXELT";
 const TOKEN_DECIMALS: u8 = 18;
 const AMOUNT_PER_TX: u64 = 1_000_000; // 0.000000000001 tokens (with 18 decimals)
+/// Distribute 1000x per key so cached tokens last across many runs.
+const AMOUNT_PER_KEY: u64 = AMOUNT_PER_TX * 1000;
 
 /// Default gas value for ITS transfer on Solana (in lamports).
 /// devnet-amplifier doesn't require gas, stagenet/mainnet do.
@@ -145,7 +147,7 @@ pub async fn run(mut args: LoadTestArgs, run_start: Instant) -> eyre::Result<()>
         &keypairs,
         &mint,
         &token_id,
-        AMOUNT_PER_TX,
+        AMOUNT_PER_KEY,
     )?;
 
     // --- ITS hub routing info ---
@@ -390,7 +392,7 @@ async fn setup_its_token(
 
             // Verify token still exists on-chain and deployer has enough supply
             if rpc_client.get_account_data(&mint).is_ok() {
-                let needed = AMOUNT_PER_TX.saturating_mul(num_txs as u64);
+                let needed = AMOUNT_PER_KEY.saturating_mul(num_txs as u64);
                 let token_program = solana_sdk::pubkey::Pubkey::from_str_const(
                     "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
                 );
@@ -427,7 +429,7 @@ async fn setup_its_token(
 
     // Deploy fresh
     let salt = generate_salt();
-    let total_supply = AMOUNT_PER_TX.saturating_mul(num_txs as u64 + 10);
+    let total_supply = AMOUNT_PER_KEY.saturating_mul(num_txs as u64 + 10);
 
     ui::info("deploying new ITS token on Solana...");
     ui::kv("name", TOKEN_NAME);
