@@ -161,27 +161,40 @@ pub async fn run(args: LoadTestArgs, run_start: Instant) -> eyre::Result<()> {
             });
 
         if let Some((tid, addr)) = cached {
-            // Verify token still exists
+            // Verify token still exists and deployer has enough balance
             let token = ERC20::new(addr, &write_provider);
-            match token.name().call().await {
-                Ok(_) => {
-                    ui::info(&format!("reusing cached ITS token: {addr}"));
-                    ui::kv("token ID (cached)", &format!("{tid}"));
-                    (tid, addr, None)
-                }
-                Err(_) => {
-                    ui::warn("cached token no longer exists, deploying fresh...");
-                    deploy_its_token(
-                        &write_provider,
-                        its_factory_addr,
-                        deployer_address,
-                        dest,
-                        total_supply,
-                        src,
-                        gas_value,
-                    )
-                    .await?
-                }
+            let needed = amount_per_tx * U256::from(num_txs);
+            let balance = token.balanceOf(deployer_address).call().await.unwrap_or_default();
+            if balance >= needed {
+                ui::info(&format!("reusing cached ITS token: {addr}"));
+                ui::kv("token ID (cached)", &format!("{tid}"));
+                (tid, addr, None)
+            } else if balance > U256::ZERO {
+                ui::warn(&format!(
+                    "cached token has insufficient supply ({balance} < {needed}), deploying fresh..."
+                ));
+                deploy_its_token(
+                    &write_provider,
+                    its_factory_addr,
+                    deployer_address,
+                    dest,
+                    total_supply,
+                    src,
+                    gas_value,
+                )
+                .await?
+            } else {
+                ui::warn("cached token no longer exists, deploying fresh...");
+                deploy_its_token(
+                    &write_provider,
+                    its_factory_addr,
+                    deployer_address,
+                    dest,
+                    total_supply,
+                    src,
+                    gas_value,
+                )
+                .await?
             }
         } else {
             deploy_its_token(
