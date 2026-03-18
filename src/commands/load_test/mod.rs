@@ -424,7 +424,41 @@ pub fn save_its_cache(src: &str, dst: &str, cache: &serde_json::Value) -> Result
     Ok(())
 }
 
+/// Returns the network this binary was compiled for based on cargo features.
+fn compiled_network() -> &'static str {
+    if cfg!(feature = "mainnet") {
+        "mainnet"
+    } else if cfg!(feature = "testnet") {
+        "testnet"
+    } else if cfg!(feature = "stagenet") {
+        "stagenet"
+    } else {
+        "devnet-amplifier"
+    }
+}
+
+/// Try to detect the target network from the config file path.
+/// Looks for known network names in the filename (e.g. "stagenet.json", "devnet-amplifier.json").
+fn detect_network_from_config(config: &std::path::Path) -> Option<&'static str> {
+    let name = config.file_stem()?.to_str()?;
+    ["mainnet", "testnet", "stagenet", "devnet-amplifier"]
+        .iter()
+        .find(|&&network| name == network)
+        .copied()
+}
+
 pub async fn run(args: LoadTestArgs) -> Result<()> {
+    // Check for network mismatch between compiled binary and config
+    if let Some(target_network) = detect_network_from_config(&args.config) {
+        let compiled = compiled_network();
+        if compiled != target_network {
+            eyre::bail!(
+                "binary was compiled for '{compiled}' but config targets '{target_network}'. \
+                 Rebuild with:\n  cargo build --release --features {target_network} --no-default-features"
+            );
+        }
+    }
+
     let run_start = Instant::now();
 
     ui::section(&format!(
