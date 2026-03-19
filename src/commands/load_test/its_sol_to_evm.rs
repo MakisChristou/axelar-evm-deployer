@@ -23,8 +23,8 @@ use std::path::Path;
 
 const TOKEN_NAME: &str = "AXE";
 const TOKEN_SYMBOL: &str = "AXE";
-const TOKEN_DECIMALS: u8 = 18;
-const AMOUNT_PER_TX: u64 = 1_000_000; // 0.000000000001 tokens (with 18 decimals)
+const TOKEN_DECIMALS: u8 = 9;
+const AMOUNT_PER_TX: u64 = 1_000_000_000; // 1 token (with 9 decimals)
 /// Distribute 1000x per key so cached tokens last across many runs.
 const AMOUNT_PER_KEY: u64 = AMOUNT_PER_TX * 1000;
 
