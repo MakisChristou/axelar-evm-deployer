@@ -2484,6 +2484,37 @@
     "inputs": [
       {
         "internalType": "string",
+        "name": "chain",
+        "type": "string"
+      },
+      {
+        "internalType": "string",
+        "name": "address_",
+        "type": "string"
+      }
+    ],
+    "name": "setTrustedAddress",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "string",
+        "name": "chain",
+        "type": "string"
+      }
+    ],
+    "name": "removeTrustedAddress",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "string",
         "name": "chainName",
         "type": "string"
       }
