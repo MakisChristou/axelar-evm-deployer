@@ -853,13 +853,14 @@ fn print_final_report(report: &LoadTestReport) {
             _ => {}
         }
 
-        // Throughput
-        if let (Some(min), Some(max)) = (v.min_executed_secs, v.max_executed_secs) {
-            let window = max - min;
-            if window > 0.0 && v.successful > 1 {
-                let throughput = v.successful as f64 / window;
-                println!("  throughput       {throughput:.1} tx/s");
-            }
+        // Throughput: successful txs / time from first send to last successful execution.
+        // This measures pipeline exit rate without being inflated by stuck-tx timeout waits.
+        if let Some(window) = v.time_to_last_success_secs
+            && window > 0.0
+            && v.successful > 0
+        {
+            let throughput = v.successful as f64 / window;
+            println!("  throughput       {throughput:.2} tx/s");
         }
 
         // Segment breakdown

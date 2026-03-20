@@ -2154,6 +2154,24 @@ fn compute_verification_report(
     let min_executed = min_option(all_timings.iter().filter_map(|t| t.executed_secs));
     let max_executed = max_option(all_timings.iter().filter_map(|t| t.executed_secs));
 
+    // Time from earliest send to last successful execution (for throughput).
+    // This excludes timeout wait for stuck txs.
+    let earliest_send = txs.iter().map(|tx| tx.send_instant).min();
+    let last_execution = txs
+        .iter()
+        .filter(|tx| tx.timing.executed_ok == Some(true))
+        .filter_map(|tx| {
+            let secs = tx.timing.executed_secs?;
+            Some(tx.send_instant + Duration::from_secs_f64(secs))
+        })
+        .max();
+    let time_to_last_success = match (earliest_send, last_execution) {
+        (Some(start), Some(end)) if end > start => {
+            Some(end.duration_since(start).as_secs_f64())
+        }
+        _ => None,
+    };
+
     VerificationReport {
         total_verified,
         successful,
@@ -2168,6 +2186,7 @@ fn compute_verification_report(
         avg_executed_secs: avg_executed,
         min_executed_secs: min_executed,
         max_executed_secs: max_executed,
+        time_to_last_success_secs: time_to_last_success,
         stuck: stuck_count,
         stuck_at,
     }
