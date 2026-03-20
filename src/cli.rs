@@ -53,11 +53,10 @@ pub enum Commands {
         subcommand: TestCommands,
     },
 
-    /// Decode EVM calldata (ITS, Gateway, Factory)
+    /// Decode EVM calldata or full transactions
     Decode {
-        /// Hex-encoded calldata (with or without 0x prefix, whitespace is stripped)
-        #[arg(trailing_var_arg = true, num_args = 1..)]
-        calldata: Vec<String>,
+        #[command(subcommand)]
+        subcommand: DecodeCommands,
     },
 }
 
@@ -125,6 +124,30 @@ pub enum TestCommands {
         /// ITS token ID to use (hex, skips token deployment)
         #[arg(long)]
         token_id: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum DecodeCommands {
+    /// Decode raw hex calldata (ITS, Gateway, Factory)
+    Calldata {
+        /// Hex-encoded calldata (with or without 0x prefix, whitespace is stripped)
+        #[arg(trailing_var_arg = true, num_args = 1..)]
+        hex: Vec<String>,
+    },
+
+    /// Fetch and decode a full EVM transaction (calldata + logs)
+    Tx {
+        /// Transaction hash (0x...)
+        txid: String,
+
+        /// Path to chains config JSON (auto-discovered from sibling axelar-contract-deployments repo)
+        #[arg(long, env = "CHAINS_CONFIG")]
+        config: Option<PathBuf>,
+
+        /// Chain axelar ID (skip RPC brute-forcing)
+        #[arg(long)]
+        chain: Option<String>,
     },
 }
 

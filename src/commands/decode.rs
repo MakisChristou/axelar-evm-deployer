@@ -1,6 +1,7 @@
-use alloy::dyn_abi::{DynSolType, DynSolValue, JsonAbiExt};
+use alloy::dyn_abi::{DynSolType, DynSolValue, JsonAbiExt, Specifier};
 use alloy::hex;
 use alloy::json_abi::JsonAbi;
+use alloy::primitives::B256;
 use eyre::{bail, Result};
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -18,27 +19,41 @@ static FUNC_DB: LazyLock<HashMap<[u8; 4], alloy::json_abi::Function>> = LazyLock
     map
 });
 
+pub(crate) static EVENT_DB: LazyLock<HashMap<B256, alloy::json_abi::Event>> = LazyLock::new(|| {
+    let abi: JsonAbi = serde_json::from_str(ABI_JSON).expect("embedded ABI is invalid");
+    let mut map = HashMap::new();
+    for events in abi.events.values() {
+        for event in events {
+            map.insert(event.selector(), event.clone());
+        }
+    }
+    map
+});
+
 const MAX_DEPTH: usize = 5;
 
 pub fn run(calldata_hex: &str) -> Result<()> {
     let data = parse_hex(calldata_hex)?;
+    decode_bytes(&data, "")
+}
 
+pub(crate) fn decode_bytes(data: &[u8], indent: &str) -> Result<()> {
     // Try as function call (4-byte selector lookup)
     if data.len() >= 4
         && let Some(func) = FUNC_DB.get(&<[u8; 4]>::try_from(&data[..4])?) {
             let values = func.abi_decode_input(&data[4..])?;
-            println!("{}", func.signature());
-            print_decoded(&func.inputs, &values, "  ", 0);
+            println!("{indent}{}", func.signature());
+            print_decoded(&func.inputs, &values, &format!("{indent}  "), 0);
             return Ok(());
         }
 
     // Try as ITS payload
-    if try_print_its(&data, "", 0) {
+    if try_print_its(data, indent, 0) {
         return Ok(());
     }
 
     // Try fallback patterns
-    if try_print_fallback(&data, "") {
+    if try_print_fallback(data, indent) {
         return Ok(());
     }
 
@@ -49,6 +64,81 @@ pub fn run(calldata_hex: &str) -> Result<()> {
         );
     }
     bail!("could not decode data, not recognized")
+}
+
+pub(crate) fn decode_log(
+    topics: &[B256],
+    data: &[u8],
+) -> Option<(String, Vec<(String, DynSolValue)>)> {
+    let topic0 = topics.first()?;
+    let event = EVENT_DB.get(topic0)?;
+
+    let non_indexed_params: Vec<_> = event.inputs.iter().filter(|p| !p.indexed).collect();
+
+    // Decode non-indexed from data
+    let data_types: Vec<DynSolType> = non_indexed_params
+        .iter()
+        .filter_map(|p| p.resolve().ok())
+        .collect();
+
+    let data_tuple = DynSolType::Tuple(data_types);
+    let DynSolValue::Tuple(data_values) = data_tuple.abi_decode_params(data).ok()? else {
+        return None;
+    };
+
+    // Build result combining indexed (from topics) and non-indexed (from data)
+    let mut result = Vec::new();
+    let mut topic_idx = 1; // skip topic0
+    let mut data_idx = 0;
+
+    for param in &event.inputs {
+        let name = if param.name.is_empty() {
+            format!("arg{}", result.len())
+        } else {
+            param.name.clone()
+        };
+
+        if param.indexed {
+            if topic_idx < topics.len() {
+                let topic = topics[topic_idx];
+                topic_idx += 1;
+                // Try to decode the topic based on type
+                let resolved = param.resolve().ok();
+                let value = match resolved.as_ref() {
+                    Some(DynSolType::Address) => {
+                        DynSolValue::Address(alloy::primitives::Address::from_word(topic))
+                    }
+                    Some(DynSolType::Bool) => DynSolValue::Bool(topic[31] != 0),
+                    Some(DynSolType::Uint(bits)) => {
+                        DynSolValue::Uint(
+                            alloy::primitives::Uint::from_be_bytes(topic.0),
+                            *bits,
+                        )
+                    }
+                    Some(DynSolType::Int(bits)) => {
+                        DynSolValue::Int(
+                            alloy::primitives::Signed::from_be_bytes(topic.0),
+                            *bits,
+                        )
+                    }
+                    _ => {
+                        // For dynamic types (string, bytes, arrays), topic is keccak hash
+                        DynSolValue::FixedBytes(topic.0.into(), 32)
+                    }
+                };
+                result.push((name, value));
+            }
+        } else if data_idx < data_values.len() {
+            result.push((name, data_values[data_idx].clone()));
+            data_idx += 1;
+        }
+    }
+
+    Some((event.signature(), result))
+}
+
+pub(crate) fn format_value_pub(v: &DynSolValue) -> String {
+    format_value(v)
 }
 
 fn parse_hex(s: &str) -> Result<Vec<u8>> {

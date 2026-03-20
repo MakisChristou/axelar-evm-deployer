@@ -39,7 +39,8 @@ workspace/
 | `axe test gmp`       | End-to-end GMP loopback test                  | no      |
 | `axe test its`       | Deploy + transfer an interchain token         | no      |
 | `axe test load-test` | Cross-chain load test                         | yes     |
-| `axe decode`         | Decode EVM calldata (ITS, Gateway, Factory)   | -       |
+| `axe decode calldata`| Decode raw EVM calldata                       | -       |
+| `axe decode tx`      | Fetch & decode a full EVM transaction          | -       |
 
 ## Deploy
 
@@ -152,12 +153,31 @@ Run `axe test load-test --help` for all options.
 
 ## Decode
 
+### Decode calldata
+
 ```bash
-axe decode 0x0f4433d3...   # auto-detects function from 4-byte selector
-axe decode 0x00000000...   # auto-detects ITS payload type
+axe decode calldata 0x0f4433d3...   # auto-detects function from 4-byte selector
+axe decode calldata 0x00000000...   # auto-detects ITS payload type
 ```
 
-Decodes EVM calldata against a built-in ABI database (ITS Factory, ITS, Gateway). Recursively decodes nested bytes fields (multicall batches, ITS payloads inside GMP calls). Whitespace in hex input is stripped automatically.
+Decodes EVM calldata against a built-in ABI database (Gateway, ITS, ITS Factory, GMP SDK). Recursively decodes nested bytes fields (multicall batches, ITS payloads inside GMP calls). Whitespace in hex input is stripped automatically.
+
+### Decode transaction
+
+```bash
+axe decode tx 0xabc123...                        # auto-discovers configs from sibling repo
+axe decode tx 0xabc123... --chain avalanche       # skip brute-forcing, target one chain
+axe decode tx 0xabc123... --config path/to.json   # use a specific config file
+```
+
+Fetches a transaction by hash from all EVM chains in parallel, then decodes the calldata and all event logs. Chains configs are auto-discovered from the sibling `axelar-contract-deployments` repo (mainnet, testnet, stagenet, devnet-amplifier).
+
+Set `ALCHEMY_TOKEN` to use Alchemy RPCs for supported chains (faster and more reliable than public RPCs):
+
+```bash
+export ALCHEMY_TOKEN=your_token_here
+axe decode tx 0xabc123...
+```
 
 ## Configuration
 
