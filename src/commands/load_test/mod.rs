@@ -6,18 +6,16 @@ pub mod metrics;
 pub mod sol_to_evm;
 mod verify;
 
-
 use std::path::PathBuf;
 use std::time::Instant;
 
-
 use alloy::{
+    network::TransactionBuilder,
     primitives::{Address, Bytes},
     providers::{Provider, ProviderBuilder},
     rpc::types::TransactionRequest,
     signers::local::PrivateKeySigner,
     sol_types::SolValue,
-    network::TransactionBuilder,
 };
 use eyre::Result;
 use serde_json::json;
@@ -112,7 +110,10 @@ fn save_cache(axelar_id: &str, cache: &serde_json::Value) -> Result<()> {
 }
 
 /// Look up a chain's `chainType` from the config.
-fn chain_type(chains: &serde_json::Map<String, serde_json::Value>, chain_id: &str) -> Option<String> {
+fn chain_type(
+    chains: &serde_json::Map<String, serde_json::Value>,
+    chain_id: &str,
+) -> Option<String> {
     chains
         .get(chain_id)?
         .get("chainType")?
@@ -216,9 +217,7 @@ pub fn resolve_from_config(
             .get(&source_chain)
             .and_then(|v| v.get("rpc"))
             .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                eyre::eyre!("no RPC URL for source chain '{source_chain}' in config")
-            })?
+            .ok_or_else(|| eyre::eyre!("no RPC URL for source chain '{source_chain}' in config"))?
             .to_string(),
         TestType::EvmToSol => chains
             .get(&destination_chain)
@@ -259,10 +258,12 @@ fn auto_detect_chains(
                             ui::info(&format!("auto-detected source: {}", svm[0]));
                             svm[0].clone()
                         }
-                        _ => return Err(eyre::eyre!(
-                            "multiple SVM chains found: {}. Use --source-chain to pick one.",
-                            svm.join(", ")
-                        )),
+                        _ => {
+                            return Err(eyre::eyre!(
+                                "multiple SVM chains found: {}. Use --source-chain to pick one.",
+                                svm.join(", ")
+                            ));
+                        }
                     }
                 }
             };
@@ -293,10 +294,12 @@ fn auto_detect_chains(
                             ui::info(&format!("auto-detected source: {}", evm[0]));
                             evm[0].clone()
                         }
-                        _ => return Err(eyre::eyre!(
-                            "multiple EVM chains found: {}. Use --source-chain to pick one.",
-                            evm.join(", ")
-                        )),
+                        _ => {
+                            return Err(eyre::eyre!(
+                                "multiple EVM chains found: {}. Use --source-chain to pick one.",
+                                evm.join(", ")
+                            ));
+                        }
                     }
                 }
             };
@@ -345,7 +348,9 @@ fn auto_detect_all(
         if src_type == "evm" {
             let svm = find_chains_by_type(chains, "svm", false);
             if svm.is_empty() {
-                return Err(eyre::eyre!("no SVM chain found in config to pair with EVM source"));
+                return Err(eyre::eyre!(
+                    "no SVM chain found in config to pair with EVM source"
+                ));
             }
             let dst = dest_override.unwrap_or_else(|| {
                 ui::info(&format!(
@@ -368,7 +373,9 @@ fn auto_detect_all(
         if dst_type == "evm" {
             let svm = find_chains_by_type(chains, "svm", false);
             if svm.is_empty() {
-                return Err(eyre::eyre!("no SVM chain found in config to pair with EVM destination"));
+                return Err(eyre::eyre!(
+                    "no SVM chain found in config to pair with EVM destination"
+                ));
             }
             ui::info(&format!("auto-detected source: {}", svm[0]));
             ui::info("inferred test type: sol-to-evm");
@@ -377,7 +384,9 @@ fn auto_detect_all(
         if dst_type == "svm" {
             let evm = find_chains_by_type(chains, "evm", true);
             if evm.is_empty() {
-                return Err(eyre::eyre!("no EVM chain found in config to pair with SVM destination"));
+                return Err(eyre::eyre!(
+                    "no EVM chain found in config to pair with SVM destination"
+                ));
             }
             ui::info(&format!("auto-detected source: {}", evm[0]));
             ui::info("inferred test type: evm-to-sol");
@@ -393,7 +402,10 @@ fn auto_detect_all(
     let evm = find_chains_by_type(chains, "evm", true);
 
     if !svm.is_empty() && !evm.is_empty() {
-        ui::info(&format!("auto-detected: {} -> {} (sol-to-evm)", svm[0], evm[0]));
+        ui::info(&format!(
+            "auto-detected: {} -> {} (sol-to-evm)",
+            svm[0], evm[0]
+        ));
         return Ok((TestType::SolToEvm, svm[0].clone(), evm[0].clone()));
     }
 
@@ -524,9 +536,8 @@ async fn run_sol_to_evm(mut args: LoadTestArgs, _run_start: Instant) -> Result<(
     // --- Deploy/reuse SenderReceiver on destination EVM chain ---
     let cache = read_cache(dest);
 
-    let (sender_receiver_addr, provider) = if let Some(addr_str) = cache
-        .get("senderReceiverAddress")
-        .and_then(|v| v.as_str())
+    let (sender_receiver_addr, provider) = if let Some(addr_str) =
+        cache.get("senderReceiverAddress").and_then(|v| v.as_str())
     {
         // Try to reuse cached address — only need a read-only provider for the check
         let read_provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
@@ -550,9 +561,10 @@ async fn run_sol_to_evm(mut args: LoadTestArgs, _run_start: Instant) -> Result<(
             (new_addr, write_provider)
         } else {
             ui::info(&format!("SenderReceiver: reusing {addr}"));
-            let private_key = args.private_key.as_deref().unwrap_or(
-                "0x0000000000000000000000000000000000000000000000000000000000000001",
-            );
+            let private_key = args
+                .private_key
+                .as_deref()
+                .unwrap_or("0x0000000000000000000000000000000000000000000000000000000000000001");
             let signer: PrivateKeySigner = private_key.parse()?;
             let provider = ProviderBuilder::new()
                 .wallet(signer)
@@ -643,15 +655,13 @@ async fn run_evm_to_sol(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     ui::kv("destination", dest);
 
     let gateway_addr = read_contract_address(&args.config, src, "AxelarGateway")?;
-    let gas_service_addr = read_contract_address(&args.config, src, "AxelarGasService")
-        .unwrap_or(Address::ZERO);
+    let gas_service_addr =
+        read_contract_address(&args.config, src, "AxelarGasService").unwrap_or(Address::ZERO);
     ui::address("EVM gateway", &format!("{gateway_addr}"));
 
     // --- Set up EVM signer ---
     let private_key = args.private_key.as_ref().ok_or_else(|| {
-        eyre::eyre!(
-            "EVM private key required. Set EVM_PRIVATE_KEY env var or use --private-key"
-        )
+        eyre::eyre!("EVM private key required. Set EVM_PRIVATE_KEY env var or use --private-key")
     })?;
     let signer: PrivateKeySigner = private_key.parse()?;
     let signer_address = signer.address();
@@ -675,31 +685,31 @@ async fn run_evm_to_sol(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     // --- Deploy/reuse SenderReceiver on source chain ---
     let cache_key = &format!("{src}-evm-to-sol");
     let cache = read_cache(cache_key);
-    let sender_receiver_addr =
-        if let Some(addr_str) = cache.get("senderReceiverAddress").and_then(|v| v.as_str()) {
-            let addr: Address = addr_str.parse()?;
-            let code = read_provider.get_code_at(addr).await?;
-            if code.is_empty() {
-                ui::warn("cached SenderReceiver has no code, redeploying...");
-                let new_addr =
-                    deploy_sender_receiver(&write_provider, gateway_addr, gas_service_addr).await?;
-                let mut cache = cache;
-                cache["senderReceiverAddress"] = json!(format!("{new_addr}"));
-                save_cache(cache_key, &cache)?;
-                new_addr
-            } else {
-                ui::info(&format!("SenderReceiver: reusing {addr}"));
-                addr
-            }
-        } else {
-            ui::info("deploying SenderReceiver on source chain...");
-            let addr =
+    let sender_receiver_addr = if let Some(addr_str) =
+        cache.get("senderReceiverAddress").and_then(|v| v.as_str())
+    {
+        let addr: Address = addr_str.parse()?;
+        let code = read_provider.get_code_at(addr).await?;
+        if code.is_empty() {
+            ui::warn("cached SenderReceiver has no code, redeploying...");
+            let new_addr =
                 deploy_sender_receiver(&write_provider, gateway_addr, gas_service_addr).await?;
             let mut cache = cache;
-            cache["senderReceiverAddress"] = json!(format!("{addr}"));
+            cache["senderReceiverAddress"] = json!(format!("{new_addr}"));
             save_cache(cache_key, &cache)?;
+            new_addr
+        } else {
+            ui::info(&format!("SenderReceiver: reusing {addr}"));
             addr
-        };
+        }
+    } else {
+        ui::info("deploying SenderReceiver on source chain...");
+        let addr = deploy_sender_receiver(&write_provider, gateway_addr, gas_service_addr).await?;
+        let mut cache = cache;
+        cache["senderReceiverAddress"] = json!(format!("{addr}"));
+        save_cache(cache_key, &cache)?;
+        addr
+    };
     ui::address("SenderReceiver", &format!("{sender_receiver_addr}"));
 
     // Destination on Solana: memo program (resolved per feature flag)
@@ -751,7 +761,8 @@ async fn run_evm_to_sol(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
             Some(verify_tx),
             Some(send_done),
             spinner_tx,
-        ).await?;
+        )
+        .await?;
 
         // Wait for verification to finish.
         let (verification, timings) = verify_handle.await??;
@@ -770,7 +781,8 @@ async fn run_evm_to_sol(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
             &main_key,
             &evm_rpc_url,
             destination_address,
-        ).await?;
+        )
+        .await?;
 
         let verification = verify::verify_onchain_solana(
             &args.config,
@@ -810,11 +822,17 @@ pub fn finish_report(
         Ok(()) => match serde_json::to_string_pretty(report) {
             Ok(json) => match std::fs::write(&log_path, &json) {
                 Ok(()) => ui::info(&format!("report written to {}", log_path.display())),
-                Err(e) => ui::warn(&format!("could not write report to {}: {e}", log_path.display())),
+                Err(e) => ui::warn(&format!(
+                    "could not write report to {}: {e}",
+                    log_path.display()
+                )),
             },
             Err(e) => ui::warn(&format!("could not serialize report: {e}")),
         },
-        Err(e) => ui::warn(&format!("could not create log dir {}: {e}", log_dir.display())),
+        Err(e) => ui::warn(&format!(
+            "could not create log dir {}: {e}",
+            log_dir.display()
+        )),
     }
 
     Ok(())
@@ -909,7 +927,9 @@ async fn deploy_sender_receiver<P: alloy::providers::Provider>(
 #[allow(clippy::float_arithmetic)]
 fn print_final_report(report: &LoadTestReport) {
     println!();
-    println!("\u{2550}\u{2550}\u{2550} SUMMARY \u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}");
+    println!(
+        "\u{2550}\u{2550}\u{2550} SUMMARY \u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}"
+    );
     println!(
         "  transactions     {}/{} confirmed ({:.1}% landed)",
         report.total_confirmed,
@@ -923,26 +943,56 @@ fn print_final_report(report: &LoadTestReport) {
         // Per-stage pipeline counts (computed from transaction records).
         // Shown even when verification times out so partial progress is visible.
         let total = report.total_confirmed;
-        let voted = report.transactions.iter()
-            .filter(|t| t.amplifier_timing.as_ref().is_some_and(|a| a.voted_secs.is_some()))
+        let voted = report
+            .transactions
+            .iter()
+            .filter(|t| {
+                t.amplifier_timing
+                    .as_ref()
+                    .is_some_and(|a| a.voted_secs.is_some())
+            })
             .count() as u64;
-        let routed = report.transactions.iter()
-            .filter(|t| t.amplifier_timing.as_ref().is_some_and(|a| a.routed_secs.is_some()))
+        let routed = report
+            .transactions
+            .iter()
+            .filter(|t| {
+                t.amplifier_timing
+                    .as_ref()
+                    .is_some_and(|a| a.routed_secs.is_some())
+            })
             .count() as u64;
-        let approved = report.transactions.iter()
-            .filter(|t| t.amplifier_timing.as_ref().is_some_and(|a| a.approved_secs.is_some()))
+        let approved = report
+            .transactions
+            .iter()
+            .filter(|t| {
+                t.amplifier_timing
+                    .as_ref()
+                    .is_some_and(|a| a.approved_secs.is_some())
+            })
             .count() as u64;
-        let executed = report.transactions.iter()
-            .filter(|t| t.amplifier_timing.as_ref().is_some_and(|a| a.executed_secs.is_some()))
+        let executed = report
+            .transactions
+            .iter()
+            .filter(|t| {
+                t.amplifier_timing
+                    .as_ref()
+                    .is_some_and(|a| a.executed_secs.is_some())
+            })
             .count() as u64;
         println!(
             "  pipeline         voted {voted}/{total}  routed {routed}/{total}  approved {approved}/{total}  executed {executed}/{total}"
         );
 
         // End-to-end line
-        match (v.avg_executed_secs, v.min_executed_secs, v.max_executed_secs) {
+        match (
+            v.avg_executed_secs,
+            v.min_executed_secs,
+            v.max_executed_secs,
+        ) {
             (Some(avg), Some(min), Some(max)) => {
-                println!("  end-to-end       avg {avg:.1}s \u{2502} min {min:.1}s \u{2502} max {max:.1}s");
+                println!(
+                    "  end-to-end       avg {avg:.1}s \u{2502} min {min:.1}s \u{2502} max {max:.1}s"
+                );
             }
             (Some(avg), _, Some(max)) => {
                 println!("  end-to-end       avg {avg:.1}s \u{2502} max {max:.1}s");
@@ -953,14 +1003,38 @@ fn print_final_report(report: &LoadTestReport) {
             _ => {}
         }
 
-        // Throughput: successful txs / time from first send to last successful execution.
-        // This measures pipeline exit rate without being inflated by stuck-tx timeout waits.
-        if let Some(window) = v.time_to_last_success_secs
-            && window > 0.0
-            && v.successful > 0
+        // Throughput: compute on a common clock.
+        // absolute_execution = submit_time_ms/1000 + executed_secs (both relative to test start).
         {
-            let throughput = v.successful as f64 / window;
-            println!("  throughput       {throughput:.2} tx/s");
+            let mut abs_times: Vec<f64> = report
+                .transactions
+                .iter()
+                .filter_map(|t| {
+                    let exec = t.amplifier_timing.as_ref()?.executed_secs?;
+                    Some(t.submit_time_ms as f64 / 1000.0 + exec)
+                })
+                .collect();
+            abs_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let n = abs_times.len();
+            if n > 1 {
+                let first = abs_times[0];
+                let last = abs_times[n - 1];
+                let window = last - first;
+                if window > 0.0 {
+                    let throughput = n as f64 / window;
+                    println!("  throughput       {throughput:.1} tx/s");
+
+                    // Percentile throughputs: rate up to pN excluding the slowest tail.
+                    for (label, pct) in [("p50", 0.50), ("p90", 0.90), ("p99", 0.99)] {
+                        let idx = ((n as f64 * pct) as usize).min(n - 1);
+                        let p_window = abs_times[idx] - first;
+                        if p_window > 0.0 {
+                            let p_tp = (idx + 1) as f64 / p_window;
+                            println!("    {label}            {p_tp:.1} tx/s");
+                        }
+                    }
+                }
+            }
         }
 
         // Segment breakdown — show step duration + cumulative total.
@@ -1038,16 +1112,17 @@ fn print_final_report(report: &LoadTestReport) {
                 "  stuck            {}/{} ({:.1}%) \u{2014} {}",
                 v.stuck,
                 v.total_verified,
-                if v.total_verified > 0 { v.stuck as f64 / v.total_verified as f64 * 100.0 } else { 0.0 },
+                if v.total_verified > 0 {
+                    v.stuck as f64 / v.total_verified as f64 * 100.0
+                } else {
+                    0.0
+                },
                 stuck_detail.join(", "),
             );
         }
 
         // Failures
-        println!(
-            "  failures         {}",
-            v.failed - v.stuck,
-        );
+        println!("  failures         {}", v.failed - v.stuck,);
         for cat in &v.failure_reasons {
             if !cat.reason.contains("timed out") {
                 println!("                   {} \u{00d7} {}", cat.count, cat.reason);
