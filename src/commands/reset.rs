@@ -34,37 +34,42 @@ pub fn run(axelar_id: Option<String>) -> Result<()> {
     let mut root: Value = serde_json::from_str(&content)?;
 
     if let Some(chains) = root.get_mut("chains").and_then(|v| v.as_object_mut())
-        && chains.remove(&axelar_id).is_some() {
-            ui::info(&format!("removed chains.{axelar_id}"));
-        }
+        && chains.remove(&axelar_id).is_some()
+    {
+        ui::info(&format!("removed chains.{axelar_id}"));
+    }
 
     if let Some(vv) = root
         .pointer_mut("/axelar/contracts/VotingVerifier")
         .and_then(|v| v.as_object_mut())
-        && vv.remove(&axelar_id).is_some() {
-            ui::info(&format!("removed VotingVerifier.{axelar_id}"));
-        }
+        && vv.remove(&axelar_id).is_some()
+    {
+        ui::info(&format!("removed VotingVerifier.{axelar_id}"));
+    }
 
     if let Some(mp) = root
         .pointer_mut("/axelar/contracts/MultisigProver")
         .and_then(|v| v.as_object_mut())
-        && mp.remove(&axelar_id).is_some() {
-            ui::info(&format!("removed MultisigProver.{axelar_id}"));
-        }
+        && mp.remove(&axelar_id).is_some()
+    {
+        ui::info(&format!("removed MultisigProver.{axelar_id}"));
+    }
 
     if let Some(gw) = root
         .pointer_mut("/axelar/contracts/Gateway")
         .and_then(|v| v.as_object_mut())
-        && gw.remove(&axelar_id).is_some() {
-            ui::info(&format!("removed Gateway.{axelar_id}"));
-        }
+        && gw.remove(&axelar_id).is_some()
+    {
+        ui::info(&format!("removed Gateway.{axelar_id}"));
+    }
 
     if let Some(deployments) = root
         .pointer_mut("/axelar/contracts/Coordinator/deployments")
         .and_then(|v| v.as_object_mut())
-        && deployments.remove(&axelar_id).is_some() {
-            ui::info(&format!("removed Coordinator.deployments.{axelar_id}"));
-        }
+        && deployments.remove(&axelar_id).is_some()
+    {
+        ui::info(&format!("removed Coordinator.deployments.{axelar_id}"));
+    }
 
     fs::write(&target_json, serde_json::to_string_pretty(&root)? + "\n")?;
     ui::success(&format!("cleaned up {}", target_json.display()));

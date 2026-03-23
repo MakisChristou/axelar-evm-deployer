@@ -14,15 +14,16 @@ pub fn extract_poll_id(tx_resp: &serde_json::Value) -> Option<String> {
     for event in events {
         let event_type = event["type"].as_str().unwrap_or("");
         if (event_type == "wasm" || event_type.starts_with("wasm-"))
-            && let Some(attrs) = event["attributes"].as_array() {
-                for attr in attrs {
-                    let key = attr["key"].as_str().unwrap_or("");
-                    if key == "poll_id" {
-                        let val = attr["value"].as_str()?;
-                        return Some(val.trim_matches('"').to_string());
-                    }
+            && let Some(attrs) = event["attributes"].as_array()
+        {
+            for attr in attrs {
+                let key = attr["key"].as_str().unwrap_or("");
+                if key == "poll_id" {
+                    let val = attr["value"].as_str()?;
+                    return Some(val.trim_matches('"').to_string());
                 }
             }
+        }
     }
 
     None
@@ -38,17 +39,18 @@ pub fn extract_event_attr(tx_resp: &serde_json::Value, attr_name: &str) -> Resul
     for event in events {
         let event_type = event["type"].as_str().unwrap_or("");
         if (event_type == "wasm" || event_type.starts_with("wasm-"))
-            && let Some(attrs) = event["attributes"].as_array() {
-                for attr in attrs {
-                    let key = attr["key"].as_str().unwrap_or("");
-                    if key == attr_name {
-                        let val = attr["value"]
-                            .as_str()
-                            .ok_or_else(|| eyre::eyre!("{attr_name} attribute has no value"))?;
-                        return Ok(val.trim_matches('"').to_string());
-                    }
+            && let Some(attrs) = event["attributes"].as_array()
+        {
+            for attr in attrs {
+                let key = attr["key"].as_str().unwrap_or("");
+                if key == attr_name {
+                    let val = attr["value"]
+                        .as_str()
+                        .ok_or_else(|| eyre::eyre!("{attr_name} attribute has no value"))?;
+                    return Ok(val.trim_matches('"').to_string());
                 }
             }
+        }
     }
 
     Err(eyre::eyre!("{attr_name} not found in tx events"))
@@ -107,38 +109,39 @@ pub async fn wait_for_poll_votes(lcd: &str, voting_verifier: &str, poll_id: &str
         let expires_at: u64 = poll["expires_at"].as_u64().unwrap_or(0);
 
         if let Some(tallies) = poll["tallies"].as_array()
-            && let Some(tally) = tallies.first() {
-                let succeeded: u64 = tally["SucceededOnChain"]
-                    .as_str()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0);
-                let failed: u64 = tally["FailedOnChain"]
-                    .as_str()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0);
-                let not_found: u64 = tally["NotFound"]
-                    .as_str()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0);
+            && let Some(tally) = tallies.first()
+        {
+            let succeeded: u64 = tally["SucceededOnChain"]
+                .as_str()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            let failed: u64 = tally["FailedOnChain"]
+                .as_str()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            let not_found: u64 = tally["NotFound"]
+                .as_str()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
 
-                spinner.set_message(format!(
+            spinner.set_message(format!(
                     "votes: ok={succeeded} fail={failed} notfound={not_found} (quorum={quorum}, expires={expires_at}, finished={finished})"
                 ));
 
-                if quorum > 0 && failed >= quorum {
-                    spinner.finish_and_clear();
-                    return Err(eyre::eyre!("poll failed: {failed} FailedOnChain votes"));
-                }
-                if quorum > 0 && not_found >= quorum {
-                    spinner.finish_and_clear();
-                    return Err(eyre::eyre!("poll failed: {not_found} NotFound votes"));
-                }
-                if quorum > 0 && succeeded >= quorum {
-                    spinner.finish_and_clear();
-                    ui::success(&format!("quorum reached ({succeeded}/{quorum})"));
-                    return Ok(());
-                }
+            if quorum > 0 && failed >= quorum {
+                spinner.finish_and_clear();
+                return Err(eyre::eyre!("poll failed: {failed} FailedOnChain votes"));
             }
+            if quorum > 0 && not_found >= quorum {
+                spinner.finish_and_clear();
+                return Err(eyre::eyre!("poll failed: {not_found} NotFound votes"));
+            }
+            if quorum > 0 && succeeded >= quorum {
+                spinner.finish_and_clear();
+                ui::success(&format!("quorum reached ({succeeded}/{quorum})"));
+                return Ok(());
+            }
+        }
     }
 
     spinner.finish_and_clear();

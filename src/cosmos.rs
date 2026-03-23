@@ -76,9 +76,10 @@ pub async fn lcd_simulate_tx(lcd: &str, tx_bytes: &[u8]) -> Result<u64> {
         .json()
         .await?;
     if let Some(err) = resp.get("message").and_then(|v| v.as_str())
-        && !err.is_empty() {
-            return Err(eyre::eyre!("simulation failed: {err}"));
-        }
+        && !err.is_empty()
+    {
+        return Err(eyre::eyre!("simulation failed: {err}"));
+    }
     let gas_used: u64 = resp
         .pointer("/gas_info/gas_used")
         .and_then(|v| v.as_str())
@@ -381,15 +382,16 @@ pub fn extract_proposal_id(tx_resp: &Value) -> Result<u64> {
     for event in events {
         let event_type = event["type"].as_str().unwrap_or("");
         if (event_type == "submit_proposal" || event_type == "proposal_submitted")
-            && let Some(attrs) = event["attributes"].as_array() {
-                for attr in attrs {
-                    let key = attr["key"].as_str().unwrap_or("");
-                    if key == "proposal_id" {
-                        let val = attr["value"].as_str().unwrap_or("0");
-                        return Ok(val.parse()?);
-                    }
+            && let Some(attrs) = event["attributes"].as_array()
+        {
+            for attr in attrs {
+                let key = attr["key"].as_str().unwrap_or("");
+                if key == "proposal_id" {
+                    let val = attr["value"].as_str().unwrap_or("0");
+                    return Ok(val.parse()?);
                 }
             }
+        }
     }
     Err(eyre::eyre!("proposal_id not found in tx events"))
 }
@@ -455,9 +457,7 @@ pub fn read_axelar_rpc(target_json: &Path) -> Result<String> {
 /// Query Tendermint RPC `tx_search` for a single event key/value pair.
 /// Returns the parsed JSON response.
 pub async fn rpc_tx_search_event(rpc: &str, event_key: &str, event_value: &str) -> Result<Value> {
-    let url = format!(
-        "{rpc}/tx_search?query=\"{event_key}='{event_value}'\"&per_page=1"
-    );
+    let url = format!("{rpc}/tx_search?query=\"{event_key}='{event_value}'\"&per_page=1");
     let resp = reqwest::get(&url).await?.json::<Value>().await?;
     Ok(resp)
 }

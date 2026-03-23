@@ -1,11 +1,11 @@
 pub mod config_edit;
-pub mod evm_compat;
 pub mod cosmos_poll;
 pub mod cosmos_query;
 pub mod cosmos_tx;
 pub mod deploy_gateway;
 pub mod deploy_its;
 pub mod deploy_upgradable;
+pub mod evm_compat;
 pub mod evm_deploy;
 pub mod predict_address;
 pub mod register_operators;

@@ -1008,10 +1008,18 @@ fn print_final_report(report: &LoadTestReport) {
         {
             let p = &v.peak_throughput;
             let mut parts = Vec::new();
-            if let Some(t) = p.voted_tps { parts.push(("voted", t)); }
-            if let Some(t) = p.routed_tps { parts.push(("routed", t)); }
-            if let Some(t) = p.approved_tps { parts.push(("approved", t)); }
-            if let Some(t) = p.executed_tps { parts.push(("executed", t)); }
+            if let Some(t) = p.voted_tps {
+                parts.push(("voted", t));
+            }
+            if let Some(t) = p.routed_tps {
+                parts.push(("routed", t));
+            }
+            if let Some(t) = p.approved_tps {
+                parts.push(("approved", t));
+            }
+            if let Some(t) = p.executed_tps {
+                parts.push(("executed", t));
+            }
             if !parts.is_empty() {
                 println!("  throughput (sustained, tx/s)");
                 for (name, rate) in &parts {

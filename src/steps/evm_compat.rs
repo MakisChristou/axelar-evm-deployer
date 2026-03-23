@@ -47,13 +47,25 @@ struct Check {
 
 impl Check {
     fn pass(name: &'static str, critical: bool, detail: String) -> Self {
-        Self { name, critical, outcome: CheckOutcome::Pass(detail) }
+        Self {
+            name,
+            critical,
+            outcome: CheckOutcome::Pass(detail),
+        }
     }
     fn fail(name: &'static str, critical: bool, detail: String) -> Self {
-        Self { name, critical, outcome: CheckOutcome::Fail(detail) }
+        Self {
+            name,
+            critical,
+            outcome: CheckOutcome::Fail(detail),
+        }
     }
     fn warn(name: &'static str, detail: String) -> Self {
-        Self { name, critical: false, outcome: CheckOutcome::Warn(detail) }
+        Self {
+            name,
+            critical: false,
+            outcome: CheckOutcome::Warn(detail),
+        }
     }
 }
 
@@ -146,7 +158,11 @@ pub async fn run(ctx: &DeployContext, private_key: &str) -> Result<()> {
                     ));
                 }
             } else {
-                checks.push(Check::pass("eth_chainId", true, format!("{id} (no expected value in state)")));
+                checks.push(Check::pass(
+                    "eth_chainId",
+                    true,
+                    format!("{id} (no expected value in state)"),
+                ));
             }
         }
         Err(e) => checks.push(Check::fail("eth_chainId", true, format!("{e}"))),
@@ -249,11 +265,7 @@ pub async fn run(ctx: &DeployContext, private_key: &str) -> Result<()> {
     // 6. eth_gasPrice
     match provider.get_gas_price().await {
         Ok(price) if price > 0 => {
-            checks.push(Check::pass(
-                "eth_gasPrice",
-                true,
-                format!("{price} wei"),
-            ));
+            checks.push(Check::pass("eth_gasPrice", true, format!("{price} wei")));
         }
         Ok(price) => checks.push(Check::fail(
             "eth_gasPrice",
@@ -265,11 +277,7 @@ pub async fn run(ctx: &DeployContext, private_key: &str) -> Result<()> {
 
     // 7. eth_getBalance
     match provider.get_balance(deployer_addr).await {
-        Ok(bal) => checks.push(Check::pass(
-            "eth_getBalance",
-            true,
-            format!("{bal} wei"),
-        )),
+        Ok(bal) => checks.push(Check::pass("eth_getBalance", true, format!("{bal} wei"))),
         Err(e) => checks.push(Check::fail("eth_getBalance", true, format!("{e}"))),
     }
 
@@ -280,11 +288,7 @@ pub async fn run(ctx: &DeployContext, private_key: &str) -> Result<()> {
             true,
             format!("nonce {count}"),
         )),
-        Err(e) => checks.push(Check::fail(
-            "eth_getTransactionCount",
-            true,
-            format!("{e}"),
-        )),
+        Err(e) => checks.push(Check::fail("eth_getTransactionCount", true, format!("{e}"))),
     }
 
     // 9. eth_feeHistory
@@ -403,11 +407,7 @@ pub async fn run(ctx: &DeployContext, private_key: &str) -> Result<()> {
                     format!("{} bytes", code.len()),
                 ));
             }
-            Ok(_) => phase2_checks.push(Check::fail(
-                "eth_getCode",
-                true,
-                "empty bytecode".into(),
-            )),
+            Ok(_) => phase2_checks.push(Check::fail("eth_getCode", true, "empty bytecode".into())),
             Err(e) => phase2_checks.push(Check::fail("eth_getCode", true, format!("{e}"))),
         }
 
@@ -428,11 +428,7 @@ pub async fn run(ctx: &DeployContext, private_key: &str) -> Result<()> {
                     ));
                 }
             }
-            Err(e) => phase2_checks.push(Check::fail(
-                "eth_call(getValue)",
-                true,
-                format!("{e}"),
-            )),
+            Err(e) => phase2_checks.push(Check::fail("eth_call(getValue)", true, format!("{e}"))),
         }
 
         // 13. eth_estimateGas for updateValue(42)
@@ -443,11 +439,7 @@ pub async fn run(ctx: &DeployContext, private_key: &str) -> Result<()> {
         match provider.estimate_gas(estimate_tx).await {
             Ok(gas) => {
                 if gas > 0 && gas < 100_000 {
-                    phase2_checks.push(Check::pass(
-                        "eth_estimateGas",
-                        true,
-                        format!("{gas} gas"),
-                    ));
+                    phase2_checks.push(Check::pass("eth_estimateGas", true, format!("{gas} gas")));
                 } else {
                     phase2_checks.push(Check::fail(
                         "eth_estimateGas",
@@ -456,11 +448,7 @@ pub async fn run(ctx: &DeployContext, private_key: &str) -> Result<()> {
                     ));
                 }
             }
-            Err(e) => phase2_checks.push(Check::fail(
-                "eth_estimateGas",
-                true,
-                format!("{e}"),
-            )),
+            Err(e) => phase2_checks.push(Check::fail("eth_estimateGas", true, format!("{e}"))),
         }
 
         // 14. Send updateValue(42) tx
@@ -517,11 +505,9 @@ pub async fn run(ctx: &DeployContext, private_key: &str) -> Result<()> {
                     ));
                 }
             }
-            Err(e) => phase2_checks.push(Check::fail(
-                "eth_call(getValue=42)",
-                true,
-                format!("{e}"),
-            )),
+            Err(e) => {
+                phase2_checks.push(Check::fail("eth_call(getValue=42)", true, format!("{e}")))
+            }
         }
 
         // 16. eth_getTransactionByHash
@@ -642,11 +628,9 @@ pub async fn run(ctx: &DeployContext, private_key: &str) -> Result<()> {
                     ));
                 }
             }
-            Err(e) => phase3_checks.push(Check::fail(
-                "eth_getLogs(addr+range)",
-                true,
-                format!("{e}"),
-            )),
+            Err(e) => {
+                phase3_checks.push(Check::fail("eth_getLogs(addr+range)", true, format!("{e}")))
+            }
         }
 
         // 19. logIndex consistency
@@ -715,40 +699,41 @@ pub async fn run(ctx: &DeployContext, private_key: &str) -> Result<()> {
 
     // 21. Parent hash validation
     if let Some(bn) = block_number
-        && bn >= 2 {
-            match provider
-                .get_block_by_number(BlockNumberOrTag::Number(bn))
-                .await
-            {
-                Ok(Some(block)) => {
-                    let parent_hash = block.header.parent_hash;
-                    match provider.get_block_by_hash(parent_hash).await {
-                        Ok(Some(parent)) => {
-                            if parent.header.hash == parent_hash {
-                                optional_checks.push(Check::pass(
-                                    "parent hash validation",
-                                    false,
-                                    "consistent".into(),
-                                ));
-                            } else {
-                                optional_checks.push(Check::warn(
-                                    "parent hash validation",
-                                    "hash mismatch".into(),
-                                ));
-                            }
+        && bn >= 2
+    {
+        match provider
+            .get_block_by_number(BlockNumberOrTag::Number(bn))
+            .await
+        {
+            Ok(Some(block)) => {
+                let parent_hash = block.header.parent_hash;
+                match provider.get_block_by_hash(parent_hash).await {
+                    Ok(Some(parent)) => {
+                        if parent.header.hash == parent_hash {
+                            optional_checks.push(Check::pass(
+                                "parent hash validation",
+                                false,
+                                "consistent".into(),
+                            ));
+                        } else {
+                            optional_checks.push(Check::warn(
+                                "parent hash validation",
+                                "hash mismatch".into(),
+                            ));
                         }
-                        _ => optional_checks.push(Check::warn(
-                            "parent hash validation",
-                            "could not fetch parent block".into(),
-                        )),
                     }
+                    _ => optional_checks.push(Check::warn(
+                        "parent hash validation",
+                        "could not fetch parent block".into(),
+                    )),
                 }
-                _ => optional_checks.push(Check::warn(
-                    "parent hash validation",
-                    "could not fetch block".into(),
-                )),
             }
+            _ => optional_checks.push(Check::warn(
+                "parent hash validation",
+                "could not fetch block".into(),
+            )),
         }
+    }
 
     print_checks(&optional_checks);
     checks.extend(optional_checks);

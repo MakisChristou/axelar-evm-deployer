@@ -6,7 +6,7 @@ use solana_sdk::{
     instruction::{AccountMeta, Instruction},
     message::Message,
     pubkey::Pubkey,
-    signature::{read_keypair_file, Keypair, Signature},
+    signature::{Keypair, Signature, read_keypair_file},
     signer::Signer,
     transaction::Transaction,
 };
@@ -132,11 +132,9 @@ pub fn send_call_contract(
     let pay_gas_ix = {
         let payload_hash: [u8; 32] = solana_sdk::keccak::hash(payload).to_bytes();
         let treasury_pda = solana_axelar_gas_service::Treasury::find_pda().0;
-        let gas_event_authority = Pubkey::find_program_address(
-            &[b"__event_authority"],
-            &solana_axelar_gas_service::id(),
-        )
-        .0;
+        let gas_event_authority =
+            Pubkey::find_program_address(&[b"__event_authority"], &solana_axelar_gas_service::id())
+                .0;
 
         let pay_gas_data = solana_axelar_gas_service::instruction::PayGas {
             destination_chain: destination_chain.to_string(),
@@ -209,9 +207,13 @@ pub fn send_call_contract(
 /// When a `pay_gas` instruction is prepended (non-devnet), call_contract is at index 2.
 pub fn solana_call_contract_index() -> u8 {
     #[cfg(not(feature = "devnet-amplifier"))]
-    { 2 }
+    {
+        2
+    }
     #[cfg(feature = "devnet-amplifier")]
-    { 1 }
+    {
+        1
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -268,7 +270,10 @@ pub fn send_its_deploy_interchain_token(
     let accounts = vec![
         AccountMeta::new(fee_payer, true),
         AccountMeta::new_readonly(deployer, true),
-        AccountMeta::new_readonly(Pubkey::from_str_const("11111111111111111111111111111111"), false),
+        AccountMeta::new_readonly(
+            Pubkey::from_str_const("11111111111111111111111111111111"),
+            false,
+        ),
         AccountMeta::new_readonly(its_root_pda, false),
         AccountMeta::new(token_manager_pda, false),
         AccountMeta::new(mint, false),
@@ -356,7 +361,10 @@ pub fn send_its_deploy_remote_interchain_token(
         AccountMeta::new_readonly(token_manager_pda, false),
         AccountMeta::new_readonly(gateway_root_pda, false),
         AccountMeta::new_readonly(gateway_program, false),
-        AccountMeta::new_readonly(Pubkey::from_str_const("11111111111111111111111111111111"), false),
+        AccountMeta::new_readonly(
+            Pubkey::from_str_const("11111111111111111111111111111111"),
+            false,
+        ),
         AccountMeta::new_readonly(its_root_pda, false),
         AccountMeta::new_readonly(call_contract_signing_pda, false),
         AccountMeta::new_readonly(gateway_event_authority, false),
@@ -444,7 +452,10 @@ pub fn send_its_interchain_transfer(
         AccountMeta::new(*mint, false),
         AccountMeta::new(*source_account, false),
         AccountMeta::new(token_manager_ata, false),
-        AccountMeta::new_readonly(Pubkey::from_str_const("11111111111111111111111111111111"), false),
+        AccountMeta::new_readonly(
+            Pubkey::from_str_const("11111111111111111111111111111111"),
+            false,
+        ),
         AccountMeta::new_readonly(event_authority, false),
         AccountMeta::new_readonly(solana_axelar_its::id(), false),
     ];

@@ -262,16 +262,17 @@ pub fn decode_revert_data(hex_str: &str) -> String {
         "f9188a68" => "UntrustedChain() — destination chain not trusted by ITS".into(),
         "08c379a0" => {
             if let Ok(bytes) = hex::decode(hex_data)
-                && bytes.len() > 4 + 32 + 32 {
-                    let offset = 4 + 32;
-                    let len = u32::from_be_bytes(
-                        bytes[offset + 28..offset + 32].try_into().unwrap_or([0; 4]),
-                    ) as usize;
-                    let str_start = offset + 32;
-                    let str_end = (str_start + len).min(bytes.len());
-                    let msg = String::from_utf8_lossy(&bytes[str_start..str_end]);
-                    return format!("revert: \"{msg}\"");
-                }
+                && bytes.len() > 4 + 32 + 32
+            {
+                let offset = 4 + 32;
+                let len = u32::from_be_bytes(
+                    bytes[offset + 28..offset + 32].try_into().unwrap_or([0; 4]),
+                ) as usize;
+                let str_start = offset + 32;
+                let str_end = (str_start + len).min(bytes.len());
+                let msg = String::from_utf8_lossy(&bytes[str_start..str_end]);
+                return format!("revert: \"{msg}\"");
+            }
             format!("Error(string) — data: 0x{hex_data}")
         }
         _ => format!("unknown error selector 0x{selector} (data: 0x{hex_data})"),
