@@ -22,7 +22,7 @@ use crate::ui;
 
 /// If no transaction completes a phase for this long, we stop waiting.
 /// Resets every time a tx makes progress, so large batches naturally get more time.
-const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(200);
+const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(60);
 /// Delay between poll attempts.
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -531,11 +531,8 @@ async fn poll_pipeline<P: Provider>(
             }
         }
 
-        // Dynamic timeout: base 200s + 1s per pending tx so large batches get
-        // enough time for the relayer to drain the queue.
-        let pending = active.len() as u64;
-        let dynamic_timeout = INACTIVITY_TIMEOUT + Duration::from_secs(pending);
-        if last_progress.elapsed() >= dynamic_timeout && sending_complete {
+        // If no tx has made progress for INACTIVITY_TIMEOUT (60s), stop waiting.
+        if last_progress.elapsed() >= INACTIVITY_TIMEOUT && sending_complete {
             break;
         }
         tokio::time::sleep(POLL_INTERVAL).await;
@@ -929,9 +926,7 @@ async fn poll_pipeline_its_hub(
             }
         }
 
-        let pending = active.len() as u64;
-        let dynamic_timeout = INACTIVITY_TIMEOUT + Duration::from_secs(pending);
-        if last_progress.elapsed() >= dynamic_timeout {
+        if last_progress.elapsed() >= INACTIVITY_TIMEOUT {
             break;
         }
         tokio::time::sleep(POLL_INTERVAL).await;
@@ -1784,9 +1779,7 @@ async fn poll_pipeline_its_hub_evm<P: Provider>(
             }
         }
 
-        let pending = active.len() as u64;
-        let dynamic_timeout = INACTIVITY_TIMEOUT + Duration::from_secs(pending);
-        if last_progress.elapsed() >= dynamic_timeout {
+        if last_progress.elapsed() >= INACTIVITY_TIMEOUT {
             break;
         }
         tokio::time::sleep(POLL_INTERVAL).await;

@@ -44,7 +44,7 @@ fn default_gas_value_wei(_source_chain: &str) -> u128 {
 #[cfg(not(feature = "devnet-amplifier"))]
 fn default_gas_value_wei(source_chain: &str) -> u128 {
     if source_chain.starts_with("flow") {
-        200_000_000_000_000_000 // 0.2 FLOW
+        400_000_000_000_000_000 // 0.4 FLOW
     } else {
         20_000_000_000_000_000 // 0.02 ETH
     }
