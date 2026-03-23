@@ -289,9 +289,10 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     if !burst_mode {
         let tps = args.tps.unwrap() as usize;
         let duration_secs = args.duration_secs.unwrap();
+        let key_cycle = args.key_cycle as usize;
         let rpc_url_str = evm_rpc_url.clone();
 
-        // Pre-fetch nonces for all pool keys to avoid RPC "pending" unreliability.
+        // Pre-fetch nonces.
         let nonce_provider = ProviderBuilder::new().connect_http(evm_rpc_url.parse()?);
         let mut nonces: Vec<u64> = Vec::with_capacity(num_keys);
         for signer in &derived {
@@ -301,41 +302,14 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
             nonces.push(n);
         }
 
-        let metrics_list_s: Arc<Mutex<Vec<TxMetrics>>> = Arc::new(Mutex::new(Vec::new()));
-        let src_confirmed_s = Arc::new(AtomicU64::new(0));
-        let src_failed_s = Arc::new(AtomicU64::new(0));
-        let fired_ctr = Arc::new(AtomicU64::new(0));
-
         let spinner = ui::wait_spinner(&format!(
             "[0/{duration_secs}s] starting sustained ITS send..."
         ));
         let test_start = Instant::now();
-
         let dest_chain_s = dest.to_string();
 
-        let mut all_tasks_s: Vec<tokio::task::JoinHandle<()>> =
-            Vec::with_capacity(total_expected as usize);
-        let mut interval = tokio::time::interval(Duration::from_secs(1));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
-        let mut tick: u64 = 0;
-        loop {
-            interval.tick().await;
-            if tick >= duration_secs {
-                break;
-            }
-
-            let batch_start = (tick as usize % args.key_cycle as usize) * tps;
-            for i in 0..tps {
-                let key_idx = batch_start + i;
-
-                let nonce = nonces[key_idx];
-                nonces[key_idx] += 1;
-
-                let metrics_clone = Arc::clone(&metrics_list_s);
-                let confirmed_ctr = Arc::clone(&src_confirmed_s);
-                let failed_ctr = Arc::clone(&src_failed_s);
-                let fired = Arc::clone(&fired_ctr);
+        let make_task: super::sustained::MakeTask =
+            Box::new(move |key_idx: usize, nonce: Option<u64>| {
                 let dc = dest_chain_s.clone();
                 let gv = gas_value;
                 let rb = receiver_bytes.clone();
@@ -346,136 +320,35 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
 
                 let provider = ProviderBuilder::new()
                     .wallet(derived[key_idx].clone())
-                    .connect_http(url.parse()?);
+                    .connect_http(url.parse().expect("invalid RPC URL"));
 
-                fired.fetch_add(1, Ordering::Relaxed);
-
-                let handle = tokio::spawn(async move {
-                    let result = execute_interchain_transfer(
-                        &provider,
-                        its_proxy,
-                        tid,
-                        &dc,
-                        &rb,
-                        amt,
-                        gv,
-                        Some(nonce),
+                Box::pin(async move {
+                    execute_interchain_transfer(
+                        &provider, its_proxy, tid, &dc, &rb, amt, gv, nonce,
                     )
-                    .await;
-                    if result.success {
-                        confirmed_ctr.fetch_add(1, Ordering::Relaxed);
-                    } else {
-                        failed_ctr.fetch_add(1, Ordering::Relaxed);
-                    }
-                    metrics_clone.lock().await.push(result);
-                });
-                all_tasks_s.push(handle);
-            }
-
-            let elapsed_s = test_start.elapsed().as_secs();
-            let f = fired_ctr.load(Ordering::Relaxed);
-            let c = src_confirmed_s.load(Ordering::Relaxed);
-            let fail = src_failed_s.load(Ordering::Relaxed);
-            spinner.set_message(format!(
-                "[{elapsed_s}/{duration_secs}s]  fired: {f}/{total_expected}  src-confirmed: {c}  failed: {fail}  (target: {tps} tx/s)"
-            ));
-            tick += 1;
-        }
-
-        let total_submitted_s = all_tasks_s.len() as u64;
-        {
-            let sp = spinner.clone();
-            let confirmed_c = Arc::clone(&src_confirmed_s);
-            let failed_c = Arc::clone(&src_failed_s);
-            let total = total_submitted_s;
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(Duration::from_secs(1));
-                loop {
-                    interval.tick().await;
-                    let c = confirmed_c.load(Ordering::Relaxed);
-                    let f = failed_c.load(Ordering::Relaxed);
-                    let in_flight = total.saturating_sub(c + f);
-                    sp.set_message(format!(
-                        "waiting for receipts: {c} confirmed  {f} failed  {in_flight} in-flight"
-                    ));
-                    if in_flight == 0 {
-                        break;
-                    }
-                }
+                    .await
+                })
             });
-        }
-        join_all(all_tasks_s).await;
 
-        let test_duration_s = test_start.elapsed().as_secs_f64();
-        let confirmed_count_s = src_confirmed_s.load(Ordering::Relaxed);
-        spinner.finish_and_clear();
-        ui::success(&format!(
-            "send phase complete: {confirmed_count_s}/{total_submitted_s} src-confirmed in {test_duration_s:.1}s"
-        ));
+        let result = super::sustained::run_sustained_loop(
+            tps,
+            duration_secs,
+            key_cycle,
+            Some(nonces),
+            make_task,
+            None,
+            spinner,
+        )
+        .await;
 
-        let metrics_s = metrics_list_s.lock().await.clone();
-        let total_confirmed_s = metrics_s.iter().filter(|m| m.success).count() as u64;
-        let total_failed_s = metrics_s.iter().filter(|m| !m.success).count() as u64;
-
-        if total_failed_s > 0 {
-            let mut error_counts: std::collections::HashMap<String, u64> =
-                std::collections::HashMap::new();
-            for m in metrics_s.iter().filter(|m| !m.success) {
-                let reason = m
-                    .error
-                    .as_deref()
-                    .unwrap_or("unknown")
-                    .chars()
-                    .take(120)
-                    .collect::<String>();
-                *error_counts.entry(reason).or_default() += 1;
-            }
-            for (reason, count) in &error_counts {
-                ui::warn(&format!("{count} txs failed: {reason}"));
-            }
-        }
-
-        let latencies_s: Vec<u64> = metrics_s.iter().filter_map(|m| m.latency_ms).collect();
-
-        #[allow(clippy::cast_precision_loss, clippy::float_arithmetic)]
-        let mut report = LoadTestReport {
-            source_chain: src.to_string(),
-            destination_chain: dest.to_string(),
-            destination_address: format!("{its_proxy_addr}"),
-            num_txs: total_expected,
+        let mut report = super::sustained::build_sustained_report(
+            result,
+            src,
+            dest,
+            &format!("{its_proxy_addr}"),
+            total_expected,
             num_keys,
-            total_submitted: total_submitted_s,
-            total_confirmed: total_confirmed_s,
-            total_failed: total_failed_s,
-            test_duration_secs: test_duration_s,
-            tps_submitted: if test_duration_s > 0.0 {
-                total_submitted_s as f64 / test_duration_s
-            } else {
-                0.0
-            },
-            tps_confirmed: if test_duration_s > 0.0 {
-                total_confirmed_s as f64 / test_duration_s
-            } else {
-                0.0
-            },
-            landing_rate: if total_submitted_s > 0 {
-                total_confirmed_s as f64 / total_submitted_s as f64
-            } else {
-                0.0
-            },
-            avg_latency_ms: if latencies_s.is_empty() {
-                None
-            } else {
-                Some(latencies_s.iter().sum::<u64>() as f64 / latencies_s.len() as f64)
-            },
-            min_latency_ms: latencies_s.iter().min().copied(),
-            max_latency_ms: latencies_s.iter().max().copied(),
-            avg_compute_units: None,
-            min_compute_units: None,
-            max_compute_units: None,
-            verification: None,
-            transactions: metrics_s,
-        };
+        );
 
         let verification = super::verify::verify_onchain_solana_its(
             &args.config,

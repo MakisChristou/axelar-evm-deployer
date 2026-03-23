@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use eyre::eyre;
 use futures::future::join_all;
@@ -16,6 +16,7 @@ use rand::Rng;
 use super::LoadTestArgs;
 use super::keypairs;
 use super::metrics::{LoadTestReport, TxMetrics};
+use super::sustained;
 use crate::solana;
 use crate::ui;
 
@@ -250,7 +251,7 @@ fn send_sol_tx(
 }
 
 /// Run Sol->EVM sustained load test at a controlled TPS rate.
-#[allow(clippy::too_many_lines, clippy::float_arithmetic)]
+#[allow(clippy::float_arithmetic)]
 pub async fn run_sustained_load_test_with_metrics(
     args: &LoadTestArgs,
     destination_address: &str,
@@ -290,147 +291,64 @@ pub async fn run_sustained_load_test_with_metrics(
         pool_size, tps, key_cycle
     ));
 
-    // Shared counters
-    let metrics_list: Arc<Mutex<Vec<TxMetrics>>> = Arc::new(Mutex::new(Vec::new()));
-    let src_confirmed = Arc::new(AtomicU64::new(0));
-    let src_failed = Arc::new(AtomicU64::new(0));
-    let fired_ctr = Arc::new(AtomicU64::new(0));
-
     let spinner = ui::wait_spinner(&format!("[0/{duration_secs}s] starting sustained send..."));
-    let test_start = Instant::now();
 
     let dest_chain = args.destination_chain.clone();
     let dest_addr = destination_address.to_string();
     let solana_rpc = args.solana_rpc.clone();
 
-    let mut all_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::with_capacity(total_expected as usize);
-    let mut interval = tokio::time::interval(Duration::from_secs(1));
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
-    let mut tick: u64 = 0;
-    loop {
-        interval.tick().await;
-        if tick >= duration_secs {
-            break;
-        }
-
-        let batch_start = (tick as usize % key_cycle) * tps;
-        for i in 0..tps {
-            let key_idx = batch_start + i;
+    let make_task: sustained::MakeTask =
+        Box::new(move |key_idx: usize, _nonce: Option<u64>| {
             let kp = Arc::clone(&keypairs_pool[key_idx]);
             let tx_payload = make_payload(&payload);
-
-            let metrics_clone = Arc::clone(&metrics_list);
-            let confirmed_ctr = Arc::clone(&src_confirmed);
-            let failed_ctr = Arc::clone(&src_failed);
-            let fired = Arc::clone(&fired_ctr);
             let dc = dest_chain.clone();
             let da = dest_addr.clone();
             let rpc = solana_rpc.clone();
 
-            fired.fetch_add(1, Ordering::Relaxed);
-
-            let handle = tokio::spawn(async move {
-                let result = tokio::task::spawn_blocking(move || {
+            Box::pin(async move {
+                tokio::task::spawn_blocking(move || {
                     send_sol_tx(&rpc, kp.as_ref(), &dc, &da, &tx_payload)
-                }).await.unwrap_or_else(|e| {
-                    #[allow(clippy::cast_possible_truncation)]
-                    TxMetrics {
-                        signature: String::new(),
-                        submit_time_ms: 0,
-                        confirm_time_ms: None,
-                        latency_ms: None,
-                        compute_units: None,
-                        slot: None,
-                        success: false,
-                        error: Some(format!("task panicked: {e}")),
-                        payload: Vec::new(),
-                        payload_hash: String::new(),
-                        source_address: String::new(),
-                        gmp_destination_chain: String::new(),
-                        gmp_destination_address: String::new(),
-                        send_instant: None,
-                        amplifier_timing: None,
-                    }
-                });
-                if result.success {
-                    confirmed_ctr.fetch_add(1, Ordering::Relaxed);
-                } else {
-                    failed_ctr.fetch_add(1, Ordering::Relaxed);
-                }
-                metrics_clone.lock().await.push(result);
-            });
-            all_tasks.push(handle);
-        }
+                })
+                .await
+                .unwrap_or_else(|e| TxMetrics {
+                    signature: String::new(),
+                    submit_time_ms: 0,
+                    confirm_time_ms: None,
+                    latency_ms: None,
+                    compute_units: None,
+                    slot: None,
+                    success: false,
+                    error: Some(format!("task panicked: {e}")),
+                    payload: Vec::new(),
+                    payload_hash: String::new(),
+                    source_address: String::new(),
+                    gmp_destination_chain: String::new(),
+                    gmp_destination_address: String::new(),
+                    send_instant: None,
+                    amplifier_timing: None,
+                })
+            })
+        });
 
-        // Update live display
-        let elapsed_s = test_start.elapsed().as_secs();
-        let f = fired_ctr.load(Ordering::Relaxed);
-        let c = src_confirmed.load(Ordering::Relaxed);
-        let fail = src_failed.load(Ordering::Relaxed);
-        spinner.set_message(format!(
-            "[{elapsed_s}/{duration_secs}s]  fired: {f}/{total_expected}  src-confirmed: {c}  failed: {fail}  (target: {tps} tx/s)"
-        ));
-        tick += 1;
-    }
+    let result = sustained::run_sustained_loop(
+        tps,
+        duration_secs,
+        key_cycle,
+        None,
+        make_task,
+        None,
+        spinner,
+    )
+    .await;
 
-    let total_submitted = all_tasks.len() as u64;
-    spinner.set_message(format!(
-        "waiting for {} in-flight receipts...",
-        total_submitted.saturating_sub(src_confirmed.load(Ordering::Relaxed) + src_failed.load(Ordering::Relaxed))
-    ));
-    join_all(all_tasks).await;
-
-    let test_duration = test_start.elapsed().as_secs_f64();
-    let confirmed_count = src_confirmed.load(Ordering::Relaxed);
-    spinner.finish_and_clear();
-    ui::success(&format!(
-        "send phase complete: {confirmed_count}/{total_submitted} src-confirmed in {test_duration:.1}s"
-    ));
-
-    let metrics = metrics_list.lock().await.clone();
-    let total_confirmed = metrics.iter().filter(|m| m.success).count() as u64;
-    let total_failed = metrics.iter().filter(|m| !m.success).count() as u64;
-
-    if total_failed > 0 {
-        let mut error_counts: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
-        for m in metrics.iter().filter(|m| !m.success) {
-            let reason = m.error.as_deref().unwrap_or("unknown").chars().take(120).collect::<String>();
-            *error_counts.entry(reason).or_default() += 1;
-        }
-        for (reason, count) in &error_counts {
-            ui::warn(&format!("{count} txs failed: {reason}"));
-        }
-    }
-
-    let latencies: Vec<u64> = metrics.iter().filter_map(|m| m.latency_ms).collect();
-    let compute_units: Vec<u64> = metrics.iter().filter_map(|m| m.compute_units).collect();
-
-    #[allow(clippy::cast_precision_loss)]
-    let report = LoadTestReport {
-        source_chain: args.source_chain.clone(),
-        destination_chain: args.destination_chain.clone(),
-        destination_address: destination_address.to_string(),
-        num_txs: total_expected,
-        num_keys: pool_size,
-        total_submitted,
-        total_confirmed,
-        total_failed,
-        test_duration_secs: test_duration,
-        tps_submitted: if test_duration > 0.0 { total_submitted as f64 / test_duration } else { 0.0 },
-        tps_confirmed: if test_duration > 0.0 { total_confirmed as f64 / test_duration } else { 0.0 },
-        landing_rate: if total_submitted > 0 { total_confirmed as f64 / total_submitted as f64 } else { 0.0 },
-        avg_latency_ms: if latencies.is_empty() { None } else { Some(latencies.iter().sum::<u64>() as f64 / latencies.len() as f64) },
-        min_latency_ms: latencies.iter().min().copied(),
-        max_latency_ms: latencies.iter().max().copied(),
-        avg_compute_units: if compute_units.is_empty() { None } else { Some(compute_units.iter().sum::<u64>() as f64 / compute_units.len() as f64) },
-        min_compute_units: compute_units.iter().min().copied(),
-        max_compute_units: compute_units.iter().max().copied(),
-        verification: None,
-        transactions: metrics,
-    };
-
-    Ok(report)
+    Ok(sustained::build_sustained_report(
+        result,
+        &args.source_chain,
+        &args.destination_chain,
+        destination_address,
+        total_expected,
+        pool_size,
+    ))
 }
 
 #[allow(clippy::semicolon_outside_block, clippy::too_many_arguments)]

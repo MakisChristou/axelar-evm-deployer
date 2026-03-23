@@ -16,7 +16,6 @@ use alloy::{
 };
 use eyre::eyre;
 use futures::future::join_all;
-use owo_colors::OwoColorize;
 use rand::Rng;
 use solana_sdk::pubkey::Pubkey;
 use tokio::sync::Mutex;
@@ -372,8 +371,8 @@ async fn execute_and_record_evm<P: Provider>(
 
 /// Run EVM->Sol sustained load test at a controlled TPS rate.
 ///
-/// Uses a rotating pool of `tps * 3` derived wallets, cycling each key every 3 seconds.
-/// Sends `tps` txs per second for `duration_secs` seconds total.
+/// Uses a rotating pool of `tps * key_cycle` derived wallets, cycling keys
+/// every `key_cycle` seconds. Sends `tps` txs per second for `duration_secs`.
 #[allow(clippy::too_many_arguments, clippy::float_arithmetic)]
 pub(super) async fn run_sustained_load_test_with_metrics(
     args: &LoadTestArgs,
@@ -411,36 +410,23 @@ pub(super) async fn run_sustained_load_test_with_metrics(
     ));
 
     // Fund pool keys.
-    // Each key fires once every 3s for the full duration, so it needs gas_value for
-    // ceil(duration_secs / 3) rounds, not just one.
     let main_signer = PrivateKeySigner::from_bytes(&(*main_key).into())
         .map_err(|e| eyre!("invalid main EVM key: {e}"))?;
     let funding_provider = ProviderBuilder::new()
         .wallet(main_signer.clone())
         .connect_http(evm_rpc_url.parse()?);
     let rounds_per_key = duration_secs.div_ceil(key_cycle as u64);
-    // Add 20% buffer for EVM tx gas costs on top of the Axelar gas payment.
     let buffered_rounds = rounds_per_key + rounds_per_key / 5 + 1;
     let gas_total_per_key = gas_value_wei.saturating_mul(buffered_rounds as u128);
     keypairs::ensure_funded_evm_with_extra(&funding_provider, &main_signer, &derived, gas_total_per_key).await?;
 
-    // Pre-fetch initial nonces for every pool key. We track them locally and
-    // pre-allocate before each spawn so the main loop (not the async task)
-    // increments atomically. This avoids nonce collisions when the same key
-    // reuses its slot 3 seconds later and the previous tx is still unconfirmed —
-    // many RPC nodes don't include mempool txs in eth_getTransactionCount("pending").
+    // Pre-fetch initial nonces.
     let nonce_provider = ProviderBuilder::new().connect_http(evm_rpc_url.parse()?);
     let mut nonces: Vec<u64> = Vec::with_capacity(pool_size);
     for signer in &derived {
         let n = nonce_provider.get_transaction_count(signer.address()).await?;
         nonces.push(n);
     }
-
-    // Shared counters
-    let metrics_list: Arc<Mutex<Vec<TxMetrics>>> = Arc::new(Mutex::new(Vec::new()));
-    let src_confirmed = Arc::new(AtomicU64::new(0));
-    let src_failed = Arc::new(AtomicU64::new(0));
-    let fired_ctr = Arc::new(AtomicU64::new(0));
 
     // Create MultiProgress AFTER funding so spinners don't flicker during setup.
     let multi = indicatif::MultiProgress::new();
@@ -456,10 +442,8 @@ pub(super) async fn run_sustained_load_test_with_metrics(
     verify_spinner.set_style(spinner_style);
     verify_spinner.enable_steady_tick(std::time::Duration::from_millis(100));
     verify_spinner.set_message("waiting for first confirmed tx...");
-    // Send verify spinner to the background verify task.
     let _ = verify_spinner_tx.send(verify_spinner);
 
-    let test_start = Instant::now();
     let dest_chain = args.destination_chain.clone();
     let dest_addr = destination_address.to_string();
     let rpc_url_str = evm_rpc_url.to_string();
@@ -468,168 +452,57 @@ pub(super) async fn run_sustained_load_test_with_metrics(
         &format!("/axelar/contracts/VotingVerifier/{}/address", args.source_chain),
     )
     .is_ok();
+    let source_chain = args.source_chain.clone();
 
-    let mut all_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::with_capacity(total_expected as usize);
-    let mut interval = tokio::time::interval(Duration::from_secs(1));
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
-    let mut tick: u64 = 0;
-    loop {
-        interval.tick().await;
-        if tick >= duration_secs {
-            break;
-        }
-
-        let batch_start = (tick as usize % key_cycle) * tps;
-        for i in 0..tps {
-            let key_idx = batch_start + i;
+    let make_task: super::sustained::MakeTask =
+        Box::new(move |key_idx: usize, nonce: Option<u64>| {
             let tx_payload = make_executable_payload(&payload, &counter_pda);
-
-            // Allocate the nonce for this key before spawning. The main loop is
-            // single-threaded here, so this increment is race-free between ticks.
-            let nonce = nonces[key_idx];
-            nonces[key_idx] += 1;
-
-            let metrics_clone = Arc::clone(&metrics_list);
-            let confirmed_ctr = Arc::clone(&src_confirmed);
-            let failed_ctr = Arc::clone(&src_failed);
-            let fired = Arc::clone(&fired_ctr);
             let dc = dest_chain.clone();
             let da = dest_addr.clone();
             let sr = sender_receiver_addr;
             let gv = gas_value_wei;
             let url = rpc_url_str.clone();
             let vtx = verify_tx.clone();
-            let sc = args.source_chain.clone();
+            let sc = source_chain.clone();
             let has_vv = has_voting_verifier;
-
-            fired.fetch_add(1, Ordering::Relaxed);
 
             let provider = ProviderBuilder::new()
                 .wallet(derived[key_idx].clone())
-                .connect_http(url.parse()?);
+                .connect_http(url.parse().expect("invalid RPC URL"));
 
-            let handle = tokio::spawn(async move {
-                let result = execute_and_record_evm(&provider, sr, &dc, &da, &tx_payload, gv, Some(nonce)).await;
-                if result.success {
-                    confirmed_ctr.fetch_add(1, Ordering::Relaxed);
-                } else {
-                    failed_ctr.fetch_add(1, Ordering::Relaxed);
-                }
-                // Lock once: get idx, stream to verify, then push.
-                let mut guard = metrics_clone.lock().await;
-                let idx = guard.len();
+            Box::pin(async move {
+                let result = execute_and_record_evm(&provider, sr, &dc, &da, &tx_payload, gv, nonce).await;
+                // Stream successful txs to the concurrent verification pipeline.
                 if result.success
                     && let Some(ref tx_sender) = vtx {
-                        let pending = super::verify::tx_to_pending_solana(&result, idx, &sc, has_vv);
+                        // Use signature length as a proxy for idx — the verify task
+                        // will overwrite idx from the timings vec anyway.
+                        let pending = super::verify::tx_to_pending_solana(&result, 0, &sc, has_vv);
                         let _ = tx_sender.send(pending);
-                }
-                guard.push(result);
-            });
-            all_tasks.push(handle);
-        }
-
-        // Update live display
-        let elapsed_s = test_start.elapsed().as_secs();
-        let f = fired_ctr.load(Ordering::Relaxed);
-        let c = src_confirmed.load(Ordering::Relaxed);
-        let fail = src_failed.load(Ordering::Relaxed);
-        spinner.set_message(format!(
-            "[{elapsed_s}/{duration_secs}s]  fired: {f}/{total_expected}  src-confirmed: {c}  failed: {fail}  (target: {tps} tx/s)"
-        ));
-        tick += 1;
-    }
-
-    let total_submitted = all_tasks.len() as u64;
-
-    // Spawn a background ticker that updates the spinner every second while
-    // in-flight receipts are still pending, so the user sees live progress.
-    {
-        let sp = spinner.clone();
-        let confirmed_c = Arc::clone(&src_confirmed);
-        let failed_c = Arc::clone(&src_failed);
-        let total = total_submitted;
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(1));
-            loop {
-                interval.tick().await;
-                let c = confirmed_c.load(Ordering::Relaxed);
-                let f = failed_c.load(Ordering::Relaxed);
-                let in_flight = total.saturating_sub(c + f);
-                sp.set_message(format!(
-                    "waiting for receipts: {c} confirmed  {f} failed  {in_flight} in-flight"
-                ));
-                if in_flight == 0 {
-                    break;
-                }
-            }
+                    }
+                result
+            })
         });
-    }
-    join_all(all_tasks).await;
 
-    // Signal the verification pipeline that no more txs are coming.
-    if let Some(ref done) = send_done {
-        done.store(true, Ordering::Relaxed);
-    }
-    // Drop the sender so the verification loop knows the channel is closed.
-    drop(verify_tx);
+    let result = super::sustained::run_sustained_loop(
+        tps,
+        duration_secs,
+        key_cycle,
+        Some(nonces),
+        make_task,
+        send_done,
+        spinner,
+    )
+    .await;
 
-    let test_duration = test_start.elapsed().as_secs_f64();
-    let confirmed_count = src_confirmed.load(Ordering::Relaxed);
-    spinner.finish_and_clear();
-    // Use multi.println() so output doesn't interfere with the still-active verify spinner.
-    let _ = multi.println(format!(
-        "  {} {}",
-        "+".green(),
-        format!("send phase complete: {confirmed_count}/{total_submitted} src-confirmed in {test_duration:.1}s").green()
-    ));
-
-    let metrics = metrics_list.lock().await.clone();
-    let total_confirmed = metrics.iter().filter(|m| m.success).count() as u64;
-    let total_failed = metrics.iter().filter(|m| !m.success).count() as u64;
-
-    if total_failed > 0 {
-        let mut error_counts: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
-        for m in metrics.iter().filter(|m| !m.success) {
-            let reason = m.error.as_deref().unwrap_or("unknown").chars().take(120).collect::<String>();
-            *error_counts.entry(reason).or_default() += 1;
-        }
-        for (reason, count) in &error_counts {
-            let _ = multi.println(format!(
-                "  {} {}",
-                "!".yellow(),
-                format!("{count} txs failed: {reason}").yellow()
-            ));
-        }
-    }
-
-    let latencies: Vec<u64> = metrics.iter().filter_map(|m| m.latency_ms).collect();
-
-    #[allow(clippy::cast_precision_loss)]
-    let report = LoadTestReport {
-        source_chain: args.source_chain.clone(),
-        destination_chain: args.destination_chain.clone(),
-        destination_address: dest_addr,
-        num_txs: total_expected,
-        num_keys: pool_size,
-        total_submitted,
-        total_confirmed,
-        total_failed,
-        test_duration_secs: test_duration,
-        tps_submitted: if test_duration > 0.0 { total_submitted as f64 / test_duration } else { 0.0 },
-        tps_confirmed: if test_duration > 0.0 { total_confirmed as f64 / test_duration } else { 0.0 },
-        landing_rate: if total_submitted > 0 { total_confirmed as f64 / total_submitted as f64 } else { 0.0 },
-        avg_latency_ms: if latencies.is_empty() { None } else { Some(latencies.iter().sum::<u64>() as f64 / latencies.len() as f64) },
-        min_latency_ms: latencies.iter().min().copied(),
-        max_latency_ms: latencies.iter().max().copied(),
-        avg_compute_units: None,
-        min_compute_units: None,
-        max_compute_units: None,
-        verification: None,
-        transactions: metrics,
-    };
-
-    Ok(report)
+    Ok(super::sustained::build_sustained_report(
+        result,
+        &args.source_chain,
+        &args.destination_chain,
+        destination_address,
+        total_expected,
+        pool_size,
+    ))
 }
 
 fn make_failure(submit_start: Instant, error: &str) -> TxMetrics {
