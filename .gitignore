@@ -1,5 +1,6 @@
 /target
 .env
 cache/
-output/.claude/
+output/
+.claude/
 axe-load-test-logs/

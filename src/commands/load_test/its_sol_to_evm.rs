@@ -124,7 +124,6 @@ pub async fn run(mut args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()
         let dur = args.duration_secs.unwrap();
         (tps * args.key_cycle as usize, tps as u64 * dur)
     };
-    let _num_txs = num_keys;
 
     // --- Token setup ---
     let (token_id, _salt, mint) = setup_its_token(
@@ -153,7 +152,7 @@ pub async fn run(mut args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()
     let amount_per_key_dist = if burst_mode {
         AMOUNT_PER_KEY
     } else {
-        let txs_per_key = args.duration_secs.unwrap().div_ceil(3);
+        let txs_per_key = args.duration_secs.unwrap().div_ceil(args.key_cycle);
         AMOUNT_PER_TX * txs_per_key * 2
     };
     distribute_its_tokens(
