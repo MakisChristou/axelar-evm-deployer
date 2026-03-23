@@ -4,3 +4,4 @@ cache/
 output/
 .claude/
 axe-load-test-logs/
+bench-results/
