@@ -980,13 +980,6 @@ fn phase_counts(txs: &[PendingTx]) -> (usize, usize, usize, usize, usize) {
 // Public entry points
 // ---------------------------------------------------------------------------
 
-/// Verify transactions on-chain through 4 Amplifier pipeline checkpoints:
-///
-/// 1. **Voted** — VotingVerifier verification (source chain)
-/// 2. **Routed** — Destination Gateway outgoing_messages
-/// 3. **Approved** — EVM gateway isMessageApproved
-/// 4. **Executed** — EVM approval consumed
-#[allow(clippy::too_many_arguments)]
 /// Source chain type — determines how message IDs are constructed.
 #[derive(Clone, Copy)]
 pub enum SourceChainType {
@@ -996,6 +989,13 @@ pub enum SourceChainType {
     Evm,
 }
 
+/// Verify transactions on-chain through 4 Amplifier pipeline checkpoints:
+///
+/// 1. **Voted** — VotingVerifier verification (source chain)
+/// 2. **Routed** — Destination Gateway outgoing_messages
+/// 3. **Approved** — EVM gateway isMessageApproved
+/// 4. **Executed** — EVM approval consumed
+#[allow(clippy::too_many_arguments)]
 pub async fn verify_onchain<P: Provider>(
     config: &Path,
     source_chain: &str,
