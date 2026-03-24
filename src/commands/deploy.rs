@@ -47,20 +47,23 @@ pub async fn run(
         .get("itsDeployerPrivateKey")
         .and_then(|v| v.as_str())
         .is_none()
-        && let Ok(pk) = std::env::var("ITS_DEPLOYER_PRIVATE_KEY") {
-            state["itsDeployerPrivateKey"] = json!(pk);
-            ui::info("loaded ITS_DEPLOYER_PRIVATE_KEY from env");
-        }
+        && let Ok(pk) = std::env::var("ITS_DEPLOYER_PRIVATE_KEY")
+    {
+        state["itsDeployerPrivateKey"] = json!(pk);
+        ui::info("loaded ITS_DEPLOYER_PRIVATE_KEY from env");
+    }
     if state.get("itsSalt").and_then(|v| v.as_str()).is_none()
-        && let Ok(s) = std::env::var("ITS_SALT") {
-            state["itsSalt"] = json!(s);
-            ui::info(&format!("loaded ITS_SALT from env: {s}"));
-        }
+        && let Ok(s) = std::env::var("ITS_SALT")
+    {
+        state["itsSalt"] = json!(s);
+        ui::info(&format!("loaded ITS_SALT from env: {s}"));
+    }
     if state.get("itsProxySalt").and_then(|v| v.as_str()).is_none()
-        && let Ok(s) = std::env::var("ITS_PROXY_SALT") {
-            state["itsProxySalt"] = json!(s);
-            ui::info(&format!("loaded ITS_PROXY_SALT from env: {s}"));
-        }
+        && let Ok(s) = std::env::var("ITS_PROXY_SALT")
+    {
+        state["itsProxySalt"] = json!(s);
+        ui::info(&format!("loaded ITS_PROXY_SALT from env: {s}"));
+    }
 
     save_state(&axelar_id, &state)?;
 

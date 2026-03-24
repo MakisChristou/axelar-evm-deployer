@@ -35,7 +35,6 @@ fn make_payload(custom: &Option<Vec<u8>>) -> Vec<u8> {
     }
 }
 
-
 /// Prepare the signing keypairs for the load test.
 ///
 /// When `num_keys >= 2`, derives N keypairs from the main one, funds any that
@@ -151,7 +150,9 @@ pub async fn run_load_test_with_metrics(
     join_all(pending_tasks).await;
     let confirmed_count = confirmed_counter.load(Ordering::Relaxed);
     spinner.finish_and_clear();
-    ui::success(&format!("sent {confirmed_count}/{total_submitted} confirmed"));
+    ui::success(&format!(
+        "sent {confirmed_count}/{total_submitted} confirmed"
+    ));
 
     let metrics = metrics_list.lock().await.clone();
     let total_confirmed = metrics.iter().filter(|m| m.success).count() as u64;
@@ -297,38 +298,37 @@ pub async fn run_sustained_load_test_with_metrics(
     let dest_addr = destination_address.to_string();
     let solana_rpc = args.solana_rpc.clone();
 
-    let make_task: sustained::MakeTask =
-        Box::new(move |key_idx: usize, _nonce: Option<u64>| {
-            let kp = Arc::clone(&keypairs_pool[key_idx]);
-            let tx_payload = make_payload(&payload);
-            let dc = dest_chain.clone();
-            let da = dest_addr.clone();
-            let rpc = solana_rpc.clone();
+    let make_task: sustained::MakeTask = Box::new(move |key_idx: usize, _nonce: Option<u64>| {
+        let kp = Arc::clone(&keypairs_pool[key_idx]);
+        let tx_payload = make_payload(&payload);
+        let dc = dest_chain.clone();
+        let da = dest_addr.clone();
+        let rpc = solana_rpc.clone();
 
-            Box::pin(async move {
-                tokio::task::spawn_blocking(move || {
-                    send_sol_tx(&rpc, kp.as_ref(), &dc, &da, &tx_payload)
-                })
-                .await
-                .unwrap_or_else(|e| TxMetrics {
-                    signature: String::new(),
-                    submit_time_ms: 0,
-                    confirm_time_ms: None,
-                    latency_ms: None,
-                    compute_units: None,
-                    slot: None,
-                    success: false,
-                    error: Some(format!("task panicked: {e}")),
-                    payload: Vec::new(),
-                    payload_hash: String::new(),
-                    source_address: String::new(),
-                    gmp_destination_chain: String::new(),
-                    gmp_destination_address: String::new(),
-                    send_instant: None,
-                    amplifier_timing: None,
-                })
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                send_sol_tx(&rpc, kp.as_ref(), &dc, &da, &tx_payload)
             })
-        });
+            .await
+            .unwrap_or_else(|e| TxMetrics {
+                signature: String::new(),
+                submit_time_ms: 0,
+                confirm_time_ms: None,
+                latency_ms: None,
+                compute_units: None,
+                slot: None,
+                success: false,
+                error: Some(format!("task panicked: {e}")),
+                payload: Vec::new(),
+                payload_hash: String::new(),
+                source_address: String::new(),
+                gmp_destination_chain: String::new(),
+                gmp_destination_address: String::new(),
+                send_instant: None,
+                amplifier_timing: None,
+            })
+        })
+    });
 
     let result = sustained::run_sustained_loop(
         tps,

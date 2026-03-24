@@ -14,11 +14,11 @@ use super::{
     LoadTestArgs, finish_report, read_its_cache, save_its_cache, validate_evm_rpc,
     validate_solana_rpc,
 };
-use alloy::primitives::Address;
 use crate::cosmos::read_axelar_contract_field;
 use crate::solana;
 use crate::ui;
 use crate::utils::read_contract_address;
+use alloy::primitives::Address;
 use std::path::Path;
 
 const TOKEN_NAME: &str = "AXE";
@@ -32,9 +32,13 @@ const AMOUNT_PER_KEY: u64 = AMOUNT_PER_TX * 1000;
 /// devnet-amplifier doesn't require gas, stagenet/mainnet do.
 fn default_gas_value() -> u64 {
     #[cfg(feature = "devnet-amplifier")]
-    { 0 }
+    {
+        0
+    }
     #[cfg(not(feature = "devnet-amplifier"))]
-    { 100_000 }
+    {
+        100_000
+    }
 }
 
 pub async fn run(mut args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
@@ -166,10 +170,8 @@ pub async fn run(mut args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()
 
     // --- ITS hub routing info ---
     // ITS always routes through "axelar" hub. The GMP destination is the AxelarnetGateway.
-    let axelarnet_gw_addr = read_axelar_contract_field(
-        &args.config,
-        "/axelar/contracts/AxelarnetGateway/address",
-    )?;
+    let axelarnet_gw_addr =
+        read_axelar_contract_field(&args.config, "/axelar/contracts/AxelarnetGateway/address")?;
 
     // === SUSTAINED MODE ===
     if !burst_mode {
@@ -177,15 +179,21 @@ pub async fn run(mut args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()
         let duration_secs = args.duration_secs.unwrap();
         let key_cycle = args.key_cycle as usize;
 
-        let spinner = ui::wait_spinner(&format!("[0/{duration_secs}s] starting sustained ITS send..."));
+        let spinner = ui::wait_spinner(&format!(
+            "[0/{duration_secs}s] starting sustained ITS send..."
+        ));
         let test_start = Instant::now();
 
         let dest_chain_s = dest.to_string();
         let da_s = dest_address_bytes.clone();
         let rpc_s = args.solana_rpc.clone();
         let axelarnet_gw_s = axelarnet_gw_addr.clone();
-        let token_program_s = solana_sdk::pubkey::Pubkey::from_str_const("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
-        let ata_program_s = solana_sdk::pubkey::Pubkey::from_str_const("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
+        let token_program_s = solana_sdk::pubkey::Pubkey::from_str_const(
+            "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+        );
+        let ata_program_s = solana_sdk::pubkey::Pubkey::from_str_const(
+            "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+        );
 
         let make_task: super::sustained::MakeTask =
             Box::new(move |key_idx: usize, _nonce: Option<u64>| {
@@ -209,7 +217,15 @@ pub async fn run(mut args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()
                     .0;
 
                     match solana::send_its_interchain_transfer(
-                        &rpc, &kp, &tid, &source_ata, &m, &dc, &da, AMOUNT_PER_TX, gv,
+                        &rpc,
+                        &kp,
+                        &tid,
+                        &source_ata,
+                        &m,
+                        &dc,
+                        &da,
+                        AMOUNT_PER_TX,
+                        gv,
                     ) {
                         Ok((_sig, mut metrics)) => {
                             metrics.signature =
@@ -309,13 +325,11 @@ pub async fn run(mut args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()
             let source_addr = kp.pubkey().to_string();
 
             // Compute source ATA
-            let token_program = solana_sdk::pubkey::Pubkey::from_str_const("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
+            let token_program = solana_sdk::pubkey::Pubkey::from_str_const(
+                "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+            );
             let source_ata = solana_sdk::pubkey::Pubkey::find_program_address(
-                &[
-                    kp.pubkey().as_ref(),
-                    token_program.as_ref(),
-                    m.as_ref(),
-                ],
+                &[kp.pubkey().as_ref(), token_program.as_ref(), m.as_ref()],
                 &solana_sdk::pubkey::Pubkey::from_str_const(
                     "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
                 ),
@@ -323,7 +337,15 @@ pub async fn run(mut args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()
             .0;
 
             match solana::send_its_interchain_transfer(
-                &rpc, &kp, &tid, &source_ata, &m, &dc, &da, AMOUNT_PER_TX, gv,
+                &rpc,
+                &kp,
+                &tid,
+                &source_ata,
+                &m,
+                &dc,
+                &da,
+                AMOUNT_PER_TX,
+                gv,
             ) {
                 Ok((_sig, mut metrics)) => {
                     // Format message_id: the ITS program CPI's gateway.call_contract
@@ -591,9 +613,11 @@ async fn setup_its_token(
 
     // Wait for the remote deploy to propagate through the hub and execute on EVM.
     // The deploy message ID is {signature}-1.3 (empirically determined).
-    let deploy_message_id = solana::extract_its_message_id(solana_rpc, &remote_sig)
-        .unwrap_or_else(|e| {
-            ui::warn(&format!("could not extract message ID from tx logs: {e}, falling back to -1.3"));
+    let deploy_message_id =
+        solana::extract_its_message_id(solana_rpc, &remote_sig).unwrap_or_else(|e| {
+            ui::warn(&format!(
+                "could not extract message ID from tx logs: {e}, falling back to -1.3"
+            ));
             format!("{remote_sig}-1.3")
         });
     super::verify::wait_for_its_remote_deploy(
@@ -675,10 +699,10 @@ fn distribute_its_tokens(
         solana_commitment_config::CommitmentConfig::confirmed(),
     );
 
-    let token_program = solana_sdk::pubkey::Pubkey::from_str_const("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
-    let ata_program = solana_sdk::pubkey::Pubkey::from_str_const(
-        "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
-    );
+    let token_program =
+        solana_sdk::pubkey::Pubkey::from_str_const("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
+    let ata_program =
+        solana_sdk::pubkey::Pubkey::from_str_const("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
 
     let fee_payer = main_keypair.pubkey();
     let source_ata = solana_sdk::pubkey::Pubkey::find_program_address(
@@ -724,9 +748,7 @@ fn distribute_its_tokens(
                 AccountMeta::new_readonly(wallet, false),
                 AccountMeta::new_readonly(*mint, false),
                 AccountMeta::new_readonly(
-                    solana_sdk::pubkey::Pubkey::from_str_const(
-                        "11111111111111111111111111111111",
-                    ),
+                    solana_sdk::pubkey::Pubkey::from_str_const("11111111111111111111111111111111"),
                     false,
                 ),
                 AccountMeta::new_readonly(token_program, false),
@@ -765,9 +787,6 @@ fn distribute_its_tokens(
     }
 
     spinner.finish_and_clear();
-    ui::success(&format!(
-        "distributed tokens to {} keys",
-        keypairs.len()
-    ));
+    ui::success(&format!("distributed tokens to {} keys", keypairs.len()));
     Ok(())
 }

@@ -132,7 +132,13 @@ pub async fn run_load_test_with_metrics(
         Some(v) => v.parse().map_err(|e| eyre!("invalid --gas-value: {e}"))?,
         None => default_gas_value_wei(&args.source_chain),
     };
-    keypairs::ensure_funded_evm_with_extra(&funding_provider, &main_signer, &derived, gas_value_wei).await?;
+    keypairs::ensure_funded_evm_with_extra(
+        &funding_provider,
+        &main_signer,
+        &derived,
+        gas_value_wei,
+    )
+    .await?;
 
     // Fire txs in parallel, capped to avoid overwhelming the RPC.
     // Each send does multiple RPC calls (estimate gas, nonce, send, receipt),
@@ -318,9 +324,7 @@ async fn execute_and_record_evm<P: Provider>(
     match call.send().await {
         Ok(pending) => {
             let tx_hash = *pending.tx_hash();
-            match tokio::time::timeout(EVM_RECEIPT_TIMEOUT, pending.get_receipt())
-                .await
-            {
+            match tokio::time::timeout(EVM_RECEIPT_TIMEOUT, pending.get_receipt()).await {
                 Ok(Ok(receipt)) => {
                     #[allow(clippy::cast_possible_truncation)]
                     let latency_ms = submit_start.elapsed().as_millis() as u64;
@@ -418,13 +422,21 @@ pub(super) async fn run_sustained_load_test_with_metrics(
     let rounds_per_key = duration_secs.div_ceil(key_cycle as u64);
     let buffered_rounds = rounds_per_key + rounds_per_key / 5 + 1;
     let gas_total_per_key = gas_value_wei.saturating_mul(buffered_rounds as u128);
-    keypairs::ensure_funded_evm_with_extra(&funding_provider, &main_signer, &derived, gas_total_per_key).await?;
+    keypairs::ensure_funded_evm_with_extra(
+        &funding_provider,
+        &main_signer,
+        &derived,
+        gas_total_per_key,
+    )
+    .await?;
 
     // Pre-fetch initial nonces.
     let nonce_provider = ProviderBuilder::new().connect_http(evm_rpc_url.parse()?);
     let mut nonces: Vec<u64> = Vec::with_capacity(pool_size);
     for signer in &derived {
-        let n = nonce_provider.get_transaction_count(signer.address()).await?;
+        let n = nonce_provider
+            .get_transaction_count(signer.address())
+            .await?;
         nonces.push(n);
     }
 
@@ -449,7 +461,10 @@ pub(super) async fn run_sustained_load_test_with_metrics(
     let rpc_url_str = evm_rpc_url.to_string();
     let has_voting_verifier = crate::cosmos::read_axelar_contract_field(
         &args.config,
-        &format!("/axelar/contracts/VotingVerifier/{}/address", args.source_chain),
+        &format!(
+            "/axelar/contracts/VotingVerifier/{}/address",
+            args.source_chain
+        ),
     )
     .is_ok();
     let source_chain = args.source_chain.clone();
@@ -471,15 +486,17 @@ pub(super) async fn run_sustained_load_test_with_metrics(
                 .connect_http(url.parse().expect("invalid RPC URL"));
 
             Box::pin(async move {
-                let result = execute_and_record_evm(&provider, sr, &dc, &da, &tx_payload, gv, nonce).await;
+                let result =
+                    execute_and_record_evm(&provider, sr, &dc, &da, &tx_payload, gv, nonce).await;
                 // Stream successful txs to the concurrent verification pipeline.
                 if result.success
-                    && let Some(ref tx_sender) = vtx {
-                        // Use signature length as a proxy for idx — the verify task
-                        // will overwrite idx from the timings vec anyway.
-                        let pending = super::verify::tx_to_pending_solana(&result, 0, &sc, has_vv);
-                        let _ = tx_sender.send(pending);
-                    }
+                    && let Some(ref tx_sender) = vtx
+                {
+                    // Use signature length as a proxy for idx — the verify task
+                    // will overwrite idx from the timings vec anyway.
+                    let pending = super::verify::tx_to_pending_solana(&result, 0, &sc, has_vv);
+                    let _ = tx_sender.send(pending);
+                }
                 result
             })
         });

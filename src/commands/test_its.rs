@@ -12,7 +12,6 @@ use serde_json::json;
 
 use crate::cli::resolve_axelar_id;
 use crate::commands::test_helpers::{extract_poll_id, wait_for_poll_votes};
-use crate::preflight;
 use crate::cosmos::{
     build_execute_msg_any, derive_axelar_wallet, lcd_cosmwasm_smart_query, read_axelar_config,
     read_axelar_contract_field, sign_and_broadcast_cosmos_tx,
@@ -21,6 +20,7 @@ use crate::evm::{
     ContractCall, ERC20, InterchainToken, InterchainTokenDeployed, InterchainTokenFactory,
     InterchainTokenService, Ownable,
 };
+use crate::preflight;
 use crate::state::read_state;
 use crate::ui;
 use crate::utils::read_contract_address;
@@ -71,12 +71,8 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
                 .map(String::from)
         })
         .unwrap_or_else(|| "ETH".to_string());
-    preflight::check_evm_balances(
-        &rpc_url,
-        &[("deployer", deployer_address)],
-        &token_symbol,
-    )
-    .await?;
+    preflight::check_evm_balances(&rpc_url, &[("deployer", deployer_address)], &token_symbol)
+        .await?;
 
     let its_factory_addr =
         read_contract_address(&target_json, &axelar_id, "InterchainTokenFactory")?;

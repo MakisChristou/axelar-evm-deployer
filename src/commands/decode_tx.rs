@@ -3,10 +3,10 @@ use std::time::Duration;
 
 use alloy::consensus::Transaction;
 use alloy::hex;
-use alloy::primitives::{TxHash, B256};
+use alloy::primitives::{B256, TxHash};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::types::TransactionReceipt;
-use eyre::{bail, Result};
+use eyre::{Result, bail};
 use futures::future::join_all;
 use owo_colors::OwoColorize;
 
@@ -111,7 +111,11 @@ pub async fn run(txid: &str, config: Option<&Path>, chain_filter: Option<&str>) 
         };
         println!("{:<8} {status}", "Status:".bold());
     } else {
-        println!("{:<8} {}", "Status:".bold(), "(receipt unavailable)".dimmed());
+        println!(
+            "{:<8} {}",
+            "Status:".bold(),
+            "(receipt unavailable)".dimmed()
+        );
     }
 
     // Decode calldata
@@ -250,7 +254,8 @@ fn load_evm_rpcs(config: &Path, chain_filter: Option<&str>) -> Result<Vec<EvmCha
             .unwrap_or(key);
 
         if let Some(filter) = chain_filter
-            && axelar_id != filter && key != filter
+            && axelar_id != filter
+            && key != filter
         {
             continue;
         }

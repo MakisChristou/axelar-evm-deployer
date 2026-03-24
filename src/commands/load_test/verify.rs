@@ -1,9 +1,9 @@
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use alloy::primitives::{keccak256, Address, FixedBytes};
+use alloy::primitives::{Address, FixedBytes, keccak256};
 use alloy::providers::Provider;
 use eyre::Result;
 use futures::StreamExt;
@@ -11,7 +11,9 @@ use serde_json::json;
 use solana_sdk::pubkey::Pubkey;
 use tokio::sync::mpsc;
 
-use super::metrics::{AmplifierTiming, FailureCategory, TxMetrics, VerificationReport};
+use super::metrics::{
+    AmplifierTiming, FailureCategory, PeakThroughput, TxMetrics, VerificationReport,
+};
 use crate::cosmos::{
     lcd_cosmwasm_smart_query, read_axelar_config, read_axelar_contract_field, read_axelar_rpc,
     rpc_tx_search_event,
@@ -119,10 +121,7 @@ impl<P: Provider> DestinationChecker<'_, P> {
                     Ok(ApprovalResult::AlreadyExecuted)
                 }
             }
-            Self::Solana {
-                rpc_client,
-                ..
-            } => {
+            Self::Solana { rpc_client, .. } => {
                 let client = rpc_client.clone();
                 let cmd_id = tx.command_id.unwrap_or_default();
                 let result = tokio::task::spawn_blocking(move || {
@@ -158,10 +157,7 @@ impl<P: Provider> DestinationChecker<'_, P> {
                 // false = approval consumed = executed
                 Ok(!approved)
             }
-            Self::Solana {
-                rpc_client,
-                ..
-            } => {
+            Self::Solana { rpc_client, .. } => {
                 let client = rpc_client.clone();
                 let cmd_id = tx.command_id.unwrap_or_default();
                 let result = tokio::task::spawn_blocking(move || {
@@ -234,8 +230,9 @@ async fn poll_pipeline<P: Provider>(
     mut rx: Option<&mut mpsc::UnboundedReceiver<PendingTx>>,
     send_done: Option<&AtomicBool>,
     external_spinner: Option<indicatif::ProgressBar>,
-) {
-    let spinner = external_spinner.unwrap_or_else(|| ui::wait_spinner("verifying pipeline (starting)..."));
+) -> PeakThroughput {
+    let spinner =
+        external_spinner.unwrap_or_else(|| ui::wait_spinner("verifying pipeline (starting)..."));
     let mut last_progress = Instant::now();
 
     loop {
@@ -308,9 +305,7 @@ async fn poll_pipeline<P: Provider>(
                                         elapsed: send_instant.elapsed().as_secs_f64(),
                                     },
                                     Ok(false) => CheckOutcome::NotYet,
-                                    Err(e) => {
-                                        CheckOutcome::Error(format!("VotingVerifier: {e}"))
-                                    }
+                                    Err(e) => CheckOutcome::Error(format!("VotingVerifier: {e}")),
                                 }
                             } else {
                                 CheckOutcome::SkipVoting
@@ -318,8 +313,7 @@ async fn poll_pipeline<P: Provider>(
                         }
                         Phase::Routed => {
                             if let Some(gw) = cosm_gateway {
-                                match check_cosmos_routed(lcd, gw, source_chain, &message_id)
-                                    .await
+                                match check_cosmos_routed(lcd, gw, source_chain, &message_id).await
                                 {
                                     Ok(true) => CheckOutcome::PhaseComplete {
                                         elapsed: send_instant.elapsed().as_secs_f64(),
@@ -334,21 +328,12 @@ async fn poll_pipeline<P: Provider>(
                         }
                         Phase::HubApproved => {
                             if let Some(ref gw) = axelarnet_gw {
-                                match check_hub_approved(
-                                    lcd,
-                                    gw,
-                                    source_chain,
-                                    &message_id,
-                                )
-                                .await
-                                {
+                                match check_hub_approved(lcd, gw, source_chain, &message_id).await {
                                     Ok(true) => CheckOutcome::PhaseComplete {
                                         elapsed: send_instant.elapsed().as_secs_f64(),
                                     },
                                     Ok(false) => CheckOutcome::NotYet,
-                                    Err(e) => {
-                                        CheckOutcome::Error(format!("AxelarnetGateway: {e}"))
-                                    }
+                                    Err(e) => CheckOutcome::Error(format!("AxelarnetGateway: {e}")),
                                 }
                             } else {
                                 // No hub gateway — skip this phase
@@ -574,6 +559,8 @@ async fn poll_pipeline<P: Provider>(
         ),
         label,
     );
+
+    compute_peak_throughput(txs)
 }
 
 // ---------------------------------------------------------------------------
@@ -594,7 +581,10 @@ struct SecondLegInfo {
 
 /// Discover the second-leg message_id by searching for the hub execution tx
 /// that consumed the first-leg message, then extracting routing event attributes.
-async fn discover_second_leg(rpc: &str, first_leg_message_id: &str) -> Result<Option<SecondLegInfo>> {
+async fn discover_second_leg(
+    rpc: &str,
+    first_leg_message_id: &str,
+) -> Result<Option<SecondLegInfo>> {
     let resp = rpc_tx_search_event(
         rpc,
         "wasm-message_executed.message_id",
@@ -637,7 +627,9 @@ async fn discover_second_leg(rpc: &str, first_leg_message_id: &str) -> Result<Op
             attrs.iter().find_map(|a| {
                 let k = a.get("key").and_then(|v| v.as_str())?;
                 if k == key {
-                    a.get("value").and_then(|v| v.as_str()).map(|s| s.to_string())
+                    a.get("value")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
                 } else {
                     None
                 }
@@ -731,9 +723,7 @@ async fn poll_pipeline_its_hub(
                                         elapsed: send_instant.elapsed().as_secs_f64(),
                                     },
                                     Ok(false) => CheckOutcome::NotYet,
-                                    Err(e) => {
-                                        CheckOutcome::Error(format!("VotingVerifier: {e}"))
-                                    }
+                                    Err(e) => CheckOutcome::Error(format!("VotingVerifier: {e}")),
                                 }
                             } else {
                                 CheckOutcome::SkipVoting
@@ -752,9 +742,7 @@ async fn poll_pipeline_its_hub(
                                     elapsed: send_instant.elapsed().as_secs_f64(),
                                 },
                                 Ok(false) => CheckOutcome::NotYet,
-                                Err(e) => {
-                                    CheckOutcome::Error(format!("AxelarnetGateway: {e}"))
-                                }
+                                Err(e) => CheckOutcome::Error(format!("AxelarnetGateway: {e}")),
                             }
                         }
                         Phase::DiscoverSecondLeg => {
@@ -766,15 +754,12 @@ async fn poll_pipeline_its_hub(
                                     destination_address: info.destination_address,
                                 },
                                 Ok(None) => CheckOutcome::NotYet,
-                                Err(e) => {
-                                    CheckOutcome::Error(format!("second-leg discovery: {e}"))
-                                }
+                                Err(e) => CheckOutcome::Error(format!("second-leg discovery: {e}")),
                             }
                         }
                         Phase::Routed => {
                             let sl_id = second_leg_id.as_deref().unwrap_or("");
-                            match check_cosmos_routed(lcd, cosm_gateway_dest, "axelar", sl_id)
-                                .await
+                            match check_cosmos_routed(lcd, cosm_gateway_dest, "axelar", sl_id).await
                             {
                                 Ok(true) => CheckOutcome::PhaseComplete {
                                     elapsed: send_instant.elapsed().as_secs_f64(),
@@ -800,9 +785,7 @@ async fn poll_pipeline_its_hub(
                                     elapsed: send_instant.elapsed().as_secs_f64(),
                                 },
                                 Ok(Ok(None)) => CheckOutcome::NotYet,
-                                Ok(Err(e)) => {
-                                    CheckOutcome::Error(format!("Solana approval: {e}"))
-                                }
+                                Ok(Err(e)) => CheckOutcome::Error(format!("Solana approval: {e}")),
                                 Err(e) => CheckOutcome::Error(format!("Solana approval: {e}")),
                             }
                         }
@@ -822,9 +805,7 @@ async fn poll_pipeline_its_hub(
                                     }
                                 }
                                 Ok(Ok(_)) => CheckOutcome::NotYet,
-                                Ok(Err(e)) => {
-                                    CheckOutcome::Error(format!("Solana execution: {e}"))
-                                }
+                                Ok(Err(e)) => CheckOutcome::Error(format!("Solana execution: {e}")),
                                 Err(e) => CheckOutcome::Error(format!("Solana execution: {e}")),
                             }
                         }
@@ -912,7 +893,10 @@ async fn poll_pipeline_its_hub(
         }
 
         let (voted, _, hub_approved, approved, executed) = phase_counts(txs);
-        let routed = txs.iter().filter(|t| t.timing.routed_secs.is_some()).count();
+        let routed = txs
+            .iter()
+            .filter(|t| t.timing.routed_secs.is_some())
+            .count();
 
         if voted + hub_approved + routed + approved + executed > 0 || error_msg.is_some() {
             if let Some(ref err) = error_msg {
@@ -954,7 +938,10 @@ async fn poll_pipeline_its_hub(
     }
 
     let (voted, _, hub_approved, approved, executed) = phase_counts(txs);
-    let routed = txs.iter().filter(|t| t.timing.routed_secs.is_some()).count();
+    let routed = txs
+        .iter()
+        .filter(|t| t.timing.routed_secs.is_some())
+        .count();
 
     spinner.finish_and_clear();
     ui::success(&format!(
@@ -1075,7 +1062,7 @@ pub async fn verify_onchain<P: Provider>(
         gw_contract: &gw_contract,
     };
 
-    poll_pipeline(
+    let peaks = poll_pipeline(
         &mut txs,
         &lcd,
         voting_verifier.as_deref(),
@@ -1092,12 +1079,17 @@ pub async fn verify_onchain<P: Provider>(
     )
     .await;
 
-    let report = compute_verification_report(&txs, metrics);
+    let report = compute_verification_report(&txs, metrics, peaks);
     Ok(report)
 }
 
 /// Convert a confirmed TxMetrics into a PendingTx for Solana verification.
-pub(super) fn tx_to_pending_solana(tx: &TxMetrics, idx: usize, source_chain: &str, has_voting_verifier: bool) -> PendingTx {
+pub(super) fn tx_to_pending_solana(
+    tx: &TxMetrics,
+    idx: usize,
+    source_chain: &str,
+    has_voting_verifier: bool,
+) -> PendingTx {
     let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
     let cmd_input = [source_chain.as_bytes(), b"-", tx.signature.as_bytes()].concat();
     PendingTx {
@@ -1114,7 +1106,11 @@ pub(super) fn tx_to_pending_solana(tx: &TxMetrics, idx: usize, source_chain: &st
         timing: AmplifierTiming::default(),
         failed: false,
         fail_reason: None,
-        phase: if has_voting_verifier { Phase::Voted } else { Phase::Routed },
+        phase: if has_voting_verifier {
+            Phase::Voted
+        } else {
+            Phase::Routed
+        },
         second_leg_message_id: None,
         second_leg_payload_hash: None,
         second_leg_source_address: None,
@@ -1162,7 +1158,7 @@ pub async fn verify_onchain_solana_streaming(
 
     let mut txs: Vec<PendingTx> = Vec::new();
 
-    poll_pipeline(
+    let peaks = poll_pipeline(
         &mut txs,
         &lcd,
         voting_verifier.as_deref(),
@@ -1179,11 +1175,9 @@ pub async fn verify_onchain_solana_streaming(
     )
     .await;
 
-    let report = compute_verification_report(&txs, &mut []);
-    let timings: Vec<(usize, AmplifierTiming)> = txs
-        .iter()
-        .map(|tx| (tx.idx, tx.timing.clone()))
-        .collect();
+    let report = compute_verification_report(&txs, &mut [], peaks);
+    let timings: Vec<(usize, AmplifierTiming)> =
+        txs.iter().map(|tx| (tx.idx, tx.timing.clone())).collect();
     Ok((report, timings))
 }
 
@@ -1273,7 +1267,7 @@ pub async fn verify_onchain_solana(
             _phantom: std::marker::PhantomData,
         };
 
-    poll_pipeline(
+    let peaks = poll_pipeline(
         &mut txs,
         &lcd,
         voting_verifier.as_deref(),
@@ -1290,7 +1284,7 @@ pub async fn verify_onchain_solana(
     )
     .await;
 
-    let report = compute_verification_report(&txs, metrics);
+    let report = compute_verification_report(&txs, metrics, peaks);
     Ok(report)
 }
 
@@ -1337,10 +1331,8 @@ pub async fn verify_onchain_solana_its(
     )
     .ok();
 
-    let axelarnet_gateway = read_axelar_contract_field(
-        config,
-        "/axelar/contracts/AxelarnetGateway/address",
-    )?;
+    let axelarnet_gateway =
+        read_axelar_contract_field(config, "/axelar/contracts/AxelarnetGateway/address")?;
 
     let initial_phase = if voting_verifier.is_some() {
         Phase::Voted
@@ -1394,7 +1386,8 @@ pub async fn verify_onchain_solana_its(
     )
     .await;
 
-    let report = compute_verification_report(&txs, metrics);
+    let peaks = compute_peak_throughput(&txs);
+    let report = compute_verification_report(&txs, metrics, peaks);
     Ok(report)
 }
 
@@ -1434,10 +1427,8 @@ pub async fn verify_onchain_evm_its(
 
     let (lcd, _, _, _) = read_axelar_config(config)?;
 
-    let axelarnet_gateway = read_axelar_contract_field(
-        config,
-        "/axelar/contracts/AxelarnetGateway/address",
-    )?;
+    let axelarnet_gateway =
+        read_axelar_contract_field(config, "/axelar/contracts/AxelarnetGateway/address")?;
 
     // For Solana ITS, we don't have the payload_hash (the ITS program constructs
     // the payload internally via CPI). Skip VotingVerifier and start at HubApproved,
@@ -1493,7 +1484,8 @@ pub async fn verify_onchain_evm_its(
     )
     .await;
 
-    let report = compute_verification_report(&txs, metrics);
+    let peaks = compute_peak_throughput(&txs);
+    let report = compute_verification_report(&txs, metrics, peaks);
     Ok(report)
 }
 
@@ -1563,9 +1555,7 @@ async fn poll_pipeline_its_hub_evm<P: Provider>(
                                         elapsed: send_instant.elapsed().as_secs_f64(),
                                     },
                                     Ok(false) => CheckOutcome::NotYet,
-                                    Err(e) => {
-                                        CheckOutcome::Error(format!("VotingVerifier: {e}"))
-                                    }
+                                    Err(e) => CheckOutcome::Error(format!("VotingVerifier: {e}")),
                                 }
                             } else {
                                 CheckOutcome::SkipVoting
@@ -1584,9 +1574,7 @@ async fn poll_pipeline_its_hub_evm<P: Provider>(
                                     elapsed: send_instant.elapsed().as_secs_f64(),
                                 },
                                 Ok(false) => CheckOutcome::NotYet,
-                                Err(e) => {
-                                    CheckOutcome::Error(format!("AxelarnetGateway: {e}"))
-                                }
+                                Err(e) => CheckOutcome::Error(format!("AxelarnetGateway: {e}")),
                             }
                         }
                         Phase::DiscoverSecondLeg => {
@@ -1598,15 +1586,12 @@ async fn poll_pipeline_its_hub_evm<P: Provider>(
                                     destination_address: info.destination_address,
                                 },
                                 Ok(None) => CheckOutcome::NotYet,
-                                Err(e) => {
-                                    CheckOutcome::Error(format!("second-leg discovery: {e}"))
-                                }
+                                Err(e) => CheckOutcome::Error(format!("second-leg discovery: {e}")),
                             }
                         }
                         Phase::Routed => {
                             let sl_id = second_leg_id.as_deref().unwrap_or("");
-                            match check_cosmos_routed(lcd, cosm_gateway_dest, "axelar", sl_id)
-                                .await
+                            match check_cosmos_routed(lcd, cosm_gateway_dest, "axelar", sl_id).await
                             {
                                 Ok(true) => CheckOutcome::PhaseComplete {
                                     elapsed: send_instant.elapsed().as_secs_f64(),
@@ -1639,9 +1624,7 @@ async fn poll_pipeline_its_hub_evm<P: Provider>(
                                     elapsed: send_instant.elapsed().as_secs_f64(),
                                 },
                                 Ok(false) => CheckOutcome::NotYet,
-                                Err(e) => {
-                                    CheckOutcome::Error(format!("EVM approval: {e}"))
-                                }
+                                Err(e) => CheckOutcome::Error(format!("EVM approval: {e}")),
                             }
                         }
                         Phase::Executed => {
@@ -1671,9 +1654,7 @@ async fn poll_pipeline_its_hub_evm<P: Provider>(
                                     }
                                 }
                                 Ok(true) => CheckOutcome::NotYet,
-                                Err(e) => {
-                                    CheckOutcome::Error(format!("EVM execution: {e}"))
-                                }
+                                Err(e) => CheckOutcome::Error(format!("EVM execution: {e}")),
                             }
                         }
                         Phase::Done => CheckOutcome::NotYet,
@@ -1765,7 +1746,10 @@ async fn poll_pipeline_its_hub_evm<P: Provider>(
         }
 
         let (voted, _, hub_approved, approved, executed) = phase_counts(txs);
-        let routed = txs.iter().filter(|t| t.timing.routed_secs.is_some()).count();
+        let routed = txs
+            .iter()
+            .filter(|t| t.timing.routed_secs.is_some())
+            .count();
 
         if voted + hub_approved + routed + approved + executed > 0 || error_msg.is_some() {
             if let Some(ref err) = error_msg {
@@ -1807,7 +1791,10 @@ async fn poll_pipeline_its_hub_evm<P: Provider>(
     }
 
     let (voted, _, hub_approved, approved, executed) = phase_counts(txs);
-    let routed = txs.iter().filter(|t| t.timing.routed_secs.is_some()).count();
+    let routed = txs
+        .iter()
+        .filter(|t| t.timing.routed_secs.is_some())
+        .count();
 
     spinner.finish_and_clear();
     ui::success(&format!(
@@ -1830,10 +1817,8 @@ pub async fn wait_for_its_remote_deploy(
     let (lcd, _, _, _) = read_axelar_config(config)?;
     let rpc = read_axelar_rpc(config)?;
 
-    let axelarnet_gateway = read_axelar_contract_field(
-        config,
-        "/axelar/contracts/AxelarnetGateway/address",
-    )?;
+    let axelarnet_gateway =
+        read_axelar_contract_field(config, "/axelar/contracts/AxelarnetGateway/address")?;
 
     let voting_verifier = read_axelar_contract_field(
         config,
@@ -1876,7 +1861,10 @@ pub async fn wait_for_its_remote_deploy(
     loop {
         if start.elapsed() >= timeout {
             spinner.finish_and_clear();
-            eyre::bail!("remote deploy timed out after {}s at phase {phase:?}", timeout.as_secs());
+            eyre::bail!(
+                "remote deploy timed out after {}s at phase {phase:?}",
+                timeout.as_secs()
+            );
         }
 
         match phase {
@@ -1946,7 +1934,12 @@ pub async fn wait_for_its_remote_deploy(
                 let sl_ph_str = second_leg_ph.as_deref().unwrap_or("");
                 let ph = parse_payload_hash(sl_ph_str).unwrap_or_default();
                 match check_evm_is_message_approved(
-                    &gw_contract, "axelar", sl_id, "", Address::ZERO, ph,
+                    &gw_contract,
+                    "axelar",
+                    sl_id,
+                    "",
+                    Address::ZERO,
+                    ph,
                 )
                 .await
                 {
@@ -1970,7 +1963,12 @@ pub async fn wait_for_its_remote_deploy(
                 let sl_ph_str = second_leg_ph.as_deref().unwrap_or("");
                 let ph = parse_payload_hash(sl_ph_str).unwrap_or_default();
                 match check_evm_is_message_approved(
-                    &gw_contract, "axelar", sl_id, "", Address::ZERO, ph,
+                    &gw_contract,
+                    "axelar",
+                    sl_id,
+                    "",
+                    Address::ZERO,
+                    ph,
                 )
                 .await
                 {
@@ -2014,10 +2012,8 @@ pub async fn wait_for_its_remote_deploy_to_solana(
     let (lcd, _, _, _) = read_axelar_config(config)?;
     let rpc = read_axelar_rpc(config)?;
 
-    let axelarnet_gateway = read_axelar_contract_field(
-        config,
-        "/axelar/contracts/AxelarnetGateway/address",
-    )?;
+    let axelarnet_gateway =
+        read_axelar_contract_field(config, "/axelar/contracts/AxelarnetGateway/address")?;
 
     let cosm_gateway_dest = read_axelar_contract_field(
         config,
@@ -2030,7 +2026,8 @@ pub async fn wait_for_its_remote_deploy_to_solana(
     );
 
     ui::kv("deploy message ID", deploy_message_id);
-    let spinner = ui::wait_spinner("waiting for remote deploy to propagate through hub to Solana...");
+    let spinner =
+        ui::wait_spinner("waiting for remote deploy to propagate through hub to Solana...");
     let start = Instant::now();
     let timeout = Duration::from_secs(300);
 
@@ -2049,7 +2046,10 @@ pub async fn wait_for_its_remote_deploy_to_solana(
     loop {
         if start.elapsed() >= timeout {
             spinner.finish_and_clear();
-            eyre::bail!("remote deploy timed out after {}s at phase {phase:?}", timeout.as_secs());
+            eyre::bail!(
+                "remote deploy timed out after {}s at phase {phase:?}",
+                timeout.as_secs()
+            );
         }
 
         match phase {
@@ -2171,9 +2171,7 @@ async fn check_cosmos_routed(
     });
 
     let resp = lcd_cosmwasm_smart_query(lcd, cosm_gateway, &query).await?;
-    let data = resp
-        .get("data")
-        .or_else(|| resp.as_array().map(|_| &resp));
+    let data = resp.get("data").or_else(|| resp.as_array().map(|_| &resp));
     Ok(match data {
         Some(arr) if arr.is_array() => {
             let items = arr.as_array().unwrap();
@@ -2231,20 +2229,73 @@ async fn check_evm_is_message_approved<P: Provider>(
 // Shared report computation
 // ---------------------------------------------------------------------------
 
+/// Compute peak throughput per pipeline step using 5-second sliding windows
+/// over the absolute completion timestamps.
+/// Compute sustained throughput per pipeline step: count / (last - first) on
+/// absolute completion timestamps. The lowest value is the pipeline bottleneck.
+#[allow(clippy::cast_precision_loss, clippy::float_arithmetic)]
+fn compute_peak_throughput(txs: &[PendingTx]) -> PeakThroughput {
+    let Some(epoch) = txs.iter().map(|t| t.send_instant).min() else {
+        return PeakThroughput::default();
+    };
+
+    let mut voted_times: Vec<f64> = Vec::new();
+    let mut routed_times: Vec<f64> = Vec::new();
+    let mut approved_times: Vec<f64> = Vec::new();
+    let mut executed_times: Vec<f64> = Vec::new();
+
+    for tx in txs {
+        let base = tx.send_instant.duration_since(epoch).as_secs_f64();
+        if let Some(s) = tx.timing.voted_secs {
+            voted_times.push(base + s);
+        }
+        if let Some(s) = tx.timing.routed_secs {
+            routed_times.push(base + s);
+        }
+        if let Some(s) = tx.timing.approved_secs {
+            approved_times.push(base + s);
+        }
+        if let Some(s) = tx.timing.executed_secs {
+            executed_times.push(base + s);
+        }
+    }
+
+    fn sustained_rate(times: &[f64]) -> Option<f64> {
+        if times.len() < 2 {
+            return None;
+        }
+        let min = times.iter().cloned().reduce(f64::min)?;
+        let max = times.iter().cloned().reduce(f64::max)?;
+        let span = max - min;
+        if span > 0.0 {
+            Some(times.len() as f64 / span)
+        } else {
+            None
+        }
+    }
+
+    PeakThroughput {
+        voted_tps: sustained_rate(&voted_times),
+        routed_tps: sustained_rate(&routed_times),
+        approved_tps: sustained_rate(&approved_times),
+        executed_tps: sustained_rate(&executed_times),
+    }
+}
+
 /// Compute the `VerificationReport` from pending tx results, writing timings
 /// back into the original metrics array.
 #[allow(clippy::cast_precision_loss, clippy::float_arithmetic)]
 fn compute_verification_report(
     txs: &[PendingTx],
     metrics: &mut [TxMetrics],
+    peak_throughput: PeakThroughput,
 ) -> VerificationReport {
     let mut successful = 0u64;
     let mut failed = 0u64;
     let mut failure_reasons: std::collections::HashMap<String, u64> =
         std::collections::HashMap::new();
     let mut stuck_count = 0u64;
-    let mut stuck_phases: std::collections::HashMap<String, u64> =
-        std::collections::HashMap::new();
+    let mut stuck_phases: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
 
     for tx in txs {
         if tx.idx < metrics.len() {
@@ -2305,9 +2356,7 @@ fn compute_verification_report(
         })
         .max();
     let time_to_last_success = match (earliest_send, last_execution) {
-        (Some(start), Some(end)) if end > start => {
-            Some(end.duration_since(start).as_secs_f64())
-        }
+        (Some(start), Some(end)) if end > start => Some(end.duration_since(start).as_secs_f64()),
         _ => None,
     };
 
@@ -2326,6 +2375,7 @@ fn compute_verification_report(
         min_executed_secs: min_executed,
         max_executed_secs: max_executed,
         time_to_last_success_secs: time_to_last_success,
+        peak_throughput,
         stuck: stuck_count,
         stuck_at,
     }
@@ -2409,9 +2459,7 @@ fn check_solana_incoming_message(
         }
         Err(e) => {
             let err_str = e.to_string();
-            if err_str.contains("AccountNotFound")
-                || err_str.contains("could not find account")
-            {
+            if err_str.contains("AccountNotFound") || err_str.contains("could not find account") {
                 Ok(None)
             } else {
                 Err(eyre::eyre!("Solana RPC error: {e}"))

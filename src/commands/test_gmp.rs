@@ -16,12 +16,12 @@ use crate::cli::resolve_axelar_id;
 use crate::commands::test_helpers::{
     extract_event_attr, extract_poll_id, wait_for_poll_votes, wait_for_proof,
 };
-use crate::preflight;
 use crate::cosmos::{
     build_execute_msg_any, derive_axelar_wallet, read_axelar_config, read_axelar_contract_field,
     sign_and_broadcast_cosmos_tx,
 };
 use crate::evm::{AxelarAmplifierGateway, ContractCall, SenderReceiver, read_artifact_bytecode};
+use crate::preflight;
 use crate::state::{read_state, save_state};
 use crate::ui;
 use crate::utils::read_contract_address;
@@ -64,12 +64,8 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
                 .map(String::from)
         })
         .unwrap_or_else(|| "ETH".to_string());
-    preflight::check_evm_balances(
-        &rpc_url,
-        &[("deployer", deployer_address)],
-        &token_symbol,
-    )
-    .await?;
+    preflight::check_evm_balances(&rpc_url, &[("deployer", deployer_address)], &token_symbol)
+        .await?;
 
     let gateway_addr = read_contract_address(&target_json, &axelar_id, "AxelarGateway")?;
     let gas_service_addr = read_contract_address(&target_json, &axelar_id, "AxelarGasService")?;

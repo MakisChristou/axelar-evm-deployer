@@ -27,7 +27,9 @@ pub async fn check_evm_balances(
         let display = wei_to_display(balance);
 
         if balance < MIN_BALANCE {
-            ui::warn(&format!("{label}: {addr} — {display:.4} {token_symbol} (LOW)"));
+            ui::warn(&format!(
+                "{label}: {addr} — {display:.4} {token_symbol} (LOW)"
+            ));
             underfunded.push((label, addr, display));
         } else {
             ui::kv(label, &format!("{addr} — {display:.4} {token_symbol}"));

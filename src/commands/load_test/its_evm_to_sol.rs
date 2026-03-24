@@ -323,10 +323,8 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
                     .connect_http(url.parse().expect("invalid RPC URL"));
 
                 Box::pin(async move {
-                    execute_interchain_transfer(
-                        &provider, its_proxy, tid, &dc, &rb, amt, gv, nonce,
-                    )
-                    .await
+                    execute_interchain_transfer(&provider, its_proxy, tid, &dc, &rb, amt, gv, nonce)
+                        .await
                 })
             });
 

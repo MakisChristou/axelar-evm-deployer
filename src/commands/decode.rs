@@ -2,7 +2,7 @@ use alloy::dyn_abi::{DynSolType, DynSolValue, JsonAbiExt, Specifier};
 use alloy::hex;
 use alloy::json_abi::JsonAbi;
 use alloy::primitives::B256;
-use eyre::{bail, Result};
+use eyre::{Result, bail};
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
@@ -40,12 +40,13 @@ pub fn run(calldata_hex: &str) -> Result<()> {
 pub(crate) fn decode_bytes(data: &[u8], indent: &str) -> Result<()> {
     // Try as function call (4-byte selector lookup)
     if data.len() >= 4
-        && let Some(func) = FUNC_DB.get(&<[u8; 4]>::try_from(&data[..4])?) {
-            let values = func.abi_decode_input(&data[4..])?;
-            println!("{indent}{}", func.signature());
-            print_decoded(&func.inputs, &values, &format!("{indent}  "), 0);
-            return Ok(());
-        }
+        && let Some(func) = FUNC_DB.get(&<[u8; 4]>::try_from(&data[..4])?)
+    {
+        let values = func.abi_decode_input(&data[4..])?;
+        println!("{indent}{}", func.signature());
+        print_decoded(&func.inputs, &values, &format!("{indent}  "), 0);
+        return Ok(());
+    }
 
     // Try as ITS payload
     if try_print_its(data, indent, 0) {
@@ -110,16 +111,10 @@ pub(crate) fn decode_log(
                     }
                     Some(DynSolType::Bool) => DynSolValue::Bool(topic[31] != 0),
                     Some(DynSolType::Uint(bits)) => {
-                        DynSolValue::Uint(
-                            alloy::primitives::Uint::from_be_bytes(topic.0),
-                            *bits,
-                        )
+                        DynSolValue::Uint(alloy::primitives::Uint::from_be_bytes(topic.0), *bits)
                     }
                     Some(DynSolType::Int(bits)) => {
-                        DynSolValue::Int(
-                            alloy::primitives::Signed::from_be_bytes(topic.0),
-                            *bits,
-                        )
+                        DynSolValue::Int(alloy::primitives::Signed::from_be_bytes(topic.0), *bits)
                     }
                     _ => {
                         // For dynamic types (string, bytes, arrays), topic is keccak hash
@@ -233,13 +228,11 @@ fn print_decoded(
                     let nested = format!("{indent}  ");
                     for (j, item) in arr.iter().enumerate() {
                         if let DynSolValue::Bytes(b) = item
-                            && b.len() >= 4 {
-                                println!(
-                                    "\n{indent}[{j}]: 0x{} ",
-                                    hex::encode(&b[..4])
-                                );
-                                try_print_nested(b, &format!("{nested}  "), depth + 1);
-                            }
+                            && b.len() >= 4
+                        {
+                            println!("\n{indent}[{j}]: 0x{} ", hex::encode(&b[..4]));
+                            try_print_nested(b, &format!("{nested}  "), depth + 1);
+                        }
                     }
                 }
                 _ => {}
@@ -256,12 +249,13 @@ fn try_print_nested(data: &[u8], indent: &str, depth: usize) -> bool {
     // Try as function call
     if data.len() >= 4
         && let Ok(sel) = <[u8; 4]>::try_from(&data[..4])
-            && let Some(func) = FUNC_DB.get(&sel)
-                && let Ok(values) = func.abi_decode_input(&data[4..]) {
-                    println!("{indent}{}", func.signature());
-                    print_decoded(&func.inputs, &values, &format!("{indent}  "), depth);
-                    return true;
-                }
+        && let Some(func) = FUNC_DB.get(&sel)
+        && let Ok(values) = func.abi_decode_input(&data[4..])
+    {
+        println!("{indent}{}", func.signature());
+        print_decoded(&func.inputs, &values, &format!("{indent}  "), depth);
+        return true;
+    }
 
     // Try ITS payload
     if try_print_its(data, indent, depth) {
@@ -270,10 +264,13 @@ fn try_print_nested(data: &[u8], indent: &str, depth: usize) -> bool {
 
     // Try as printable UTF-8
     if let Ok(s) = std::str::from_utf8(data)
-        && !s.is_empty() && s.chars().all(|c| c.is_ascii_graphic() || c.is_ascii_whitespace()) {
-            println!("{indent}→ \"{s}\"");
-            return true;
-        }
+        && !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_graphic() || c.is_ascii_whitespace())
+    {
+        println!("{indent}→ \"{s}\"");
+        return true;
+    }
 
     false
 }
@@ -312,9 +309,10 @@ fn try_print_its(data: &[u8], indent: &str, depth: usize) -> bool {
 
         if depth < MAX_DEPTH
             && let DynSolValue::Bytes(b) = value
-                && b.len() >= 4 {
-                    try_print_nested(b, &format!("{indent}    "), depth + 1);
-                }
+            && b.len() >= 4
+        {
+            try_print_nested(b, &format!("{indent}    "), depth + 1);
+        }
     }
     true
 }
@@ -398,20 +396,12 @@ fn its_message_def(msg_type: u64) -> Option<(&'static str, Vec<DynSolType>, Vec<
         ),
         3 => (
             "SEND_TO_HUB",
-            vec![
-                DynSolType::Uint(256),
-                DynSolType::String,
-                DynSolType::Bytes,
-            ],
+            vec![DynSolType::Uint(256), DynSolType::String, DynSolType::Bytes],
             vec!["messageType", "destinationChain", "payload"],
         ),
         4 => (
             "RECEIVE_FROM_HUB",
-            vec![
-                DynSolType::Uint(256),
-                DynSolType::String,
-                DynSolType::Bytes,
-            ],
+            vec![DynSolType::Uint(256), DynSolType::String, DynSolType::Bytes],
             vec!["messageType", "sourceChain", "payload"],
         ),
         5 => (
