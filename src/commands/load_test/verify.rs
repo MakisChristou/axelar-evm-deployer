@@ -2263,6 +2263,7 @@ fn compute_peak_throughput(txs: &[PendingTx]) -> PeakThroughput {
 
     let mut voted_times: Vec<f64> = Vec::new();
     let mut routed_times: Vec<f64> = Vec::new();
+    let mut hub_approved_times: Vec<f64> = Vec::new();
     let mut approved_times: Vec<f64> = Vec::new();
     let mut executed_times: Vec<f64> = Vec::new();
 
@@ -2273,6 +2274,9 @@ fn compute_peak_throughput(txs: &[PendingTx]) -> PeakThroughput {
         }
         if let Some(s) = tx.timing.routed_secs {
             routed_times.push(base + s);
+        }
+        if let Some(s) = tx.timing.hub_approved_secs {
+            hub_approved_times.push(base + s);
         }
         if let Some(s) = tx.timing.approved_secs {
             approved_times.push(base + s);
@@ -2299,6 +2303,7 @@ fn compute_peak_throughput(txs: &[PendingTx]) -> PeakThroughput {
     PeakThroughput {
         voted_tps: sustained_rate(&voted_times),
         routed_tps: sustained_rate(&routed_times),
+        hub_approved_tps: sustained_rate(&hub_approved_times),
         approved_tps: sustained_rate(&approved_times),
         executed_tps: sustained_rate(&executed_times),
     }

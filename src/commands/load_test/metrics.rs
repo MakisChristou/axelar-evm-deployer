@@ -115,6 +115,7 @@ pub struct VerificationReport {
 pub struct PeakThroughput {
     pub voted_tps: Option<f64>,
     pub routed_tps: Option<f64>,
+    pub hub_approved_tps: Option<f64>,
     pub approved_tps: Option<f64>,
     pub executed_tps: Option<f64>,
 }

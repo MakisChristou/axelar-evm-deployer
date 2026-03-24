@@ -265,7 +265,11 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         .await?;
 
     // --- Distribute ITS tokens to derived wallets ---
-    distribute_tokens(&write_provider, token_addr, &derived, amount_per_key).await?;
+    // Build a fresh provider so the nonce cache is not stale after deploy transactions.
+    let token_provider = ProviderBuilder::new()
+        .wallet(signer.clone())
+        .connect_http(evm_rpc_url.parse()?);
+    distribute_tokens(&token_provider, token_addr, &derived, amount_per_key).await?;
 
     // Receiver address on Solana — use the default Solana keypair's pubkey.
     let sol_keypair = crate::solana::load_keypair(args.keypair.as_deref())?;

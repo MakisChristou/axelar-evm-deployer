@@ -1342,6 +1342,9 @@ fn print_final_report(report: &LoadTestReport) {
             if let Some(t) = p.routed_tps {
                 parts.push(("routed", t));
             }
+            if let Some(t) = p.hub_approved_tps {
+                parts.push(("hub approved", t));
+            }
             if let Some(t) = p.approved_tps {
                 parts.push(("approved", t));
             }
@@ -1381,65 +1384,46 @@ fn print_final_report(report: &LoadTestReport) {
 
         // Segment breakdown — show step duration + cumulative total.
         // Each avg_*_secs value is cumulative from tx send. Step = current - previous.
+        // Steps are sorted by cumulative time so ITS hub_approved (which can precede
+        // routed) displays in the correct chronological order.
         let src = &report.source_chain;
         let dst = &report.destination_chain;
 
-        // Track the cumulative time of the previous step to compute step deltas.
-        let confirm_secs = report.avg_latency_ms.map(|ms| ms / 1000.0);
-        let mut prev: Option<f64> = None;
-
-        if let Some(total) = confirm_secs {
-            let step = total; // first step, no previous
-            println!(
-                "  {} step {step:.1}s \u{2502} total {total:.1}s  {}",
-                "\u{251c}\u{2500} confirm       ".dimmed(),
-                format_args!("({src})").dimmed(),
-            );
-            prev = Some(total);
+        // Collect all available steps with their cumulative totals and labels.
+        let mut steps: Vec<(f64, &str, String)> = Vec::new();
+        if let Some(total) = report.avg_latency_ms.map(|ms| ms / 1000.0) {
+            steps.push((total, "confirm", format!("({src})")));
         }
         if let Some(total) = v.avg_voted_secs {
-            let step = prev.map_or(total, |p| total - p);
-            println!(
-                "  {} step {step:.1}s \u{2502} total {total:.1}s  {}",
-                "\u{251c}\u{2500} voted         ".dimmed(),
-                "(axelar)".dimmed(),
-            );
-            prev = Some(total);
+            steps.push((total, "voted", "(axelar)".to_string()));
         }
         if let Some(total) = v.avg_routed_secs {
-            let step = prev.map_or(total, |p| total - p);
-            println!(
-                "  {} step {step:.1}s \u{2502} total {total:.1}s  {}",
-                "\u{251c}\u{2500} routed        ".dimmed(),
-                "(axelar)".dimmed(),
-            );
-            prev = Some(total);
+            steps.push((total, "routed", "(axelar)".to_string()));
         }
         if let Some(total) = v.avg_hub_approved_secs {
-            let step = prev.map_or(total, |p| total - p);
-            println!(
-                "  {} step {step:.1}s \u{2502} total {total:.1}s  {}",
-                "\u{251c}\u{2500} hub approved  ".dimmed(),
-                "(axelar hub)".dimmed(),
-            );
-            prev = Some(total);
+            steps.push((total, "hub approved", "(axelar hub)".to_string()));
         }
         if let Some(total) = v.avg_approved_secs {
-            let step = prev.map_or(total, |p| total - p);
-            println!(
-                "  {} step {step:.1}s \u{2502} total {total:.1}s  {}",
-                "\u{251c}\u{2500} approved      ".dimmed(),
-                format_args!("({dst})").dimmed(),
-            );
-            prev = Some(total);
+            steps.push((total, "approved", format!("({dst})")));
         }
         if let Some(total) = v.avg_executed_secs {
-            let step = prev.map_or(total, |p| total - p);
+            steps.push((total, "executed", format!("({dst})")));
+        }
+
+        // Sort by cumulative time so steps display in chronological order.
+        steps.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        let mut prev: Option<f64> = None;
+        for (i, (total, name, location)) in steps.iter().enumerate() {
+            let step = prev.map_or(*total, |p| total - p);
+            let is_last = i == steps.len() - 1;
+            let connector = if is_last { "\u{2514}\u{2500}" } else { "\u{251c}\u{2500}" };
             println!(
                 "  {} step {step:.1}s \u{2502} total {total:.1}s  {}",
-                "\u{2514}\u{2500} executed      ".dimmed(),
-                format_args!("({dst})").dimmed(),
+                format!("{connector} {name:<13}").dimmed(),
+                location.dimmed(),
             );
+            prev = Some(*total);
         }
 
         // Stuck
