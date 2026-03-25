@@ -1,9 +1,9 @@
-pub mod evm_to_sol;
+pub mod evm_sender;
 pub mod its_evm_to_sol;
 pub mod its_sol_to_evm;
 pub mod keypairs;
 pub mod metrics;
-pub mod sol_to_evm;
+pub mod sol_sender;
 mod sustained;
 mod verify;
 
@@ -629,9 +629,9 @@ async fn run_sol_to_evm(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
 
     let test_start = Instant::now();
     let mut report = if args.tps.is_some() && args.duration_secs.is_some() {
-        sol_to_evm::run_sustained_load_test_with_metrics(&args, &destination_address).await?
+        sol_sender::run_sustained_load_test_with_metrics(&args, &destination_address).await?
     } else {
-        sol_to_evm::run_load_test_with_metrics(&args, &destination_address).await?
+        sol_sender::run_load_test_with_metrics(&args, &destination_address).await?
     };
 
     let verification = verify::verify_onchain(
@@ -740,7 +740,7 @@ async fn run_evm_to_sol(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     ui::address("SenderReceiver", &format!("{sender_receiver_addr}"));
 
     // Destination on Solana: memo program (resolved per feature flag)
-    let destination_address = evm_to_sol::memo_program_id().to_string();
+    let destination_address = evm_sender::memo_program_id().to_string();
     let destination_address = destination_address.as_str();
     ui::kv("destination program", destination_address);
 
@@ -779,7 +779,7 @@ async fn run_evm_to_sol(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
             .await
         });
 
-        let mut report = evm_to_sol::run_sustained_load_test_with_metrics(
+        let mut report = evm_sender::run_sustained_load_test_with_metrics(
             &args,
             sender_receiver_addr,
             &main_key,
@@ -803,7 +803,7 @@ async fn run_evm_to_sol(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
         report.verification = Some(verification);
         report
     } else {
-        let mut report = evm_to_sol::run_load_test_with_metrics(
+        let mut report = evm_sender::run_load_test_with_metrics(
             &args,
             sender_receiver_addr,
             &main_key,
@@ -947,7 +947,7 @@ async fn run_evm_to_evm(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
 
     let test_start = Instant::now();
     let mut report = if args.tps.is_some() && args.duration_secs.is_some() {
-        evm_to_sol::run_sustained_load_test_with_metrics(
+        evm_sender::run_sustained_load_test_with_metrics(
             &args,
             sender_receiver_addr,
             &main_key,
@@ -960,7 +960,7 @@ async fn run_evm_to_evm(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
         )
         .await?
     } else {
-        evm_to_sol::run_load_test_with_metrics(
+        evm_sender::run_load_test_with_metrics(
             &args,
             sender_receiver_addr,
             &main_key,

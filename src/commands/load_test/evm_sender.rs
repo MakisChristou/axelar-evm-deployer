@@ -162,7 +162,7 @@ pub async fn run_load_test_with_metrics(
 
     for signer in &derived {
         let tx_payload = if evm_destination {
-            super::sol_to_evm::make_payload(&payload)
+            super::sol_sender::make_payload(&payload)
         } else {
             make_executable_payload(&payload, &counter_pda)
         };
@@ -481,7 +481,7 @@ pub(super) async fn run_sustained_load_test_with_metrics(
     let make_task: super::sustained::MakeTask =
         Box::new(move |key_idx: usize, nonce: Option<u64>| {
             let tx_payload = if evm_destination {
-                super::sol_to_evm::make_payload(&payload)
+                super::sol_sender::make_payload(&payload)
             } else {
                 make_executable_payload(&payload, &counter_pda)
             };
