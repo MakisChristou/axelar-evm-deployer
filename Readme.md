@@ -60,14 +60,13 @@ axe test gmp
 
 Sends a loopback GMP message on a deployed EVM chain and relays it through the full Amplifier pipeline end-to-end.
 
-### Solana (config mode)
+### Solana manual relaying
 
 ```bash
-cargo build --no-default-features --features testnet
-axe test gmp --config ../axelar-contract-deployments/axelar-chains-config/info/testnet.json --source-chain solana --destination-chain solana
+cargo run --no-default-features --features testnet -- test gmp --config ../axelar-contract-deployments/axelar-chains-config/info/testnet.json --source-chain solana --destination-chain solana
 ```
 
-Sends a GMP message from Solana, relays through the full Amplifier pipeline (verify → vote → route → prove), then approves the message on the Solana gateway (init verification session → verify all signatures → approve message). Requires `MNEMONIC` env var with a funded Cosmos wallet.
+Sends a GMP message from Solana and manually relays it through the full Amplifier pipeline end-to-end: callContract → verify_messages → vote → end_poll → route_messages → construct_proof → approve on Solana gateway (init verification session → verify all 12 signatures → approve message). Requires `MNEMONIC` env var with a funded Cosmos wallet.
 
 Build with the matching feature flag for the target network (`devnet-amplifier`, `stagenet`, `testnet`).
 
