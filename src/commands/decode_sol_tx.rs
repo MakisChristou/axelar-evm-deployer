@@ -301,31 +301,40 @@ pub async fn run(txid: &str, solana_rpc: &str) -> Result<()> {
         for (i, ix) in raw.instructions.iter().enumerate() {
             let program_idx = ix.program_id_index as usize;
             let program_id = all_keys.get(program_idx);
-            let program_name = program_id
-                .and_then(|pk| known.get(pk))
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| program_id.map_or("unknown".to_string(), |pk| pk.to_string()));
+            let program_label = program_id.and_then(|pk| known.get(pk)).copied();
+            let program_addr = program_id.map_or("unknown".to_string(), |pk| pk.to_string());
 
             let data_bytes = bs58::decode(&ix.data).into_vec().unwrap_or_default();
             let ix_name = instruction_name(&data_bytes).unwrap_or("unknown");
 
-            println!(
-                "\n[{}] {} {}",
-                i.to_string().dimmed(),
-                program_name.cyan(),
-                ix_name.bold()
-            );
+            if let Some(label) = program_label {
+                println!(
+                    "\n[{}] {} {} {}",
+                    i.to_string().dimmed(),
+                    label.cyan(),
+                    ix_name.bold(),
+                    format!("({})", program_addr).dimmed(),
+                );
+            } else {
+                println!(
+                    "\n[{}] {} {}",
+                    i.to_string().dimmed(),
+                    program_addr.cyan(),
+                    ix_name.bold()
+                );
+            }
 
             // Decode instruction arguments
-            decode_instruction_args(ix_name, &data_bytes, "    ");
+            decode_instruction_args(ix_name, &data_bytes, "  │ ");
 
             // Print accounts with role labels
+            println!("  {}", "Accounts:".dimmed());
             let labels = account_labels(ix_name);
             for (j, &acc_idx) in ix.accounts.iter().enumerate() {
                 let acc = all_keys.get(acc_idx as usize);
                 let label = labels.get(j).copied();
                 let acc_str = acc.map_or("?".to_string(), |pk| format_account(pk, &known, label));
-                println!("    Account {}: {}", j.to_string().dimmed(), acc_str);
+                println!("  │ {}: {}", j.to_string().dimmed(), acc_str);
             }
         }
     }
