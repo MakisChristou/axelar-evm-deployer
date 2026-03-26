@@ -587,44 +587,47 @@ pub fn extract_its_message_id(rpc_url: &str, signature_str: &str) -> Result<Stri
 
     let gateway_id = solana_axelar_gateway::id().to_string();
 
-    // Each "Program X invoke [N]" log with N >= 2 corresponds to one entry
-    // in the inner_instructions array (a CPI within the top-level instruction).
-    // We count them sequentially and find the gateway call_contract CPI.
+    // Parse logs to find which top-level instruction invoked the gateway and
+    // which inner CPI within that instruction is the event emit.
     //
-    // The message ID uses the index of the gateway `call_contract` invocation
-    // in the inner instructions array. After call_contract, the gateway emits
-    // an event via `emit_cpi!` — this does NOT create a separate "invoke" log
-    // but IS a separate entry in the inner_instructions array. So the message
-    // ID index = gateway_invoke_index + 1 (for the event emit that follows).
-    let mut inner_ix_counter: u32 = 0;
-    let mut last_gateway_idx: Option<u32> = None;
+    // Log pattern:
+    //   "Program X invoke [1]"  → top-level instruction start (depth 1)
+    //   "Program X invoke [N]"  → CPI at depth N (inner instruction)
+    //   "Program X success"     → instruction end
+    //
+    // We track which top-level instruction we're in (1-based group index)
+    // and count inner CPIs within each group separately.
+    let mut top_level_index: u32 = 0; // 1-based
+    let mut inner_ix_counter: u32 = 0; // 0-based within current group
+    let mut found_group: Option<u32> = None;
+    let mut found_inner_idx: Option<u32> = None;
 
     for log in &logs {
         if let Some(rest) = log.strip_prefix("Program ") {
             if rest.ends_with(" invoke [1]") {
-                continue;
-            }
-            if rest.contains(" invoke [") {
+                // New top-level instruction
+                top_level_index += 1;
+                inner_ix_counter = 0;
+            } else if rest.contains(" invoke [") {
+                // Inner CPI
                 if rest.split(" invoke [").next() == Some(gateway_id.as_str()) {
-                    last_gateway_idx = Some(inner_ix_counter);
+                    found_group = Some(top_level_index);
+                    // The emit_cpi! after this invoke adds one more inner instruction
+                    // that doesn't produce an "invoke" log. The message ID references
+                    // that emit instruction, so we add 1.
+                    found_inner_idx = Some(inner_ix_counter + 1);
                 }
                 inner_ix_counter += 1;
             }
         }
     }
 
-    // The emit_cpi! after call_contract adds one more inner instruction that
-    // doesn't produce an "invoke" log. The message ID references that emit
-    // instruction, so we add 1.
-    let last_gateway_idx = last_gateway_idx.map(|idx| idx + 1);
-
-    match last_gateway_idx {
-        Some(idx) => {
-            // Top-level instruction is index 0 (0-based), displayed as 1 (1-based)
-            // in the message ID format.
-            Ok(format!("{signature_str}-1.{idx}"))
+    match (found_group, found_inner_idx) {
+        (Some(group), Some(idx)) => {
+            // Convert to 1-based indexing for the message ID format
+            Ok(format!("{signature_str}-{group}.{idx}"))
         }
-        None => Err(eyre::eyre!(
+        _ => Err(eyre::eyre!(
             "could not find gateway call_contract CPI in transaction logs"
         )),
     }
