@@ -210,6 +210,7 @@ fn decode_payload_info(payload: &[u8]) -> String {
         Ok(decoded) => {
             let accounts = decoded.account_meta();
             let inner_data = decoded.payload_without_accounts();
+
             if accounts.is_empty() {
                 format!(
                     "{} bytes ({encoding}, no accounts, {} bytes data)",
@@ -229,17 +230,19 @@ fn decode_payload_info(payload: &[u8]) -> String {
     }
 }
 
-fn try_decode_call_contract_event(data: &[u8]) -> Option<String> {
+fn try_decode_call_contract_event(data: &[u8]) -> Option<(String, Vec<u8>)> {
     let event = borsh::from_slice::<solana_axelar_gateway::events::CallContractEvent>(data).ok()?;
     let payload_info = decode_payload_info(&event.payload);
-    Some(format!(
+    let payload_bytes = event.payload.clone();
+    let summary = format!(
         "sender: {}\n      destination_chain: \"{}\"\n      destination_address: \"{}\"\n      payload_hash: {}\n      payload: {}",
         event.sender,
         event.destination_chain,
         event.destination_contract_address,
         hex::encode(event.payload_hash),
         payload_info,
-    ))
+    );
+    Some((summary, payload_bytes))
 }
 
 // ---------------------------------------------------------------------------
@@ -429,10 +432,28 @@ pub async fn run(txid: &str, solana_rpc: &str) -> Result<()> {
 
                         // Try to decode event data
                         if event == "CallContractEvent"
-                            && let Some(decoded) = try_decode_call_contract_event(&data_bytes[16..])
+                            && let Some((summary, payload_bytes)) =
+                                try_decode_call_contract_event(&data_bytes[16..])
                         {
-                            for line in decoded.lines() {
+                            for line in summary.lines() {
                                 println!("      {line}");
+                            }
+                            // Try to ABI-decode the inner payload
+                            if let Some(first) = payload_bytes.first()
+                                && *first == 0x01
+                            {
+                                // ABI encoding — try to decode inner data
+                                if let Ok(decoded) =
+                                    solana_axelar_gateway::payload::AxelarMessagePayload::decode(
+                                        &payload_bytes,
+                                    )
+                                {
+                                    let inner = decoded.payload_without_accounts();
+                                    if !inner.is_empty() {
+                                        println!("      {}", "Decoded payload:".dimmed());
+                                        let _ = super::decode::decode_bytes(inner, "        ");
+                                    }
+                                }
                             }
                         }
                     } else {
