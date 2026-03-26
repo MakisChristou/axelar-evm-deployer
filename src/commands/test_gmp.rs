@@ -474,59 +474,57 @@ pub async fn run_config(
     // --- Step 1: Send callContract ---
     ui::step_header(1, 8, "Send callContract");
 
-    let (message_id, payload_hash_hex, source_address, destination_address) = match src_type {
-        "svm" => {
-            let keypair = crate::solana::load_keypair(None)?;
-            let memo_program = crate::commands::load_test::evm_sender::memo_program_id();
-            let dest_addr = if dst_type == "svm" {
-                memo_program.to_string()
-            } else {
-                // For EVM destination, we'd need a SenderReceiver address
-                // For now, use memo as placeholder
-                memo_program.to_string()
-            };
+    let (message_id, payload_hash_hex, source_address, destination_address, payload) =
+        match src_type {
+            "svm" => {
+                let keypair = crate::solana::load_keypair(None)?;
+                let memo_program = crate::commands::load_test::evm_sender::memo_program_id();
+                let dest_addr = memo_program.to_string();
 
-            let payload = crate::commands::load_test::evm_sender::make_executable_payload(
-                &None,
-                &solana_sdk::pubkey::Pubkey::find_program_address(&[b"counter"], &memo_program).0,
-            );
-            let payload_hash = keccak256(&payload);
+                let payload = crate::commands::load_test::evm_sender::make_executable_payload(
+                    &None,
+                    &solana_sdk::pubkey::Pubkey::find_program_address(&[b"counter"], &memo_program)
+                        .0,
+                );
+                let payload_hash = keccak256(&payload);
 
-            ui::kv("destination address", &dest_addr);
+                ui::kv("destination address", &dest_addr);
 
-            let (_sig, metrics) =
-                crate::solana::send_call_contract(src_rpc, &keypair, &dst, &dest_addr, &payload)?;
+                let (_sig, metrics) = crate::solana::send_call_contract(
+                    src_rpc, &keypair, &dst, &dest_addr, &payload,
+                )?;
 
-            let raw_sig = metrics.signature.clone();
-            let message_id = crate::solana::extract_its_message_id(src_rpc, &raw_sig)
-                .unwrap_or_else(|_| format!("{raw_sig}-1.1"));
+                let raw_sig = metrics.signature.clone();
+                let message_id = crate::solana::extract_its_message_id(src_rpc, &raw_sig)
+                    .unwrap_or_else(|_| format!("{raw_sig}-1.1"));
 
-            ui::tx_hash("tx", &raw_sig);
-            ui::kv("message_id", &message_id);
-            ui::kv("payload_hash", &alloy::hex::encode(payload_hash));
-            ui::success(&format!(
-                "confirmed ({}ms)",
-                metrics.latency_ms.unwrap_or(0)
-            ));
+                ui::tx_hash("tx", &raw_sig);
+                ui::kv("message_id", &message_id);
+                ui::kv("payload_hash", &alloy::hex::encode(payload_hash));
+                ui::success(&format!(
+                    "confirmed ({}ms)",
+                    metrics.latency_ms.unwrap_or(0)
+                ));
 
-            let source_addr = {
-                use solana_sdk::signer::Signer;
-                keypair.pubkey().to_string()
-            };
-            (
-                message_id,
-                alloy::hex::encode(payload_hash),
-                source_addr,
-                dest_addr,
-            )
-        }
-        "evm" => {
-            return Err(eyre::eyre!(
-                "EVM source not yet supported in config mode. Use --axelar-id for EVM chains."
-            ));
-        }
-        other => return Err(eyre::eyre!("unsupported source chain type: {other}")),
-    };
+                let source_addr = {
+                    use solana_sdk::signer::Signer;
+                    keypair.pubkey().to_string()
+                };
+                (
+                    message_id,
+                    alloy::hex::encode(payload_hash),
+                    source_addr,
+                    dest_addr,
+                    payload,
+                )
+            }
+            "evm" => {
+                return Err(eyre::eyre!(
+                    "EVM source not yet supported in config mode. Use --axelar-id for EVM chains."
+                ));
+            }
+            other => return Err(eyre::eyre!("unsupported source chain type: {other}")),
+        };
 
     // --- Cosmos relay (steps 2-6, chain-agnostic) ---
     let mnemonic = mnemonic_override
@@ -729,10 +727,27 @@ pub async fn run_config(
 
             // Step 8: Execute on destination (memo program)
             ui::step_header(8, 8, "Execute on destination");
-            ui::info(
-                "message approved — execution will happen when destination program is invoked",
-            );
-            // TODO: build and send the memo program execute transaction
+
+            // Build the Message struct matching what was sent in step 1
+            let gmp_message = solana_axelar_std::Message {
+                cc_id: solana_axelar_std::CrossChainId {
+                    chain: src.clone(),
+                    id: message_id.clone(),
+                },
+                source_address: source_address.clone(),
+                destination_chain: dst.clone(),
+                destination_address: destination_address.clone(),
+                payload_hash: {
+                    let bytes = alloy::hex::decode(&payload_hash_hex)?;
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&bytes);
+                    arr
+                },
+            };
+
+            let memo_sig =
+                crate::solana::execute_on_memo(dst_rpc, &keypair, gmp_message, &payload)?;
+            ui::tx_hash("execute", &memo_sig.to_string());
         }
         "evm" => {
             return Err(eyre::eyre!(

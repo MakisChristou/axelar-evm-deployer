@@ -956,6 +956,95 @@ pub fn approve_messages_on_gateway(
     Ok(())
 }
 
+/// Execute an approved GMP message on the Memo program.
+/// Calls the Memo program's `execute` instruction which validates the message
+/// against the gateway and logs the memo payload.
+#[allow(dead_code)]
+pub fn execute_on_memo(
+    rpc_url: &str,
+    payer: &Keypair,
+    message: solana_axelar_std::Message,
+    payload: &[u8],
+) -> Result<Signature> {
+    let rpc = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+    let gateway_id = solana_axelar_gateway::id();
+    let memo_id = solana_axelar_memo::id();
+
+    let command_id = message.command_id();
+
+    // AxelarExecuteAccounts
+    let (incoming_message_pda, _) = Pubkey::find_program_address(
+        &[
+            solana_axelar_gateway::IncomingMessage::SEED_PREFIX,
+            command_id.as_ref(),
+        ],
+        &gateway_id,
+    );
+    let (signing_pda, _) = Pubkey::find_program_address(
+        &[
+            solana_axelar_gateway::ValidateMessageSigner::SEED_PREFIX,
+            command_id.as_ref(),
+        ],
+        &memo_id,
+    );
+    let gateway_config_pda = solana_axelar_gateway::GatewayConfig::find_pda().0;
+    let (gateway_event_authority, _) =
+        Pubkey::find_program_address(&[b"__event_authority"], &gateway_id);
+
+    // Counter PDA for the memo program
+    let (counter_pda, _) = Pubkey::find_program_address(&[b"counter"], &memo_id);
+
+    // The payload passed to call_contract was AxelarMessagePayload-encoded (ABI scheme).
+    // The execute instruction receives the inner payload (memo bytes) and the encoding scheme.
+    // We need to decode the AxelarMessagePayload to get the inner payload.
+    let decoded = solana_axelar_gateway::payload::AxelarMessagePayload::decode(payload)
+        .map_err(|e| eyre::eyre!("failed to decode payload: {e:?}"))?;
+    let inner_payload = decoded.payload_without_accounts().to_vec();
+    let encoding_scheme = decoded.encoding_scheme();
+
+    let ix_data = solana_axelar_memo::instruction::Execute {
+        message,
+        payload: inner_payload,
+        encoding_scheme,
+    }
+    .data();
+
+    let ix = Instruction {
+        program_id: memo_id,
+        accounts: vec![
+            // AxelarExecuteAccounts (order from executable_accounts! macro)
+            AccountMeta::new(incoming_message_pda, false),
+            AccountMeta::new_readonly(signing_pda, false),
+            AccountMeta::new_readonly(gateway_config_pda, false),
+            AccountMeta::new_readonly(gateway_event_authority, false),
+            AccountMeta::new_readonly(gateway_id, false),
+            // Memo program accounts
+            AccountMeta::new(counter_pda, false),
+        ],
+        data: ix_data,
+    };
+
+    let cu_limit: u32 = 400_000;
+    let cu_ix = Instruction {
+        program_id: "ComputeBudget111111111111111111111111111111"
+            .parse()
+            .unwrap(),
+        accounts: vec![],
+        data: [&[0x02], cu_limit.to_le_bytes().as_slice()].concat(),
+    };
+
+    let recent_blockhash = rpc.get_latest_blockhash()?;
+    let tx = Transaction::new_signed_with_payer(
+        &[cu_ix, ix],
+        Some(&payer.pubkey()),
+        &[payer],
+        recent_blockhash,
+    );
+
+    let sig = rpc.send_and_confirm_transaction_with_spinner(&tx)?;
+    Ok(sig)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
