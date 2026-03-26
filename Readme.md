@@ -40,7 +40,8 @@ workspace/
 | `axe test its`       | Deploy + transfer an interchain token         | no      |
 | `axe test load-test` | Cross-chain load test                         | yes     |
 | `axe decode calldata`| Decode raw EVM calldata                       | -       |
-| `axe decode tx`      | Fetch & decode a full EVM transaction          | -       |
+| `axe decode tx`      | Fetch & decode an EVM or Solana transaction   | -       |
+| `axe decode sol-state`| Dump Solana gateway & ITS on-chain state     | -       |
 
 ## Deploy
 
@@ -246,19 +247,28 @@ Decodes EVM calldata against a built-in ABI database (Gateway, ITS, ITS Factory,
 ### Decode transaction
 
 ```bash
-axe decode tx 0xabc123...                        # auto-discovers configs from sibling repo
-axe decode tx 0xabc123... --chain avalanche       # skip brute-forcing, target one chain
-axe decode tx 0xabc123... --config path/to.json   # use a specific config file
+axe decode tx 0xabc123...                        # EVM: auto-discovers configs from sibling repo
+axe decode tx 0xabc123... --chain avalanche       # EVM: skip brute-forcing, target one chain
+axe decode tx 3zqVhRp...                          # Solana: auto-detects network (devnet/testnet/mainnet)
 ```
 
-Fetches a transaction by hash from all EVM chains in parallel, then decodes the calldata and all event logs. Chains configs are auto-discovered from the sibling `axelar-contract-deployments` repo (mainnet, testnet, stagenet, devnet-amplifier).
+Auto-detects EVM (0x-prefixed) vs Solana (base58) transactions. For EVM, fetches from all chains in parallel and decodes calldata + event logs. For Solana, decodes all Axelar program instructions (Gateway, ITS, GasService, Memo), CPI events, account roles, and nested ITS hub payloads.
 
-Set `ALCHEMY_TOKEN` to use Alchemy RPCs for supported chains (faster and more reliable than public RPCs):
+Set `ALCHEMY_TOKEN` to use Alchemy RPCs for EVM chains:
 
 ```bash
 export ALCHEMY_TOKEN=your_token_here
 axe decode tx 0xabc123...
 ```
+
+### Dump Solana state
+
+```bash
+axe decode sol-state                              # scans all networks (devnet/testnet/mainnet)
+axe decode sol-state --rpc https://custom-rpc      # use a specific RPC
+```
+
+Dumps on-chain state for all Axelar Solana programs across all known deployments: gateway config (epoch, verifier sets, operator, domain separator), ITS config (hub address, chain name, trusted chains, paused status).
 
 ## Configuration
 
