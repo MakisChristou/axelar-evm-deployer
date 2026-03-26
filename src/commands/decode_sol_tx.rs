@@ -17,10 +17,67 @@ use std::str::FromStr;
 
 fn known_programs() -> HashMap<Pubkey, &'static str> {
     let mut m = HashMap::new();
+
+    // Compiled feature's IDs (always included)
     m.insert(solana_axelar_gateway::id(), "AxelarGateway");
     m.insert(solana_axelar_gas_service::id(), "AxelarGasService");
     m.insert(solana_axelar_memo::id(), "AxelarMemo");
     m.insert(solana_axelar_its::id(), "AxelarITS");
+
+    // All known program IDs across all networks so decode works regardless of build feature
+    let all_ids: &[(&str, &str)] = &[
+        // devnet-amplifier
+        (
+            "gtwT4uGVTYSPnTGv6rSpMheyFyczUicxVWKqdtxNGw9",
+            "AxelarGateway",
+        ),
+        (
+            "gasHyxjNZSNsEiMbRLa5JGLCNx1TRsdCy1xwfMBehYB",
+            "AxelarGasService",
+        ),
+        ("memKnP9ex71TveNFpsFNVqAYGEe1v9uHVsHNdFPW6FY", "AxelarMemo"),
+        ("itsm3zZhp2oGgEfq7XBu9ojRCYZJnhzecbAEPCrvx2B", "AxelarITS"),
+        // stagenet
+        (
+            "gtwYHfHHipAoj8Hfp3cGr3vhZ8f3UtptGCQLqjBkaSZ",
+            "AxelarGateway",
+        ),
+        (
+            "gasgy6jz24wrfZL98uMy8QFUFziVPZ3bNLGXqnyTstW",
+            "AxelarGasService",
+        ),
+        ("mem4E22pPgkbHAvoUYHa7HybBgUKn6jFjvj1YnPdkaq", "AxelarMemo"),
+        ("itsm3zZhp2oGgEfq7XBu9ojRCYZJnhzecbAEPCrvx2B", "AxelarITS"),
+        // testnet
+        (
+            "gtwJ8LWDRWZpbvCqp8sDeTgy3GSyuoEsiaKC8wSXJqq",
+            "AxelarGateway",
+        ),
+        (
+            "gasq7KHHv9Rs8C82hu3dgoBD9wk5LTKpWqbdf5o5juu",
+            "AxelarGasService",
+        ),
+        ("mem7UJouaeyTgySvXhQSxWtGFrWPQ89jywjc8YvQFRT", "AxelarMemo"),
+        ("itsJo4kNJ3mdh3requwbtTTt7vyYTudp1pxhn2KiHMc", "AxelarITS"),
+        // Well-known system programs
+        ("11111111111111111111111111111111", "SystemProgram"),
+        (
+            "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+            "TokenProgram",
+        ),
+        ("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb", "Token2022"),
+        (
+            "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+            "AssociatedToken",
+        ),
+    ];
+
+    for (addr, name) in all_ids {
+        if let Ok(pk) = addr.parse() {
+            m.entry(pk).or_insert(name);
+        }
+    }
+
     m
 }
 
