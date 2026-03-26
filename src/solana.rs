@@ -762,9 +762,19 @@ pub fn verify_signature(
         data: ix_data.data(),
     };
 
+    // SetComputeUnitLimit: program_id = ComputeBudget111..., data = [0x02, limit_u32_le]
+    let cu_limit: u32 = 400_000;
+    let cu_ix = Instruction {
+        program_id: "ComputeBudget111111111111111111111111111111"
+            .parse()
+            .unwrap(),
+        accounts: vec![],
+        data: [&[0x02], cu_limit.to_le_bytes().as_slice()].concat(),
+    };
+
     let recent_blockhash = rpc.get_latest_blockhash()?;
     let tx = Transaction::new_signed_with_payer(
-        &[ix],
+        &[cu_ix, ix],
         Some(&payer.pubkey()),
         &[payer],
         recent_blockhash,
@@ -879,12 +889,18 @@ pub fn approve_messages_on_gateway(
     ui::info(&format!("verifying {num_signers} signatures..."));
 
     for (i, verifier_info) in execute_data.signing_verifier_set_leaves.iter().enumerate() {
+        // Normalize recovery ID: Cosmos signers produce 27/28 (Ethereum-style),
+        // but Solana's secp256k1_recover expects 0/1.
+        let mut info = verifier_info.clone();
+        if info.signature.0[64] >= 27 {
+            info.signature.0[64] -= 27;
+        }
         match verify_signature(
             rpc_url,
             payer,
             execute_data.payload_merkle_root,
             execute_data.signing_verifier_set_merkle_root,
-            verifier_info.clone(),
+            info,
         ) {
             Ok(_) => {
                 ui::info(&format!("  signature {}/{num_signers} verified", i + 1));
@@ -952,8 +968,7 @@ mod tests {
             .unwrap();
 
         // GatewayConfig PDA
-        let (config_pda, _) =
-            Pubkey::find_program_address(&[b"gateway"], &gateway_id);
+        let (config_pda, _) = Pubkey::find_program_address(&[b"gateway"], &gateway_id);
         println!("GatewayConfig PDA: {config_pda}");
         assert_eq!(
             config_pda.to_string(),
@@ -964,10 +979,8 @@ mod tests {
         let onchain_hash =
             hex::decode("7b8163c3123a65f351c1d5b1e94c44841e731ea57b51f55479207380cab933c5")
                 .unwrap();
-        let (tracker_pda, _) = Pubkey::find_program_address(
-            &[b"ver-set-tracker", &onchain_hash],
-            &gateway_id,
-        );
+        let (tracker_pda, _) =
+            Pubkey::find_program_address(&[b"ver-set-tracker", &onchain_hash], &gateway_id);
         println!("VerifierSetTracker PDA (on-chain):  {tracker_pda}");
         assert_eq!(
             tracker_pda.to_string(),
@@ -978,10 +991,8 @@ mod tests {
         let prover_hash =
             hex::decode("046c15e70bf840b19ef2e727bbfe6fae18155077342b2aa41d766a2f6db32cb1")
                 .unwrap();
-        let (tracker_pda2, _) = Pubkey::find_program_address(
-            &[b"ver-set-tracker", &prover_hash],
-            &gateway_id,
-        );
+        let (tracker_pda2, _) =
+            Pubkey::find_program_address(&[b"ver-set-tracker", &prover_hash], &gateway_id);
         println!("VerifierSetTracker PDA (prover):    {tracker_pda2}");
 
         // These should be DIFFERENT — confirming the mismatch
@@ -993,46 +1004,40 @@ mod tests {
     }
 }
 
-    #[test]
-    fn derive_devnet_gateway_pdas() {
-        let gateway_id: Pubkey = "gtwT4uGVTYSPnTGv6rSpMheyFyczUicxVWKqdtxNGw9"
-            .parse()
-            .unwrap();
+#[test]
+fn derive_devnet_gateway_pdas() {
+    let gateway_id: Pubkey = "gtwT4uGVTYSPnTGv6rSpMheyFyczUicxVWKqdtxNGw9"
+        .parse()
+        .unwrap();
 
-        let (config_pda, _) = Pubkey::find_program_address(&[b"gateway"], &gateway_id);
-        println!("=== DEVNET-AMPLIFIER ===");
-        println!("GatewayConfig PDA: {config_pda}");
+    let (config_pda, _) = Pubkey::find_program_address(&[b"gateway"], &gateway_id);
+    println!("=== DEVNET-AMPLIFIER ===");
+    println!("GatewayConfig PDA: {config_pda}");
 
-        // MultisigProver verifier set: caa238976160fcea5d5e5f4f3ea2ce0bed9106847e2d6d939de746c890c1faed
-        let prover_hash =
-            hex::decode("caa238976160fcea5d5e5f4f3ea2ce0bed9106847e2d6d939de746c890c1faed")
-                .unwrap();
-        let (tracker_pda, _) = Pubkey::find_program_address(
-            &[b"ver-set-tracker", &prover_hash],
-            &gateway_id,
-        );
-        println!("VerifierSetTracker PDA (prover set): {tracker_pda}");
-        println!("Check on-chain: solana account {tracker_pda} --url https://api.devnet.solana.com");
-    }
+    // MultisigProver verifier set: caa238976160fcea5d5e5f4f3ea2ce0bed9106847e2d6d939de746c890c1faed
+    let prover_hash =
+        hex::decode("caa238976160fcea5d5e5f4f3ea2ce0bed9106847e2d6d939de746c890c1faed").unwrap();
+    let (tracker_pda, _) =
+        Pubkey::find_program_address(&[b"ver-set-tracker", &prover_hash], &gateway_id);
+    println!("VerifierSetTracker PDA (prover set): {tracker_pda}");
+    println!("Check on-chain: solana account {tracker_pda} --url https://api.devnet.solana.com");
+}
 
-    #[test]
-    fn derive_stagenet_gateway_pdas() {
-        let gateway_id: Pubkey = "gtwYHfHHipAoj8Hfp3cGr3vhZ8f3UtptGCQLqjBkaSZ"
-            .parse()
-            .unwrap();
+#[test]
+fn derive_stagenet_gateway_pdas() {
+    let gateway_id: Pubkey = "gtwYHfHHipAoj8Hfp3cGr3vhZ8f3UtptGCQLqjBkaSZ"
+        .parse()
+        .unwrap();
 
-        let (config_pda, _) = Pubkey::find_program_address(&[b"gateway"], &gateway_id);
-        println!("=== STAGENET ===");
-        println!("GatewayConfig PDA: {config_pda}");
+    let (config_pda, _) = Pubkey::find_program_address(&[b"gateway"], &gateway_id);
+    println!("=== STAGENET ===");
+    println!("GatewayConfig PDA: {config_pda}");
 
-        // MultisigProver verifier set: 315ad3ca3e873b65dbc5dd4a446a62018ea368b5d9f29232fa090875fdaa50b8
-        let prover_hash =
-            hex::decode("315ad3ca3e873b65dbc5dd4a446a62018ea368b5d9f29232fa090875fdaa50b8")
-                .unwrap();
-        let (tracker_pda, _) = Pubkey::find_program_address(
-            &[b"ver-set-tracker", &prover_hash],
-            &gateway_id,
-        );
-        println!("VerifierSetTracker PDA (prover set): {tracker_pda}");
-        println!("Check on-chain: solana account {tracker_pda} --url https://api.testnet.solana.com");
-    }
+    // MultisigProver verifier set: 315ad3ca3e873b65dbc5dd4a446a62018ea368b5d9f29232fa090875fdaa50b8
+    let prover_hash =
+        hex::decode("315ad3ca3e873b65dbc5dd4a446a62018ea368b5d9f29232fa090875fdaa50b8").unwrap();
+    let (tracker_pda, _) =
+        Pubkey::find_program_address(&[b"ver-set-tracker", &prover_hash], &gateway_id);
+    println!("VerifierSetTracker PDA (prover set): {tracker_pda}");
+    println!("Check on-chain: solana account {tracker_pda} --url https://api.testnet.solana.com");
+}
