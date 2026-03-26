@@ -1348,8 +1348,10 @@ fn decode_instruction_args(ix_name: &str, data: &[u8], indent: &str) {
                 }
             }
         }
-        "ValidateMessage" => {
-            // Same Message struct as Execute
+        "ValidateMessage" | "ApproveMessage" => {
+            // Both take a Message (or MerklizedMessage containing a Message) as first arg.
+            // MerklizedMessage: MessageLeaf { Message, position, set_size, domain_sep } + proof
+            // Message: CrossChainId { chain, id }, source_address, dest_chain, dest_addr, payload_hash
             if let Ok((chain, rest)) = decode_borsh_string(args)
                 && let Ok((id, rest)) = decode_borsh_string(rest)
             {
