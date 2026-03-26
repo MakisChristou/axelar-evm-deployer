@@ -516,15 +516,35 @@ fn decode_instruction_args(ix_name: &str, data: &[u8], indent: &str) {
     let args = &data[8..]; // skip 8-byte discriminator
 
     match ix_name {
-        "CallContract" | "PayGas" => {
+        "CallContract" => {
             if let Ok((dest_chain, rest)) = decode_borsh_string(args) {
                 println!("{indent}destination_chain: \"{dest_chain}\"");
                 if let Ok((dest_addr, rest)) = decode_borsh_string(rest) {
                     println!("{indent}destination_address: \"{dest_addr}\"");
+                    // Remaining bytes are the payload (borsh-encoded Vec<u8>)
+                    if let Ok((payload_str, _)) = decode_borsh_bytes(rest) {
+                        let (size, content) = decode_payload(&payload_str);
+                        match content {
+                            Some(decoded) => println!("{indent}payload: {size} → {decoded}"),
+                            None => println!("{indent}payload: {size}"),
+                        }
+                    }
+                }
+            }
+        }
+        "PayGas" => {
+            if let Ok((dest_chain, rest)) = decode_borsh_string(args) {
+                println!("{indent}destination_chain: \"{dest_chain}\"");
+                if let Ok((dest_addr, rest)) = decode_borsh_string(rest) {
+                    println!("{indent}destination_address: \"{dest_addr}\"");
+                    // Next 32 bytes are the payload_hash
                     if rest.len() >= 32 {
                         println!("{indent}payload_hash: {}", hex::encode(&rest[..32]));
-                        if rest.len() > 32 {
-                            println!("{indent}payload: {} bytes", rest.len() - 32);
+                        let rest = &rest[32..];
+                        // Remaining: gas_amount (u64) + refund_address (pubkey)
+                        if rest.len() >= 8 {
+                            let gas = u64::from_le_bytes(rest[..8].try_into().unwrap_or_default());
+                            println!("{indent}gas_amount: {gas} lamports");
                         }
                     }
                 }
@@ -568,6 +588,18 @@ fn decode_instruction_args(ix_name: &str, data: &[u8], indent: &str) {
             }
         }
     }
+}
+
+/// Decode borsh-encoded bytes (4-byte little-endian length + raw bytes)
+fn decode_borsh_bytes(data: &[u8]) -> Result<(Vec<u8>, &[u8])> {
+    if data.len() < 4 {
+        bail!("not enough data for bytes length");
+    }
+    let len = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+    if data.len() < 4 + len {
+        bail!("not enough data for bytes content");
+    }
+    Ok((data[4..4 + len].to_vec(), &data[4 + len..]))
 }
 
 /// Decode a borsh-encoded string (4-byte little-endian length + UTF-8 bytes)
