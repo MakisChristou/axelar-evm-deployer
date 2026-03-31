@@ -181,6 +181,7 @@ pub fn resolve_from_config(
     destination_chain_override: Option<String>,
     private_key_override: Option<String>,
     source_rpc_override: Option<String>,
+    destination_rpc_override: Option<String>,
 ) -> Result<ResolvedConfig> {
     let config_content = std::fs::read_to_string(config)
         .map_err(|e| eyre::eyre!("failed to read config {}: {e}", config.display()))?;
@@ -237,15 +238,16 @@ pub fn resolve_from_config(
         .to_string();
 
     let resolved_source_rpc = source_rpc_override.unwrap_or(source_rpc);
+    let resolved_destination_rpc = destination_rpc_override.unwrap_or(destination_rpc);
     ui::kv("source RPC", &resolved_source_rpc);
-    ui::kv("destination RPC", &destination_rpc);
+    ui::kv("destination RPC", &resolved_destination_rpc);
 
     Ok(ResolvedConfig {
         test_type,
         source_chain,
         destination_chain,
         source_rpc: resolved_source_rpc,
-        destination_rpc,
+        destination_rpc: resolved_destination_rpc,
         private_key: private_key_override,
     })
 }
