@@ -288,15 +288,14 @@ Shows recent transactions for Axelar Solana programs (Gateway, ITS, GasService, 
 
 ```bash
 axe decode evm-activity --contract gateway --network devnet-amplifier --chain avalanche-fuji --limit 5
-axe decode evm-activity --network devnet-amplifier --limit 10         # all contracts, all EVM chains
-axe decode evm-activity --contract its --network testnet --json       # machine-readable JSON
+axe decode evm-activity --contract its --network testnet --chain flow --json
 ```
 
 Shows recent events from Axelar EVM contracts (Gateway, ITS, GasService) using `eth_getLogs`. Auto-discovers contract addresses from config files. Decodes event names and parameters using the embedded ABI database.
 
 ### LLM / AI Assistant Usage
 
-See [LLM-GUIDE.md](LLM-GUIDE.md) for a complete guide on using `axe` for debugging cross-chain messages with AI assistants. Covers: tracing stuck messages, decoding transactions, inspecting on-chain state, and JSON output for programmatic use.
+See [LLM-GUIDE.md](LLM-GUIDE.md) for a complete guide on using `axe` for debugging cross-chain messages with AI assistants.
 
 ## Configuration
 
