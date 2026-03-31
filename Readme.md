@@ -42,6 +42,7 @@ workspace/
 | `axe decode calldata`| Decode raw EVM calldata                       | -       |
 | `axe decode tx`      | Fetch & decode an EVM or Solana transaction   | -       |
 | `axe decode sol-activity`| Recent Solana program activity            | -       |
+| `axe decode evm-activity`| Recent EVM contract events               | -       |
 
 ## Deploy
 
@@ -282,6 +283,16 @@ axe decode sol-activity --program its --network devnet-amplifier --json # machin
 ```
 
 Shows recent transactions for Axelar Solana programs (Gateway, ITS, GasService, Memo). Auto-discovers program addresses from the sibling `axelar-contract-deployments` config files. Decodes instruction names, args, and CPI events. Use `--json` for structured output consumable by LLMs for debugging.
+
+### EVM contract activity
+
+```bash
+axe decode evm-activity --contract gateway --network devnet-amplifier --chain avalanche-fuji --limit 5
+axe decode evm-activity --network devnet-amplifier --limit 10         # all contracts, all EVM chains
+axe decode evm-activity --contract its --network testnet --json       # machine-readable JSON
+```
+
+Shows recent events from Axelar EVM contracts (Gateway, ITS, GasService) using `eth_getLogs`. Auto-discovers contract addresses from config files. Decodes event names and parameters using the embedded ABI database.
 
 ## Configuration
 
