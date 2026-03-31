@@ -548,6 +548,20 @@ pub async fn run(args: LoadTestArgs) -> Result<()> {
         args.protocol, args.test_type, args.source_chain, args.destination_chain
     ));
 
+    // Block consensus chains that have no VotingVerifier — we can't verify them
+    let src = &args.source_chain;
+    let has_source_vv = read_axelar_contract_field(
+        &args.config,
+        &format!("/axelar/contracts/VotingVerifier/{src}/address"),
+    )
+    .is_ok();
+    if !has_source_vv {
+        eyre::bail!(
+            "source chain '{src}' has no VotingVerifier in the config (consensus chain). \
+             Load test verification requires an Amplifier chain with a VotingVerifier."
+        );
+    }
+
     match (args.protocol, args.test_type) {
         (Protocol::Gmp, TestType::SolToEvm) => run_sol_to_evm(args, run_start).await,
         (Protocol::Gmp, TestType::EvmToSol) => run_evm_to_sol(args, run_start).await,

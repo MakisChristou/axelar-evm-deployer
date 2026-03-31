@@ -56,6 +56,13 @@ async fn main() -> Result<()> {
                 limit,
                 json,
             } => commands::decode_sol_activity::run(program, network, limit, json).await,
+            cli::DecodeCommands::EvmActivity {
+                contract,
+                network,
+                chain,
+                limit,
+                json,
+            } => commands::decode_evm_activity::run(contract, network, chain, limit, json).await,
         },
         cli::Commands::Test { subcommand } => match subcommand {
             cli::TestCommands::Gmp {

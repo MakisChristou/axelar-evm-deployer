@@ -208,6 +208,29 @@ pub enum DecodeCommands {
         #[arg(long)]
         json: bool,
     },
+
+    /// Show recent EVM contract events (Gateway, ITS, GasService)
+    EvmActivity {
+        /// Filter to a specific contract type
+        #[arg(long, value_enum)]
+        contract: Option<EvmContract>,
+
+        /// Axelar network (devnet-amplifier, stagenet, testnet, mainnet)
+        #[arg(long)]
+        network: String,
+
+        /// EVM chain name (e.g. avalanche-fuji, eth-sepolia)
+        #[arg(long)]
+        chain: String,
+
+        /// Max number of events to show per contract (default: 20)
+        #[arg(long, default_value = "20")]
+        limit: usize,
+
+        /// Output as JSON for machine consumption
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
@@ -216,6 +239,13 @@ pub enum SolProgram {
     Its,
     GasService,
     Memo,
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub enum EvmContract {
+    Gateway,
+    Its,
+    GasService,
 }
 
 pub fn resolve_axelar_id(opt: Option<String>) -> Result<String> {
