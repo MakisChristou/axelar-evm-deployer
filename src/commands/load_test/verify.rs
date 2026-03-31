@@ -58,8 +58,8 @@ impl RealTimeStats {
         let elapsed = self.snapshot_time.elapsed();
         if elapsed >= THROUGHPUT_WINDOW {
             let secs = elapsed.as_secs_f64();
-            for i in 0..5 {
-                let delta = counts[i].saturating_sub(self.snapshot_counts[i]);
+            for (i, &count) in counts.iter().enumerate() {
+                let delta = count.saturating_sub(self.snapshot_counts[i]);
                 self.throughputs[i] = if delta > 0 {
                     Some(delta as f64 / secs)
                 } else {
@@ -71,7 +71,10 @@ impl RealTimeStats {
         }
 
         // Rebuild latencies from all completed txs (simple and correct).
-        let new_len = txs.iter().filter(|t| t.timing.executed_secs.is_some()).count();
+        let new_len = txs
+            .iter()
+            .filter(|t| t.timing.executed_secs.is_some())
+            .count();
         if new_len != self.latencies.len() {
             self.latencies.clear();
             for tx in txs {

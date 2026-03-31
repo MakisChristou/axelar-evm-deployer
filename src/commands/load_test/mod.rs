@@ -1419,7 +1419,11 @@ fn print_final_report(report: &LoadTestReport) {
         for (i, (total, name, location)) in steps.iter().enumerate() {
             let step = prev.map_or(*total, |p| total - p);
             let is_last = i == steps.len() - 1;
-            let connector = if is_last { "\u{2514}\u{2500}" } else { "\u{251c}\u{2500}" };
+            let connector = if is_last {
+                "\u{2514}\u{2500}"
+            } else {
+                "\u{251c}\u{2500}"
+            };
             println!(
                 "  {} step {step:.1}s \u{2502} total {total:.1}s  {}",
                 format!("{connector} {name:<13}").dimmed(),
