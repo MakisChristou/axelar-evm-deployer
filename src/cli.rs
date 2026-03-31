@@ -189,6 +189,33 @@ pub enum DecodeCommands {
         #[arg(long)]
         chain: Option<String>,
     },
+
+    /// Show recent Solana program activity (Gateway, ITS, GasService, Memo)
+    SolActivity {
+        /// Filter to a specific program type
+        #[arg(long, value_enum)]
+        program: Option<SolProgram>,
+
+        /// Axelar network (devnet-amplifier, stagenet, testnet, mainnet)
+        #[arg(long)]
+        network: Option<String>,
+
+        /// Number of recent transactions to show per program (default: 20)
+        #[arg(long, default_value = "20")]
+        limit: usize,
+
+        /// Output as JSON for machine consumption
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub enum SolProgram {
+    Gateway,
+    Its,
+    GasService,
+    Memo,
 }
 
 pub fn resolve_axelar_id(opt: Option<String>) -> Result<String> {
