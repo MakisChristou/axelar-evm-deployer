@@ -119,16 +119,23 @@ impl RealTimeStats {
     }
 
     /// Build the full spinner message for GMP (no hub phase).
-    fn spinner_msg_gmp(&self, counts: [usize; 5], total: usize, err: Option<&str>) -> String {
+    fn spinner_msg_gmp(
+        &self,
+        counts: [usize; 5],
+        total: usize,
+        err: Option<&str>,
+        has_voting_verifier: bool,
+    ) -> String {
         let [voted, routed, _, approved, executed] = counts;
         let [tv, tr, _, ta, te] = self.throughputs;
-        let mut msg = format!(
-            "voted: {}  routed: {}  approved: {}  executed: {}",
-            Self::fmt_phase(voted, total, tv),
-            Self::fmt_phase(routed, total, tr),
-            Self::fmt_phase(approved, total, ta),
-            Self::fmt_phase(executed, total, te),
-        );
+        let mut parts = Vec::new();
+        if has_voting_verifier {
+            parts.push(format!("voted: {}", Self::fmt_phase(voted, total, tv)));
+        }
+        parts.push(format!("routed: {}", Self::fmt_phase(routed, total, tr)));
+        parts.push(format!("approved: {}", Self::fmt_phase(approved, total, ta)));
+        parts.push(format!("executed: {}", Self::fmt_phase(executed, total, te)));
+        let mut msg = parts.join("  ");
         msg.push_str(&self.fmt_latency());
         if let Some(e) = err {
             msg.push_str(&format!("  (err: {e})"));
@@ -363,6 +370,7 @@ async fn poll_pipeline<P: Provider>(
         external_spinner.unwrap_or_else(|| ui::wait_spinner("verifying pipeline (starting)..."));
     let mut last_progress = Instant::now();
     let mut rt_stats = RealTimeStats::new();
+    let mut received_first_tx = false;
 
     loop {
         // Drain any newly-confirmed txs from the streaming channel.
@@ -382,6 +390,11 @@ async fn poll_pipeline<P: Provider>(
             // Still sending — wait for txs to arrive.
             tokio::time::sleep(POLL_INTERVAL).await;
             continue;
+        }
+
+        if !received_first_tx {
+            received_first_tx = true;
+            spinner.set_message(format!("verifying pipeline: 0/{total} confirmed..."));
         }
 
         // Collect indices of non-terminal txs
@@ -604,7 +617,9 @@ async fn poll_pipeline<P: Provider>(
                             }
                         }
                         Phase::HubApproved => Phase::Approved,
-                        _ => Phase::Routed,
+                        // SkipVoting should never fire for later phases; if it
+                        // does, leave the phase unchanged to avoid looping back.
+                        other => other,
                     };
                     last_progress = Instant::now();
                 }
@@ -634,13 +649,20 @@ async fn poll_pipeline<P: Provider>(
             let msg = if axelarnet_gateway.is_some() {
                 rt_stats.spinner_msg_its(counts, total, error_msg.as_deref())
             } else {
-                rt_stats.spinner_msg_gmp(counts, total, error_msg.as_deref())
+                rt_stats.spinner_msg_gmp(counts, total, error_msg.as_deref(), voting_verifier.is_some())
             };
             spinner.set_message(msg);
         }
 
-        // If no tx has made progress for INACTIVITY_TIMEOUT (60s), stop waiting.
-        if last_progress.elapsed() >= INACTIVITY_TIMEOUT && sending_complete {
+        // If no tx has made progress for INACTIVITY_TIMEOUT, stop waiting.
+        // During streaming (send still in progress), use 2× timeout to allow for
+        // slow send phases, but still break to avoid hanging indefinitely.
+        let timeout = if sending_complete {
+            INACTIVITY_TIMEOUT
+        } else {
+            INACTIVITY_TIMEOUT * 2
+        };
+        if last_progress.elapsed() >= timeout {
             break;
         }
         tokio::time::sleep(POLL_INTERVAL).await;
@@ -1222,12 +1244,19 @@ pub(super) fn tx_to_pending_solana(
     idx: usize,
     source_chain: &str,
     has_voting_verifier: bool,
+    source_type: SourceChainType,
 ) -> PendingTx {
     let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
-    let cmd_input = [source_chain.as_bytes(), b"-", tx.signature.as_bytes()].concat();
+    let message_id = match source_type {
+        SourceChainType::Evm => tx.signature.clone(),
+        SourceChainType::Svm => {
+            format!("{}-{}.1", tx.signature, solana_call_contract_index())
+        }
+    };
+    let cmd_input = [source_chain.as_bytes(), b"-", message_id.as_bytes()].concat();
     PendingTx {
         idx,
-        message_id: tx.signature.clone(),
+        message_id,
         send_instant: tx.send_instant.unwrap_or_else(Instant::now),
         source_address: tx.source_address.clone(),
         contract_addr: Address::ZERO,
@@ -1265,7 +1294,7 @@ pub async fn verify_onchain_solana_streaming(
     mut rx: mpsc::UnboundedReceiver<PendingTx>,
     send_done: Arc<AtomicBool>,
     spinner: indicatif::ProgressBar,
-) -> Result<(VerificationReport, Vec<(usize, AmplifierTiming)>)> {
+) -> Result<(VerificationReport, Vec<(String, AmplifierTiming)>)> {
     let (lcd, _, _, _) = read_axelar_config(config)?;
 
     let voting_verifier = read_axelar_contract_field(
@@ -1309,8 +1338,11 @@ pub async fn verify_onchain_solana_streaming(
     .await;
 
     let report = compute_verification_report(&txs, &mut [], peaks);
-    let timings: Vec<(usize, AmplifierTiming)> =
-        txs.iter().map(|tx| (tx.idx, tx.timing.clone())).collect();
+    // Key by message_id (signature) since streaming PendingTx idx is always 0.
+    let timings: Vec<(String, AmplifierTiming)> = txs
+        .iter()
+        .map(|tx| (tx.message_id.clone(), tx.timing.clone()))
+        .collect();
     Ok((report, timings))
 }
 

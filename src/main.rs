@@ -119,6 +119,8 @@ async fn main() -> Result<()> {
                     protocol,
                     destination_chain: resolved.destination_chain,
                     source_chain: resolved.source_chain,
+                    source_axelar_id: resolved.source_axelar_id,
+                    destination_axelar_id: resolved.destination_axelar_id,
                     source_rpc: resolved.source_rpc,
                     destination_rpc: resolved.destination_rpc,
                     private_key: resolved.private_key,

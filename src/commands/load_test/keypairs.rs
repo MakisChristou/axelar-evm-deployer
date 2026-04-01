@@ -130,6 +130,97 @@ pub fn ensure_funded(rpc_url: &str, main: &Keypair, derived: &[Keypair]) -> Resu
     Ok(balances)
 }
 
+/// Like `ensure_funded`, but targets a balance that covers `fires_per_key`
+/// transactions, each costing `gas_lamports` on top of the base tx fee.
+#[allow(clippy::cast_precision_loss, clippy::float_arithmetic)]
+pub fn ensure_funded_for_sustained(
+    rpc_url: &str,
+    main: &Keypair,
+    derived: &[Keypair],
+    fires_per_key: u64,
+    gas_lamports: u64,
+) -> Result<Vec<u64>> {
+    let cost_per_tx = gas_lamports + TRANSFER_FEE; // gas + tx fee
+    let target = cost_per_tx.saturating_mul(fires_per_key).max(TARGET_LAMPORTS_PER_KEY);
+    let min_needed = target / 2; // top up when below half
+
+    let rpc = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+    let main_balance = rpc.get_balance(&main.pubkey()).unwrap_or(0);
+
+    let mut balances: Vec<u64> = Vec::with_capacity(derived.len());
+    let mut to_fund: Vec<(usize, u64)> = Vec::new();
+
+    let check_pb = ProgressBar::new(derived.len() as u64);
+    check_pb.set_style(
+        ProgressStyle::with_template("  {bar:40.cyan/dim} {pos}/{len} keys checked")
+            .unwrap()
+            .progress_chars("=> "),
+    );
+    for (i, kp) in derived.iter().enumerate() {
+        let balance = rpc.get_balance(&kp.pubkey()).unwrap_or(0);
+        balances.push(balance);
+        if balance < min_needed {
+            to_fund.push((i, target.saturating_sub(balance)));
+        }
+        check_pb.inc(1);
+    }
+    check_pb.finish_and_clear();
+
+    if to_fund.is_empty() {
+        ui::success(&format!(
+            "all {} derived keys are funded (>= {:.4} SOL each)",
+            derived.len(),
+            min_needed as f64 / 1e9,
+        ));
+        return Ok(balances);
+    }
+
+    let total_needed: u64 = to_fund
+        .iter()
+        .map(|(_, deficit)| deficit + TRANSFER_FEE)
+        .sum();
+    if main_balance < total_needed + FUNDING_RESERVE {
+        let needed_sol = (total_needed + FUNDING_RESERVE) as f64 / 1e9;
+        let have_sol = main_balance as f64 / 1e9;
+        return Err(eyre!(
+            "main wallet has {have_sol:.4} SOL but needs {needed_sol:.4} SOL to fund {} keys.\n  \
+             Fund the main wallet first:\n  solana airdrop 2 {}",
+            to_fund.len(),
+            main.pubkey(),
+        ));
+    }
+
+    ui::info(&format!(
+        "funding {}/{} keys from main wallet ({:.4} SOL)...",
+        to_fund.len(),
+        derived.len(),
+        total_needed as f64 / 1e9,
+    ));
+
+    let pb = ProgressBar::new(to_fund.len() as u64);
+    pb.set_style(
+        ProgressStyle::with_template("  {bar:40.cyan/dim} {pos}/{len} keys funded")
+            .unwrap()
+            .progress_chars("=> "),
+    );
+
+    for (i, amount) in &to_fund {
+        let to_pubkey = derived[*i].pubkey();
+        transfer_sol(&rpc, main, &to_pubkey, *amount)?;
+        balances[*i] += amount;
+        pb.inc(1);
+    }
+    pb.finish_and_clear();
+
+    ui::success(&format!(
+        "funded {} keys ({:.4} SOL total)",
+        to_fund.len(),
+        total_needed as f64 / 1e9,
+    ));
+
+    Ok(balances)
+}
+
 /// Deterministically derive `count` EVM signers from a main private key.
 ///
 /// Uses the same `keccak256(main_key || index)` pattern as `derive_keypairs()`.

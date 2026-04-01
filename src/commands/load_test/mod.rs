@@ -78,6 +78,10 @@ pub struct LoadTestArgs {
     pub protocol: Protocol,
     pub destination_chain: String,
     pub source_chain: String,
+    /// The `axelarId` for the source chain (used for Cosmos-side verification).
+    pub source_axelar_id: String,
+    /// The `axelarId` for the destination chain (used for Cosmos-side verification).
+    pub destination_axelar_id: String,
     pub source_rpc: String,
     pub destination_rpc: String,
     pub private_key: Option<String>,
@@ -163,6 +167,11 @@ pub struct ResolvedConfig {
     pub test_type: TestType,
     pub source_chain: String,
     pub destination_chain: String,
+    /// The `axelarId` for the source chain — may differ from the JSON key
+    /// (e.g. `"Avalanche"` vs `"avalanche"` for consensus chains).
+    pub source_axelar_id: String,
+    /// The `axelarId` for the destination chain.
+    pub destination_axelar_id: String,
     pub source_rpc: String,
     pub destination_rpc: String,
     pub private_key: Option<String>,
@@ -221,6 +230,22 @@ pub fn resolve_from_config(
         }
     };
 
+    // Resolve axelarId — consensus chains use a capitalised name on the Cosmos
+    // side (e.g. "Avalanche" vs the JSON key "avalanche"). We keep the JSON
+    // key for contract lookups but store the axelarId for verification queries.
+    let source_axelar_id = chains
+        .get(&source_chain)
+        .and_then(|v| v.get("axelarId"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(&source_chain)
+        .to_string();
+    let destination_axelar_id = chains
+        .get(&destination_chain)
+        .and_then(|v| v.get("axelarId"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(&destination_chain)
+        .to_string();
+
     // --- Read RPCs ---
     let source_rpc = chains
         .get(&source_chain)
@@ -246,6 +271,8 @@ pub fn resolve_from_config(
         test_type,
         source_chain,
         destination_chain,
+        source_axelar_id,
+        destination_axelar_id,
         source_rpc: resolved_source_rpc,
         destination_rpc: resolved_destination_rpc,
         private_key: private_key_override,
@@ -627,13 +654,32 @@ async fn run_sol_to_evm(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
         let read_provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
         let addr: alloy::primitives::Address = addr_str.parse()?;
         let code = read_provider.get_code_at(addr).await?;
-        if code.is_empty() {
+        // Check if code exists and gateway matches config
+        let needs_redeploy = if code.is_empty() {
+            ui::warn("cached SenderReceiver has no code, redeploying...");
+            true
+        } else {
+            let sr = crate::evm::SenderReceiver::new(addr, &read_provider);
+            match sr.gateway().call().await {
+                Ok(onchain_gw) if onchain_gw != gateway_addr => {
+                    ui::warn(&format!(
+                        "cached SenderReceiver points to old gateway {onchain_gw}, expected {gateway_addr}, redeploying..."
+                    ));
+                    true
+                }
+                Err(_) => {
+                    ui::warn("cached SenderReceiver gateway check failed, redeploying...");
+                    true
+                }
+                _ => false,
+            }
+        };
+        if needs_redeploy {
             let private_key = args.private_key.as_ref().ok_or_else(|| {
                 eyre::eyre!("EVM private key required to deploy SenderReceiver. Set EVM_PRIVATE_KEY env var or use --private-key")
             })?;
             let signer: PrivateKeySigner = private_key.parse()?;
             check_evm_balance(&read_provider, signer.address()).await?;
-            ui::warn("cached SenderReceiver has no code, redeploying...");
             let write_provider = ProviderBuilder::new()
                 .wallet(signer)
                 .connect_http(rpc_url.parse()?);
@@ -679,15 +725,18 @@ async fn run_sol_to_evm(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
 
     let test_start = Instant::now();
     let mut report = if args.tps.is_some() && args.duration_secs.is_some() {
-        sol_sender::run_sustained_load_test_with_metrics(&args, true, &destination_address).await?
+        {
+            let (spinner_tx, _spinner_rx) = tokio::sync::oneshot::channel::<indicatif::ProgressBar>();
+            sol_sender::run_sustained_load_test_with_metrics(&args, true, &destination_address, None, None, spinner_tx).await?
+        }
     } else {
         sol_sender::run_load_test_with_metrics(&args, &destination_address, true).await?
     };
 
     let verification = verify::verify_onchain(
         &args.config,
-        &args.source_chain,
-        &args.destination_chain,
+        &args.source_axelar_id,
+        &args.destination_axelar_id,
         &destination_address,
         gateway_addr,
         &provider,
@@ -762,31 +811,16 @@ async fn run_evm_to_sol(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     // --- Deploy/reuse SenderReceiver on source chain ---
     let cache_key = &format!("{src}-evm-to-sol");
     let cache = read_cache(cache_key);
-    let sender_receiver_addr = if let Some(addr_str) =
-        cache.get("senderReceiverAddress").and_then(|v| v.as_str())
-    {
-        let addr: Address = addr_str.parse()?;
-        let code = read_provider.get_code_at(addr).await?;
-        if code.is_empty() {
-            ui::warn("cached SenderReceiver has no code, redeploying...");
-            let new_addr =
-                deploy_sender_receiver(&write_provider, gateway_addr, gas_service_addr).await?;
-            let mut cache = cache;
-            cache["senderReceiverAddress"] = json!(format!("{new_addr}"));
-            save_cache(cache_key, &cache)?;
-            new_addr
-        } else {
-            ui::info(&format!("SenderReceiver: reusing {addr}"));
-            addr
-        }
-    } else {
-        ui::info("deploying SenderReceiver on source chain...");
-        let addr = deploy_sender_receiver(&write_provider, gateway_addr, gas_service_addr).await?;
-        let mut cache = cache;
-        cache["senderReceiverAddress"] = json!(format!("{addr}"));
-        save_cache(cache_key, &cache)?;
-        addr
-    };
+    let sender_receiver_addr = deploy_or_reuse_sender_receiver(
+        &cache,
+        cache_key,
+        &read_provider,
+        &write_provider,
+        gateway_addr,
+        gas_service_addr,
+        "source",
+    )
+    .await?;
     ui::address("SenderReceiver", &format!("{sender_receiver_addr}"));
 
     // Destination on Solana: memo program (resolved per feature flag)
@@ -809,8 +843,8 @@ async fn run_evm_to_sol(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
 
         // Spawn verification in a background task.
         let vconfig = args.config.clone();
-        let vsource = args.source_chain.clone();
-        let vdest = args.destination_chain.clone();
+        let vsource = args.source_axelar_id.clone();
+        let vdest = args.destination_axelar_id.clone();
         let vdest_addr = destination_address.to_string();
         let vdest_rpc = args.destination_rpc.clone();
         let vdone = std::sync::Arc::clone(&send_done);
@@ -845,9 +879,12 @@ async fn run_evm_to_sol(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
         // Wait for verification to finish.
         let (verification, timings) = verify_handle.await??;
         // Write amplifier timing back into per-tx records for JSON report & pipeline counts.
-        for (idx, timing) in timings {
-            if idx < report.transactions.len() {
-                report.transactions[idx].amplifier_timing = Some(timing);
+        // Timings are keyed by message_id (signature); match them to transactions.
+        for (msg_id, timing) in timings {
+            if let Some(tx) = report.transactions.iter_mut().find(|t| {
+                t.signature == msg_id || format!("{}-{}.1", t.signature, crate::solana::solana_call_contract_index()) == msg_id
+            }) {
+                tx.amplifier_timing = Some(timing);
             }
         }
         report.verification = Some(verification);
@@ -865,8 +902,8 @@ async fn run_evm_to_sol(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
 
         let verification = verify::verify_onchain_solana(
             &args.config,
-            &args.source_chain,
-            &args.destination_chain,
+            &args.source_axelar_id,
+            &args.destination_axelar_id,
             destination_address,
             &args.destination_rpc,
             &mut report.transactions,
@@ -1024,8 +1061,8 @@ async fn run_evm_to_evm(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
 
     let verification = verify::verify_onchain(
         &args.config,
-        &args.source_chain,
-        &args.destination_chain,
+        &args.source_axelar_id,
+        &args.destination_axelar_id,
         &destination_address,
         dest_gateway_addr,
         &dest_read_provider,
@@ -1073,23 +1110,74 @@ async fn run_sol_to_sol(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     ui::kv("destination program", destination_address);
 
     let test_start = Instant::now();
-    let mut report = if args.tps.is_some() && args.duration_secs.is_some() {
-        sol_sender::run_sustained_load_test_with_metrics(&args, false, destination_address).await?
-    } else {
-        sol_sender::run_load_test_with_metrics(&args, destination_address, false).await?
-    };
+    let sustained = args.tps.is_some() && args.duration_secs.is_some();
 
-    let verification = verify::verify_onchain_solana(
-        &args.config,
-        &args.source_chain,
-        &args.destination_chain,
-        destination_address,
-        &args.destination_rpc,
-        &mut report.transactions,
-        verify::SourceChainType::Svm,
-    )
-    .await?;
-    report.verification = Some(verification);
+    let report = if sustained {
+        // Sustained mode: run verification concurrently with the send phase.
+        let (verify_tx, verify_rx) = tokio::sync::mpsc::unbounded_channel();
+        let send_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (spinner_tx, spinner_rx) = tokio::sync::oneshot::channel::<indicatif::ProgressBar>();
+
+        // Spawn verification in a background task.
+        let vconfig = args.config.clone();
+        let vsource = args.source_axelar_id.clone();
+        let vdest = args.destination_axelar_id.clone();
+        let vdest_addr = destination_address.to_string();
+        let vdest_rpc = args.destination_rpc.clone();
+        let vdone = std::sync::Arc::clone(&send_done);
+        let verify_handle = tokio::spawn(async move {
+            let spinner = spinner_rx.await.expect("spinner channel dropped");
+            verify::verify_onchain_solana_streaming(
+                &vconfig,
+                &vsource,
+                &vdest,
+                &vdest_addr,
+                &vdest_rpc,
+                verify_rx,
+                vdone,
+                spinner,
+            )
+            .await
+        });
+
+        let mut report = sol_sender::run_sustained_load_test_with_metrics(
+            &args,
+            false,
+            destination_address,
+            Some(verify_tx),
+            Some(send_done),
+            spinner_tx,
+        )
+        .await?;
+
+        // Wait for verification to finish.
+        let (verification, timings) = verify_handle.await??;
+        for (msg_id, timing) in timings {
+            if let Some(tx) = report.transactions.iter_mut().find(|t| {
+                t.signature == msg_id || format!("{}-{}.1", t.signature, crate::solana::solana_call_contract_index()) == msg_id
+            }) {
+                tx.amplifier_timing = Some(timing);
+            }
+        }
+        report.verification = Some(verification);
+        report
+    } else {
+        let mut report =
+            sol_sender::run_load_test_with_metrics(&args, destination_address, false).await?;
+
+        let verification = verify::verify_onchain_solana(
+            &args.config,
+            &args.source_axelar_id,
+            &args.destination_axelar_id,
+            destination_address,
+            &args.destination_rpc,
+            &mut report.transactions,
+            verify::SourceChainType::Svm,
+        )
+        .await?;
+        report.verification = Some(verification);
+        report
+    };
 
     finish_report(&args, &report, test_start)
 }
@@ -1107,10 +1195,34 @@ async fn deploy_or_reuse_sender_receiver<R: Provider, W: Provider>(
     if let Some(addr_str) = cache.get("senderReceiverAddress").and_then(|v| v.as_str()) {
         let addr: Address = addr_str.parse()?;
         let code = read_provider.get_code_at(addr).await?;
-        if code.is_empty() {
+        let needs_redeploy = if code.is_empty() {
             ui::warn(&format!(
                 "cached SenderReceiver ({label}) has no code, redeploying..."
             ));
+            true
+        } else {
+            // Verify the cached contract's gateway matches the current config.
+            let sr = crate::evm::SenderReceiver::new(addr, read_provider);
+            match sr.gateway().call().await {
+                Ok(onchain_gw) => {
+                    if onchain_gw != gateway_addr {
+                        ui::warn(&format!(
+                            "cached SenderReceiver ({label}) points to old gateway {onchain_gw}, expected {gateway_addr}, redeploying..."
+                        ));
+                        true
+                    } else {
+                        false
+                    }
+                }
+                Err(_) => {
+                    ui::warn(&format!(
+                        "cached SenderReceiver ({label}) gateway check failed, redeploying..."
+                    ));
+                    true
+                }
+            }
+        };
+        if needs_redeploy {
             let new_addr =
                 deploy_sender_receiver(write_provider, gateway_addr, gas_service_addr).await?;
             let mut cache = cache.clone();
@@ -1310,9 +1422,17 @@ fn print_final_report(report: &LoadTestReport) {
                     .is_some_and(|a| a.executed_secs.is_some())
             })
             .count() as u64;
-        println!(
-            "  pipeline         voted {voted}/{total}  routed {routed}/{total}  approved {approved}/{total}  executed {executed}/{total}"
-        );
+        {
+            let mut parts = Vec::new();
+            // Skip voted for consensus chains (no VotingVerifier → always 0).
+            if voted > 0 {
+                parts.push(format!("voted {voted}/{total}"));
+            }
+            parts.push(format!("routed {routed}/{total}"));
+            parts.push(format!("approved {approved}/{total}"));
+            parts.push(format!("executed {executed}/{total}"));
+            println!("  pipeline         {}", parts.join("  "));
+        }
 
         // End-to-end line
         match (

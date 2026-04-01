@@ -266,10 +266,13 @@ fn send_sol_tx(
 
 /// Run Solana sustained load test at a controlled TPS rate.
 #[allow(clippy::float_arithmetic)]
-pub async fn run_sustained_load_test_with_metrics(
+pub(super) async fn run_sustained_load_test_with_metrics(
     args: &LoadTestArgs,
     evm_destination: bool,
     destination_address: &str,
+    verify_tx: Option<tokio::sync::mpsc::UnboundedSender<super::verify::PendingTx>>,
+    send_done: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    spinner_tx: tokio::sync::oneshot::Sender<indicatif::ProgressBar>,
 ) -> eyre::Result<LoadTestReport> {
     let tps = args.tps.unwrap() as usize;
     let duration_secs = args.duration_secs.unwrap();
@@ -298,9 +301,22 @@ pub async fn run_sustained_load_test_with_metrics(
         Option::None => Option::None,
     };
 
-    // Derive and fund pool
-    let keypairs_pool = prepare_keypairs(&args.source_rpc, pool_size, &main_keypair)?;
-    let keypairs_pool = Arc::new(keypairs_pool);
+    // Derive and fund pool — each key fires duration/cycle times, and each
+    // fire costs ~10M lamports in gas (on non-devnet).
+    let derived = keypairs::derive_keypairs(&main_keypair, pool_size)?;
+    let fires_per_key = (duration_secs / key_cycle as u64).max(1);
+    #[cfg(not(feature = "devnet-amplifier"))]
+    let gas_per_tx: u64 = 10_000_000; // must match solana.rs pay_gas amount
+    #[cfg(feature = "devnet-amplifier")]
+    let gas_per_tx: u64 = 0; // devnet-amplifier doesn't pay gas
+    let _balances =
+        keypairs::ensure_funded_for_sustained(&args.source_rpc, &main_keypair, &derived, fires_per_key, gas_per_tx)?;
+    let keypairs_pool: Arc<Vec<Arc<dyn solana_sdk::signer::Signer + Send + Sync>>> = Arc::new(
+        derived
+            .into_iter()
+            .map(|kp| Arc::new(kp) as Arc<dyn solana_sdk::signer::Signer + Send + Sync>)
+            .collect(),
+    );
     ui::info(&format!(
         "derived {} Solana signing keys (pool: {} tx/s × {}s cycle)",
         pool_size, tps, key_cycle
@@ -310,11 +326,24 @@ pub async fn run_sustained_load_test_with_metrics(
     let (counter_pda, _) = Pubkey::find_program_address(&[b"counter"], &memo_program_id);
 
     let spinner = ui::wait_spinner(&format!("[0/{duration_secs}s] starting sustained send..."));
+    // Send a clone to the verification task so it can display progress.
+    let _ = spinner_tx.send(spinner.clone());
 
     let dest_chain = args.destination_chain.clone();
     let dest_addr = destination_address.to_string();
     let solana_rpc = args.source_rpc.clone();
     let evm_dest = evm_destination;
+    let source_chain = args.source_axelar_id.clone();
+
+    // Check if source chain has a voting verifier (for correct initial phase).
+    let has_voting_verifier = crate::cosmos::read_axelar_contract_field(
+        &args.config,
+        &format!(
+            "/axelar/contracts/VotingVerifier/{}/address",
+            args.source_chain
+        ),
+    )
+    .is_ok();
 
     let make_task: sustained::MakeTask = Box::new(move |key_idx: usize, _nonce: Option<u64>| {
         let kp = Arc::clone(&keypairs_pool[key_idx]);
@@ -326,9 +355,12 @@ pub async fn run_sustained_load_test_with_metrics(
         let dc = dest_chain.clone();
         let da = dest_addr.clone();
         let rpc = solana_rpc.clone();
+        let vtx = verify_tx.clone();
+        let sc = source_chain.clone();
+        let has_vv = has_voting_verifier;
 
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
+            let result = tokio::task::spawn_blocking(move || {
                 send_sol_tx(&rpc, kp.as_ref(), &dc, &da, &tx_payload)
             })
             .await
@@ -348,7 +380,20 @@ pub async fn run_sustained_load_test_with_metrics(
                 gmp_destination_address: String::new(),
                 send_instant: None,
                 amplifier_timing: None,
-            })
+            });
+            // Stream successful txs to the concurrent verification pipeline.
+            if result.success
+                && let Some(ref tx_sender) = vtx
+            {
+                let pending = super::verify::tx_to_pending_solana(
+                    &result, 0, &sc, has_vv,
+                    super::verify::SourceChainType::Svm,
+                );
+                if tx_sender.send(pending).is_err() {
+                    eprintln!("warning: verification channel closed, tx won't be verified");
+                }
+            }
+            result
         })
     });
 
@@ -358,7 +403,7 @@ pub async fn run_sustained_load_test_with_metrics(
         key_cycle,
         None,
         make_task,
-        None,
+        send_done.clone(),
         spinner,
     )
     .await;

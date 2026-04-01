@@ -140,7 +140,7 @@ pub fn send_call_contract(
             destination_chain: destination_chain.to_string(),
             destination_address: destination_address.to_string(),
             payload_hash,
-            amount: 100_000,
+            amount: 10_000_000, // 0.01 SOL — enough for testnet relayer pickup
             refund_address: fee_payer,
         }
         .data();
@@ -534,17 +534,21 @@ fn fetch_tx_details(
 }
 
 /// Fetch a confirmed transaction with retries.
+///
+/// Keep retry count and backoff low to avoid blocking the tokio blocking thread
+/// pool for too long under sustained load. This is best-effort metadata; a
+/// missing result just means `compute_units`/`slot` will be `None`.
 fn fetch_confirmed_tx(
     rpc_client: &RpcClient,
     signature: &Signature,
 ) -> Result<Option<solana_transaction_status::EncodedConfirmedTransactionWithStatusMeta>> {
-    for i in 0..10 {
+    for i in 0..5 {
         match rpc_client.get_transaction(signature, UiTransactionEncoding::Json) {
             Ok(tx) => return Ok(Some(tx)),
             Err(_) => {
                 // Testnet/stagenet RPCs can be slow to index transactions.
-                // Use exponential backoff: 500ms, 1s, 2s, ...
-                let delay = std::cmp::min(500 * (1 << i), 5000);
+                // Exponential backoff: 500ms, 1s, 2s, capped at 3s.
+                let delay = std::cmp::min(500 * (1 << i), 3000);
                 std::thread::sleep(std::time::Duration::from_millis(delay));
             }
         }
