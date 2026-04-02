@@ -14,6 +14,20 @@ use super::decode_sol_tx;
 use crate::cli::SolProgram;
 
 // ---------------------------------------------------------------------------
+// Instruction display priority (lower = preferred)
+// ---------------------------------------------------------------------------
+
+fn ix_priority(name: &str) -> u8 {
+    match name {
+        // Gateway core actions are most interesting
+        "CallContract" | "Execute" | "ApproveMessage" => 0,
+        "InitializePayloadVerificationSession" | "VerifySignature" | "RotateSigners" => 1,
+        // Auxiliary programs (GasService, ITS, etc.)
+        _ => 2,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Config discovery
 // ---------------------------------------------------------------------------
 
@@ -329,9 +343,12 @@ fn fetch_and_decode(
         }
     }
 
-    // Find the primary Axelar instruction (skip ComputeBudget)
+    // Find the primary Axelar instruction (skip ComputeBudget).
+    // When multiple instructions exist (e.g. PayGas + CallContract), prefer
+    // Gateway instructions over auxiliary ones like GasService.
     let mut ix_name: Option<String> = None;
     let mut args_json: Option<serde_json::Value> = None;
+    let mut best_priority = u8::MAX;
 
     if let solana_transaction_status::EncodedTransaction::Json(ui_tx) = &tx.transaction.transaction
         && let solana_transaction_status::UiMessage::Raw(raw) = &ui_tx.message
@@ -348,12 +365,15 @@ fn fetch_and_decode(
             if program_label.is_some() {
                 let data_bytes = bs58::decode(&ix.data).into_vec().unwrap_or_default();
                 if let Some(name) = decode_sol_tx::instruction_name(&data_bytes) {
-                    args_json = Some(decode_sol_tx::decode_instruction_args_json(
-                        name,
-                        &data_bytes,
-                    ));
-                    ix_name = Some(name.to_string());
-                    break;
+                    let priority = ix_priority(name);
+                    if priority < best_priority {
+                        best_priority = priority;
+                        args_json = Some(decode_sol_tx::decode_instruction_args_json(
+                            name,
+                            &data_bytes,
+                        ));
+                        ix_name = Some(name.to_string());
+                    }
                 }
             }
         }
