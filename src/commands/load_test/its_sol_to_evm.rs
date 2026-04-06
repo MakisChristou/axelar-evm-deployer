@@ -25,8 +25,8 @@ const TOKEN_NAME: &str = "AXE";
 const TOKEN_SYMBOL: &str = "AXE";
 const TOKEN_DECIMALS: u8 = 9;
 const AMOUNT_PER_TX: u64 = 1_000_000_000; // 1 token (with 9 decimals)
-/// Distribute 1000x per key so cached tokens last across many runs.
-const AMOUNT_PER_KEY: u64 = AMOUNT_PER_TX * 1000;
+/// Distribute 100x per key so cached tokens last across many runs.
+const AMOUNT_PER_KEY: u64 = AMOUNT_PER_TX * 100;
 
 /// Default gas value for ITS transfer on Solana (in lamports).
 /// devnet-amplifier doesn't require gas, stagenet/mainnet do.
@@ -280,7 +280,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         .await?;
         report.verification = Some(verification);
 
-        return finish_report(&args, &report, test_start);
+        return finish_report(&args, &mut report, test_start);
     }
     // === END SUSTAINED MODE ===
 
@@ -414,6 +414,9 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         source_chain: src.to_string(),
         destination_chain: dest.to_string(),
         destination_address: format!("{its_proxy_addr}"),
+        protocol: String::new(),
+        tps: None,
+        duration_secs: None,
         num_txs: args.num_txs,
         num_keys: key_count,
         total_submitted,
@@ -466,7 +469,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     .await?;
     report.verification = Some(verification);
 
-    finish_report(&args, &report, test_start)
+    finish_report(&args, &mut report, test_start)
 }
 
 // ---------------------------------------------------------------------------
@@ -562,7 +565,8 @@ async fn setup_its_token(
 
     // Deploy fresh
     let salt = generate_salt();
-    let total_supply = AMOUNT_PER_KEY.saturating_mul(num_txs as u64 + 10);
+    // Mint a large fixed supply so the token can be reused across runs without redeploying.
+    let total_supply: u64 = 1_000_000 * 1_000_000_000; // 1M tokens (9 decimals)
 
     ui::info("deploying new ITS token on Solana...");
     ui::kv("name", TOKEN_NAME);

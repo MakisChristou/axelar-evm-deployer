@@ -47,6 +47,7 @@ sol! {
             bytes calldata payload
         ) external payable;
         function message() external view returns (string);
+        function gateway() external view returns (address);
         function execute(
             bytes32 commandId,
             string calldata sourceChain,

@@ -3,9 +3,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// How long to wait for an EVM tx receipt before giving up.
-/// Flow confirms in ~8s; other chains typically <20s. 30s catches everything real
-/// without wasting time on txs that were silently dropped by the mempool.
-const EVM_RECEIPT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Flow confirms in ~8s; other chains typically <20s. 60s gives congested
+/// networks enough room while still catching silently-dropped txs.
+const EVM_RECEIPT_TIMEOUT: Duration = Duration::from_secs(60);
 
 use alloy::{
     primitives::{Address, Bytes, FixedBytes, keccak256},
@@ -256,6 +256,9 @@ pub async fn run_load_test_with_metrics(
         source_chain: args.source_chain.clone(),
         destination_chain: args.destination_chain.clone(),
         destination_address: dest_addr,
+        protocol: String::new(),
+        tps: None,
+        duration_secs: None,
         num_txs: args.num_txs,
         num_keys: num_txs,
         total_submitted,
@@ -462,7 +465,7 @@ pub(super) async fn run_sustained_load_test_with_metrics(
     let verify_spinner = multi.add(indicatif::ProgressBar::new_spinner());
     verify_spinner.set_style(spinner_style);
     verify_spinner.enable_steady_tick(std::time::Duration::from_millis(100));
-    verify_spinner.set_message("waiting for first confirmed tx...");
+    verify_spinner.set_message("pipeline: waiting for src-confirmed txs...");
     let _ = verify_spinner_tx.send(verify_spinner);
 
     let dest_chain = args.destination_chain.clone();
@@ -476,7 +479,7 @@ pub(super) async fn run_sustained_load_test_with_metrics(
         ),
     )
     .is_ok();
-    let source_chain = args.source_chain.clone();
+    let source_chain = args.source_axelar_id.clone();
 
     let make_task: super::sustained::MakeTask =
         Box::new(move |key_idx: usize, nonce: Option<u64>| {
@@ -507,8 +510,16 @@ pub(super) async fn run_sustained_load_test_with_metrics(
                 {
                     // Use signature length as a proxy for idx — the verify task
                     // will overwrite idx from the timings vec anyway.
-                    let pending = super::verify::tx_to_pending_solana(&result, 0, &sc, has_vv);
-                    let _ = tx_sender.send(pending);
+                    let pending = super::verify::tx_to_pending_solana(
+                        &result,
+                        0,
+                        &sc,
+                        has_vv,
+                        super::verify::SourceChainType::Evm,
+                    );
+                    if tx_sender.send(pending).is_err() {
+                        eprintln!("warning: verification channel closed, tx won't be verified");
+                    }
                 }
                 result
             })

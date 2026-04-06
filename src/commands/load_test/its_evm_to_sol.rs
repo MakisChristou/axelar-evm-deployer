@@ -145,9 +145,10 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     // Amount must survive ITS hub decimal truncation between EVM (18 decimals) and Solana.
     // Use 1 full token (10^18) to ensure the truncated amount is non-zero.
     let amount_per_tx = U256::from(1_000_000_000_000_000_000u128); // 10^18 = 1 token
-    // Distribute 1000x per key so cached tokens last across many runs.
-    let amount_per_key = amount_per_tx * U256::from(1000);
-    let total_supply = amount_per_key * U256::from(num_keys + 10);
+    // Distribute 100x per key so cached tokens last across many runs.
+    let amount_per_key = amount_per_tx * U256::from(100);
+    // Mint a large fixed supply so the token can be reused across runs without redeploying.
+    let total_supply = U256::from(1_000_000) * U256::from(1_000_000_000_000_000_000u128); // 1M tokens
 
     let its_service = InterchainTokenService::new(its_proxy_addr, &write_provider);
 
@@ -265,7 +266,11 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         .await?;
 
     // --- Distribute ITS tokens to derived wallets ---
-    distribute_tokens(&write_provider, token_addr, &derived, amount_per_key).await?;
+    // Build a fresh provider so the nonce cache is not stale after deploy transactions.
+    let token_provider = ProviderBuilder::new()
+        .wallet(signer.clone())
+        .connect_http(evm_rpc_url.parse()?);
+    distribute_tokens(&token_provider, token_addr, &derived, amount_per_key).await?;
 
     // Receiver address on Solana — use the default Solana keypair's pubkey.
     let sol_keypair = crate::solana::load_keypair(args.keypair.as_deref())?;
@@ -348,7 +353,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         .await?;
         report.verification = Some(verification);
 
-        return finish_report(&args, &report, test_start);
+        return finish_report(&args, &mut report, test_start);
     }
     // === END SUSTAINED MODE ===
 
@@ -454,6 +459,9 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         source_chain: src.to_string(),
         destination_chain: dest.to_string(),
         destination_address: format!("{its_proxy_addr}"),
+        protocol: String::new(),
+        tps: None,
+        duration_secs: None,
         num_txs: args.num_txs,
         num_keys: num_txs,
         total_submitted,
@@ -501,7 +509,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     .await?;
     report.verification = Some(verification);
 
-    finish_report(&args, &report, test_start)
+    finish_report(&args, &mut report, test_start)
 }
 
 /// Deploy a new interchain token and its remote counterpart.

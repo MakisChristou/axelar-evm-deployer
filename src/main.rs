@@ -94,6 +94,7 @@ async fn main() -> Result<()> {
                 private_key,
                 keypair,
                 source_rpc,
+                destination_rpc,
                 payload,
                 protocol,
                 gas_value,
@@ -109,6 +110,7 @@ async fn main() -> Result<()> {
                     destination_chain,
                     private_key,
                     source_rpc,
+                    destination_rpc,
                 )?;
 
                 commands::load_test::run(commands::load_test::LoadTestArgs {
@@ -117,6 +119,8 @@ async fn main() -> Result<()> {
                     protocol,
                     destination_chain: resolved.destination_chain,
                     source_chain: resolved.source_chain,
+                    source_axelar_id: resolved.source_axelar_id,
+                    destination_axelar_id: resolved.destination_axelar_id,
                     source_rpc: resolved.source_rpc,
                     destination_rpc: resolved.destination_rpc,
                     private_key: resolved.private_key,
