@@ -64,6 +64,11 @@ async fn main() -> Result<()> {
                 json,
             } => commands::decode_evm_activity::run(contract, network, chain, limit, json).await,
         },
+        cli::Commands::Verifiers {
+            network,
+            chain,
+            json,
+        } => commands::verifiers::run(network, chain, json).await,
         cli::Commands::Test { subcommand } => match subcommand {
             cli::TestCommands::Gmp {
                 axelar_id,

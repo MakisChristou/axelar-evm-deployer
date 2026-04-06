@@ -31,6 +31,17 @@ pub enum Commands {
         #[command(subcommand)]
         subcommand: DecodeCommands,
     },
+
+    /// Show active verifiers for a chain
+    Verifiers {
+        /// Axelar network (devnet-amplifier, stagenet, testnet, mainnet)
+        network: String,
+        /// Chain axelar ID (e.g. solana, ethereum, avalanche-fuji)
+        chain: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
