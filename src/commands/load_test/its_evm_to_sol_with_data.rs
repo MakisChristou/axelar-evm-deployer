@@ -289,17 +289,19 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     let token_mint_ata = if extra_accounts > 0 {
         // Derive the ITS token mint on Solana and compute an ATA for the memo program.
         let (its_root, _) = crate::solana::find_its_root_pda();
-        let (sol_mint, _) = crate::solana::find_interchain_token_pda(&its_root, token_id.as_slice());
-        let token_program = Pubkey::from_str_const(
-            "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
-        );
-        let ata_program = Pubkey::from_str_const(
-            "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
-        );
+        let (sol_mint, _) =
+            crate::solana::find_interchain_token_pda(&its_root, token_id.as_slice());
+        let token_program = Pubkey::from_str_const("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
+        let ata_program = Pubkey::from_str_const("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
         let ata = Pubkey::find_program_address(
-            &[memo_program_id.as_ref(), token_program.as_ref(), sol_mint.as_ref()],
+            &[
+                memo_program_id.as_ref(),
+                token_program.as_ref(),
+                sol_mint.as_ref(),
+            ],
             &ata_program,
-        ).0;
+        )
+        .0;
         ui::kv("extra accounts", &extra_accounts.to_string());
         ui::address("first extra (ATA)", &ata.to_string());
 
@@ -405,7 +407,10 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         // Check if source chain has a voting verifier.
         let has_voting_verifier = crate::cosmos::read_axelar_contract_field(
             &args.config,
-            &format!("/axelar/contracts/VotingVerifier/{}/address", args.source_chain),
+            &format!(
+                "/axelar/contracts/VotingVerifier/{}/address",
+                args.source_chain
+            ),
         )
         .is_ok();
 
@@ -417,8 +422,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         let verify_handle = tokio::spawn(async move {
             let spinner = spinner_rx.await.expect("spinner channel dropped");
             super::verify::verify_onchain_solana_its_streaming(
-                &vconfig, &vsource, &vdest, &vdest_rpc,
-                verify_rx, vdone, spinner,
+                &vconfig, &vsource, &vdest, &vdest_rpc, verify_rx, vdone, spinner,
             )
             .await
         });
@@ -453,8 +457,17 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
 
                 Box::pin(async move {
                     let result = execute_interchain_transfer_with_data(
-                        &provider, its_proxy, tid, &dc, &rb, amt, gv, &cpda, ea,
-                        tma.as_ref(), nonce,
+                        &provider,
+                        its_proxy,
+                        tid,
+                        &dc,
+                        &rb,
+                        amt,
+                        gv,
+                        &cpda,
+                        ea,
+                        tma.as_ref(),
+                        nonce,
                     )
                     .await;
                     // Stream successful txs to the concurrent verification pipeline.
@@ -489,7 +502,11 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         // Wait for verification to finish.
         let (verification, timings) = verify_handle.await??;
         for (msg_id, timing) in timings {
-            if let Some(tx) = report.transactions.iter_mut().find(|t| t.signature == msg_id) {
+            if let Some(tx) = report
+                .transactions
+                .iter_mut()
+                .find(|t| t.signature == msg_id)
+            {
                 tx.amplifier_timing = Some(timing);
             }
         }
@@ -535,8 +552,17 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
             let mut m = None;
             for attempt in 0..=MAX_RETRIES {
                 let result = execute_interchain_transfer_with_data(
-                    &provider, its_proxy, tid, &dc, &rb, amt, gv, &cpda, ea,
-                    tma.as_ref(), None,
+                    &provider,
+                    its_proxy,
+                    tid,
+                    &dc,
+                    &rb,
+                    amt,
+                    gv,
+                    &cpda,
+                    ea,
+                    tma.as_ref(),
+                    None,
                 )
                 .await;
 
@@ -759,7 +785,11 @@ async fn execute_interchain_transfer_with_data<P: Provider>(
     let submit_start = Instant::now();
 
     // Build unique metadata per tx (random memo string)
-    let metadata = Bytes::from(build_its_memo_metadata(counter_pda, extra_accounts, token_mint_ata));
+    let metadata = Bytes::from(build_its_memo_metadata(
+        counter_pda,
+        extra_accounts,
+        token_mint_ata,
+    ));
 
     let its = InterchainTokenService::new(its_proxy, provider);
     let base_call = its
