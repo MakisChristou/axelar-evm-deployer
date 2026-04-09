@@ -303,7 +303,10 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
 
         let has_voting_verifier = crate::cosmos::read_axelar_contract_field(
             &args.config,
-            &format!("/axelar/contracts/VotingVerifier/{}/address", args.source_chain),
+            &format!(
+                "/axelar/contracts/VotingVerifier/{}/address",
+                args.source_chain
+            ),
         )
         .is_ok();
 
@@ -315,8 +318,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         let verify_handle = tokio::spawn(async move {
             let spinner = spinner_rx.await.expect("spinner channel dropped");
             super::verify::verify_onchain_solana_its_streaming(
-                &vconfig, &vsource, &vdest, &vdest_rpc,
-                verify_rx, vdone, spinner,
+                &vconfig, &vsource, &vdest, &vdest_rpc, verify_rx, vdone, spinner,
             )
             .await
         });
@@ -380,7 +382,11 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
 
         let (verification, timings) = verify_handle.await??;
         for (msg_id, timing) in timings {
-            if let Some(tx) = report.transactions.iter_mut().find(|t| t.signature == msg_id) {
+            if let Some(tx) = report
+                .transactions
+                .iter_mut()
+                .find(|t| t.signature == msg_id)
+            {
                 tx.amplifier_timing = Some(timing);
             }
         }

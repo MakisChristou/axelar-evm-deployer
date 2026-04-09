@@ -758,8 +758,15 @@ async fn run_sol_to_evm(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
         let verify_handle = tokio::spawn(async move {
             let spinner = spinner_rx.await.expect("spinner channel dropped");
             verify::verify_onchain_evm_streaming(
-                &vconfig, &vsource, &vdest, &vdest_addr, vgw, &vdest_rpc,
-                verify_rx, vdone, spinner,
+                &vconfig,
+                &vsource,
+                &vdest,
+                &vdest_addr,
+                vgw,
+                &vdest_rpc,
+                verify_rx,
+                vdone,
+                spinner,
             )
             .await
         });
@@ -778,7 +785,11 @@ async fn run_sol_to_evm(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
         for (msg_id, timing) in timings {
             if let Some(tx) = report.transactions.iter_mut().find(|t| {
                 t.signature == msg_id
-                    || format!("{}-{}.1", t.signature, crate::solana::solana_call_contract_index()) == msg_id
+                    || format!(
+                        "{}-{}.1",
+                        t.signature,
+                        crate::solana::solana_call_contract_index()
+                    ) == msg_id
             }) {
                 tx.amplifier_timing = Some(timing);
             }
@@ -786,7 +797,8 @@ async fn run_sol_to_evm(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
         report.verification = Some(verification);
         report
     } else {
-        let mut report = sol_sender::run_load_test_with_metrics(&args, &destination_address, true).await?;
+        let mut report =
+            sol_sender::run_load_test_with_metrics(&args, &destination_address, true).await?;
         let verification = verify::verify_onchain(
             &args.config,
             &args.source_axelar_id,
@@ -1113,8 +1125,15 @@ async fn run_evm_to_evm(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
         let verify_handle = tokio::spawn(async move {
             let spinner = spinner_rx.await.expect("spinner channel dropped");
             verify::verify_onchain_evm_streaming(
-                &vconfig, &vsource, &vdest, &vdest_addr, vgw, &vdest_rpc,
-                verify_rx, vdone, spinner,
+                &vconfig,
+                &vsource,
+                &vdest,
+                &vdest_addr,
+                vgw,
+                &vdest_rpc,
+                verify_rx,
+                vdone,
+                spinner,
             )
             .await
         });
@@ -1134,7 +1153,11 @@ async fn run_evm_to_evm(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
 
         let (verification, timings) = verify_handle.await??;
         for (msg_id, timing) in timings {
-            if let Some(tx) = report.transactions.iter_mut().find(|t| t.signature == msg_id) {
+            if let Some(tx) = report
+                .transactions
+                .iter_mut()
+                .find(|t| t.signature == msg_id)
+            {
                 tx.amplifier_timing = Some(timing);
             }
         }
