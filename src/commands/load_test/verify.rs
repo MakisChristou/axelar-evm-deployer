@@ -435,36 +435,79 @@ async fn poll_pipeline<P: Provider>(
         let error_msg: Option<String> = None;
 
         // Snapshot indices by phase (no borrows held after this).
-        let voted_indices: Vec<usize> = active.iter().filter(|&&i| txs[i].phase == Phase::Voted).copied().collect();
-        let routed_indices: Vec<usize> = active.iter().filter(|&&i| txs[i].phase == Phase::Routed).copied().collect();
-        let hub_indices: Vec<usize> = active.iter().filter(|&&i| txs[i].phase == Phase::HubApproved).copied().collect();
-        let approved_indices: Vec<usize> = active.iter().filter(|&&i| txs[i].phase == Phase::Approved).copied().collect();
-        let executed_indices: Vec<usize> = active.iter().filter(|&&i| txs[i].phase == Phase::Executed).copied().collect();
+        let voted_indices: Vec<usize> = active
+            .iter()
+            .filter(|&&i| txs[i].phase == Phase::Voted)
+            .copied()
+            .collect();
+        let routed_indices: Vec<usize> = active
+            .iter()
+            .filter(|&&i| txs[i].phase == Phase::Routed)
+            .copied()
+            .collect();
+        let hub_indices: Vec<usize> = active
+            .iter()
+            .filter(|&&i| txs[i].phase == Phase::HubApproved)
+            .copied()
+            .collect();
+        let approved_indices: Vec<usize> = active
+            .iter()
+            .filter(|&&i| txs[i].phase == Phase::Approved)
+            .copied()
+            .collect();
+        let executed_indices: Vec<usize> = active
+            .iter()
+            .filter(|&&i| txs[i].phase == Phase::Executed)
+            .copied()
+            .collect();
 
         // Build owned data for batch queries (avoids holding borrows on txs).
-        let voted_data: Vec<(usize, String, String, String)> = voted_indices.iter().map(|&i| {
-            (i, txs[i].message_id.clone(), txs[i].source_address.clone(), txs[i].payload_hash_hex.clone())
-        }).collect();
-        let routed_data: Vec<(usize, String)> = routed_indices.iter().map(|&i| {
-            (i, txs[i].message_id.clone())
-        }).collect();
-        let hub_data: Vec<(usize, String)> = hub_indices.iter().map(|&i| {
-            (i, txs[i].message_id.clone())
-        }).collect();
-        let dest_indices: Vec<usize> = approved_indices.iter().chain(executed_indices.iter()).copied().collect();
-        let dest_data: Vec<(usize, [u8; 32])> = dest_indices.iter().map(|&i| {
-            (i, txs[i].command_id.unwrap_or_default())
-        }).collect();
+        let voted_data: Vec<(usize, String, String, String)> = voted_indices
+            .iter()
+            .map(|&i| {
+                (
+                    i,
+                    txs[i].message_id.clone(),
+                    txs[i].source_address.clone(),
+                    txs[i].payload_hash_hex.clone(),
+                )
+            })
+            .collect();
+        let routed_data: Vec<(usize, String)> = routed_indices
+            .iter()
+            .map(|&i| (i, txs[i].message_id.clone()))
+            .collect();
+        let hub_data: Vec<(usize, String)> = hub_indices
+            .iter()
+            .map(|&i| (i, txs[i].message_id.clone()))
+            .collect();
+        let dest_indices: Vec<usize> = approved_indices
+            .iter()
+            .chain(executed_indices.iter())
+            .copied()
+            .collect();
+        let dest_data: Vec<(usize, [u8; 32])> = dest_indices
+            .iter()
+            .map(|&i| (i, txs[i].command_id.unwrap_or_default()))
+            .collect();
 
         // Fire Cosmos phases concurrently (each internally chunks into COSMOS_BATCH_SIZE).
         let (voted_results, routed_results, hub_results) = tokio::join!(
             // Voted
             async {
-                if voted_data.is_empty() { return Vec::new(); }
+                if voted_data.is_empty() {
+                    return Vec::new();
+                }
                 if let Some(vv) = voting_verifier {
                     batch_check_voting_verifier_owned(
-                        lcd, vv, source_chain, destination_chain, destination_address, &voted_data,
-                    ).await
+                        lcd,
+                        vv,
+                        source_chain,
+                        destination_chain,
+                        destination_address,
+                        &voted_data,
+                    )
+                    .await
                 } else {
                     // No VotingVerifier — all pass immediately
                     voted_data.iter().map(|(i, ..)| (*i, true)).collect()
@@ -472,7 +515,9 @@ async fn poll_pipeline<P: Provider>(
             },
             // Routed
             async {
-                if routed_data.is_empty() { return Vec::new(); }
+                if routed_data.is_empty() {
+                    return Vec::new();
+                }
                 if let Some(gw) = cosm_gateway {
                     batch_check_cosmos_routed_owned(lcd, gw, source_chain, &routed_data).await
                 } else {
@@ -481,7 +526,9 @@ async fn poll_pipeline<P: Provider>(
             },
             // HubApproved
             async {
-                if hub_data.is_empty() { return Vec::new(); }
+                if hub_data.is_empty() {
+                    return Vec::new();
+                }
                 if let Some(gw) = axelarnet_gateway {
                     batch_check_hub_approved_owned(lcd, gw, source_chain, &hub_data).await
                 } else {
@@ -501,7 +548,11 @@ async fn poll_pipeline<P: Provider>(
         for (i, ok) in routed_results {
             if ok {
                 txs[i].timing.routed_secs = Some(txs[i].send_instant.elapsed().as_secs_f64());
-                txs[i].phase = if axelarnet_gateway.is_some() { Phase::HubApproved } else { Phase::Approved };
+                txs[i].phase = if axelarnet_gateway.is_some() {
+                    Phase::HubApproved
+                } else {
+                    Phase::Approved
+                };
                 last_progress = Instant::now();
             }
         }
@@ -565,8 +616,15 @@ async fn poll_pipeline<P: Provider>(
                             let p_hash = txs[i].payload_hash;
                             async move {
                                 let approved = check_evm_is_message_approved(
-                                    gw_contract, source_chain, &msg_id, &src_addr, c_addr, p_hash,
-                                ).await.unwrap_or(false);
+                                    gw_contract,
+                                    source_chain,
+                                    &msg_id,
+                                    &src_addr,
+                                    c_addr,
+                                    p_hash,
+                                )
+                                .await
+                                .unwrap_or(false);
                                 (i, phase, approved)
                             }
                         })
@@ -787,8 +845,8 @@ async fn poll_pipeline_its_hub(
     send_done: Option<&AtomicBool>,
     external_spinner: Option<indicatif::ProgressBar>,
 ) -> PeakThroughput {
-    let spinner =
-        external_spinner.unwrap_or_else(|| ui::wait_spinner("verifying ITS pipeline (starting)..."));
+    let spinner = external_spinner
+        .unwrap_or_else(|| ui::wait_spinner("verifying ITS pipeline (starting)..."));
     let mut last_progress = Instant::now();
     let mut rt_stats = RealTimeStats::new();
     let mut received_first_tx = false;
@@ -850,54 +908,115 @@ async fn poll_pipeline_its_hub(
         let error_msg: Option<String> = None;
 
         // Snapshot indices by phase
-        let voted_indices: Vec<usize> = active.iter().filter(|&&i| txs[i].phase == Phase::Voted).copied().collect();
-        let hub_indices: Vec<usize> = active.iter().filter(|&&i| txs[i].phase == Phase::HubApproved).copied().collect();
-        let discover_indices: Vec<usize> = active.iter().filter(|&&i| txs[i].phase == Phase::DiscoverSecondLeg).copied().collect();
-        let routed_indices: Vec<usize> = active.iter().filter(|&&i| txs[i].phase == Phase::Routed).copied().collect();
-        let approved_indices: Vec<usize> = active.iter().filter(|&&i| txs[i].phase == Phase::Approved).copied().collect();
-        let executed_indices: Vec<usize> = active.iter().filter(|&&i| txs[i].phase == Phase::Executed).copied().collect();
+        let voted_indices: Vec<usize> = active
+            .iter()
+            .filter(|&&i| txs[i].phase == Phase::Voted)
+            .copied()
+            .collect();
+        let hub_indices: Vec<usize> = active
+            .iter()
+            .filter(|&&i| txs[i].phase == Phase::HubApproved)
+            .copied()
+            .collect();
+        let discover_indices: Vec<usize> = active
+            .iter()
+            .filter(|&&i| txs[i].phase == Phase::DiscoverSecondLeg)
+            .copied()
+            .collect();
+        let routed_indices: Vec<usize> = active
+            .iter()
+            .filter(|&&i| txs[i].phase == Phase::Routed)
+            .copied()
+            .collect();
+        let approved_indices: Vec<usize> = active
+            .iter()
+            .filter(|&&i| txs[i].phase == Phase::Approved)
+            .copied()
+            .collect();
+        let executed_indices: Vec<usize> = active
+            .iter()
+            .filter(|&&i| txs[i].phase == Phase::Executed)
+            .copied()
+            .collect();
 
         // Build owned data for batch queries
-        let voted_data: Vec<(usize, String, String, String)> = voted_indices.iter().map(|&i| {
-            (i, txs[i].message_id.clone(), txs[i].source_address.clone(), txs[i].payload_hash_hex.clone())
-        }).collect();
-        let hub_data: Vec<(usize, String)> = hub_indices.iter().map(|&i| {
-            (i, txs[i].message_id.clone())
-        }).collect();
-        let routed_data: Vec<(usize, String)> = routed_indices.iter().map(|&i| {
-            (i, txs[i].second_leg_message_id.clone().unwrap_or_default())
-        }).collect();
+        let voted_data: Vec<(usize, String, String, String)> = voted_indices
+            .iter()
+            .map(|&i| {
+                (
+                    i,
+                    txs[i].message_id.clone(),
+                    txs[i].source_address.clone(),
+                    txs[i].payload_hash_hex.clone(),
+                )
+            })
+            .collect();
+        let hub_data: Vec<(usize, String)> = hub_indices
+            .iter()
+            .map(|&i| (i, txs[i].message_id.clone()))
+            .collect();
+        let routed_data: Vec<(usize, String)> = routed_indices
+            .iter()
+            .map(|&i| (i, txs[i].second_leg_message_id.clone().unwrap_or_default()))
+            .collect();
 
         // Solana destination checks: need command_id from second_leg_message_id
-        let sol_dest_indices: Vec<usize> = approved_indices.iter().chain(executed_indices.iter()).copied().collect();
-        let sol_dest_data: Vec<(usize, [u8; 32])> = sol_dest_indices.iter().map(|&i| {
-            let sl_id = txs[i].second_leg_message_id.as_deref().unwrap_or("");
-            let input = [b"axelar-".as_slice(), sl_id.as_bytes()].concat();
-            (i, keccak256(&input).into())
-        }).collect();
+        let sol_dest_indices: Vec<usize> = approved_indices
+            .iter()
+            .chain(executed_indices.iter())
+            .copied()
+            .collect();
+        let sol_dest_data: Vec<(usize, [u8; 32])> = sol_dest_indices
+            .iter()
+            .map(|&i| {
+                let sl_id = txs[i].second_leg_message_id.as_deref().unwrap_or("");
+                let input = [b"axelar-".as_slice(), sl_id.as_bytes()].concat();
+                (i, keccak256(&input).into())
+            })
+            .collect();
 
         // --- Fire Cosmos batch phases concurrently ---
-        let dest_chain_for_vv = txs.first().map(|t| t.gmp_destination_chain.clone()).unwrap_or_default();
-        let dest_addr_for_vv = txs.first().map(|t| t.gmp_destination_address.clone()).unwrap_or_default();
+        let dest_chain_for_vv = txs
+            .first()
+            .map(|t| t.gmp_destination_chain.clone())
+            .unwrap_or_default();
+        let dest_addr_for_vv = txs
+            .first()
+            .map(|t| t.gmp_destination_address.clone())
+            .unwrap_or_default();
 
         let (voted_results, hub_results, routed_results) = tokio::join!(
             async {
-                if voted_data.is_empty() { return Vec::new(); }
+                if voted_data.is_empty() {
+                    return Vec::new();
+                }
                 if let Some(vv) = voting_verifier {
                     batch_check_voting_verifier_owned(
-                        lcd, vv, source_chain, &dest_chain_for_vv, &dest_addr_for_vv, &voted_data,
-                    ).await
+                        lcd,
+                        vv,
+                        source_chain,
+                        &dest_chain_for_vv,
+                        &dest_addr_for_vv,
+                        &voted_data,
+                    )
+                    .await
                 } else {
                     voted_data.iter().map(|(i, ..)| (*i, true)).collect()
                 }
             },
             async {
-                if hub_data.is_empty() { return Vec::new(); }
-                batch_check_hub_approved_owned(lcd, axelarnet_gateway, source_chain, &hub_data).await
+                if hub_data.is_empty() {
+                    return Vec::new();
+                }
+                batch_check_hub_approved_owned(lcd, axelarnet_gateway, source_chain, &hub_data)
+                    .await
             },
             async {
-                if routed_data.is_empty() { return Vec::new(); }
-                batch_check_cosmos_routed_owned(lcd, cosm_gateway_dest, "axelar", &routed_data).await
+                if routed_data.is_empty() {
+                    return Vec::new();
+                }
+                batch_check_cosmos_routed_owned(lcd, cosm_gateway_dest, "axelar", &routed_data)
+                    .await
             },
         );
 
@@ -926,15 +1045,18 @@ async fn poll_pipeline_its_hub(
 
         // --- DiscoverSecondLeg: individual RPC tx_search (can't batch) ---
         if !discover_indices.is_empty() {
-            let discover_futs: Vec<_> = discover_indices.iter().map(|&i| {
-                let msg_id = txs[i].message_id.clone();
-                async move {
-                    match discover_second_leg(rpc, &msg_id).await {
-                        Ok(Some(info)) => (i, Some(info)),
-                        _ => (i, None),
+            let discover_futs: Vec<_> = discover_indices
+                .iter()
+                .map(|&i| {
+                    let msg_id = txs[i].message_id.clone();
+                    async move {
+                        match discover_second_leg(rpc, &msg_id).await {
+                            Ok(Some(info)) => (i, Some(info)),
+                            _ => (i, None),
+                        }
                     }
-                }
-            }).collect();
+                })
+                .collect();
             let discover_results: Vec<_> = futures::stream::iter(discover_futs)
                 .buffer_unordered(20)
                 .collect()
@@ -964,7 +1086,8 @@ async fn poll_pipeline_its_hub(
             for (i, status) in results {
                 match (txs[i].phase, status) {
                     (Phase::Approved, Some(0)) => {
-                        txs[i].timing.approved_secs = Some(txs[i].send_instant.elapsed().as_secs_f64());
+                        txs[i].timing.approved_secs =
+                            Some(txs[i].send_instant.elapsed().as_secs_f64());
                         txs[i].phase = Phase::Executed;
                         last_progress = Instant::now();
                     }
@@ -979,7 +1102,8 @@ async fn poll_pipeline_its_hub(
                         last_progress = Instant::now();
                     }
                     (Phase::Executed, Some(s)) if s > 0 => {
-                        txs[i].timing.executed_secs = Some(txs[i].send_instant.elapsed().as_secs_f64());
+                        txs[i].timing.executed_secs =
+                            Some(txs[i].send_instant.elapsed().as_secs_f64());
                         txs[i].timing.executed_ok = Some(true);
                         txs[i].phase = Phase::Done;
                         last_progress = Instant::now();
@@ -1345,10 +1469,7 @@ pub(super) fn tx_to_pending_evm(
 /// Convert a confirmed TxMetrics into a PendingTx for ITS hub verification.
 /// ITS messages route through the hub, so gmp_destination_chain/address are
 /// set from the TxMetrics (typically "axelar" / AxelarnetGateway).
-pub(super) fn tx_to_pending_its(
-    tx: &TxMetrics,
-    has_voting_verifier: bool,
-) -> PendingTx {
+pub(super) fn tx_to_pending_its(tx: &TxMetrics, has_voting_verifier: bool) -> PendingTx {
     let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
     PendingTx {
         idx: 0,
@@ -1887,8 +2008,8 @@ async fn poll_pipeline_its_hub_evm<P: Provider>(
     send_done: Option<&AtomicBool>,
     external_spinner: Option<indicatif::ProgressBar>,
 ) -> PeakThroughput {
-    let spinner =
-        external_spinner.unwrap_or_else(|| ui::wait_spinner("verifying ITS pipeline (starting)..."));
+    let spinner = external_spinner
+        .unwrap_or_else(|| ui::wait_spinner("verifying ITS pipeline (starting)..."));
     let mut last_progress = Instant::now();
     let mut rt_stats = RealTimeStats::new();
 
@@ -1916,7 +2037,9 @@ async fn poll_pipeline_its_hub_evm<P: Provider>(
         let total = txs.len();
 
         if total == 0 {
-            if sending_complete { break; }
+            if sending_complete {
+                break;
+            }
             tokio::time::sleep(POLL_INTERVAL).await;
             continue;
         }
@@ -1925,7 +2048,9 @@ async fn poll_pipeline_its_hub_evm<P: Provider>(
             .filter(|&i| !txs[i].failed && txs[i].phase != Phase::Done)
             .collect();
 
-        if active.is_empty() && sending_complete { break; }
+        if active.is_empty() && sending_complete {
+            break;
+        }
         if active.is_empty() {
             tokio::time::sleep(POLL_INTERVAL).await;
             last_progress = Instant::now();
@@ -1935,46 +2060,100 @@ async fn poll_pipeline_its_hub_evm<P: Provider>(
         let error_msg: Option<String> = None;
 
         // Snapshot indices by phase
-        let voted_indices: Vec<usize> = active.iter().filter(|&&i| txs[i].phase == Phase::Voted).copied().collect();
-        let hub_indices: Vec<usize> = active.iter().filter(|&&i| txs[i].phase == Phase::HubApproved).copied().collect();
-        let discover_indices: Vec<usize> = active.iter().filter(|&&i| txs[i].phase == Phase::DiscoverSecondLeg).copied().collect();
-        let routed_indices: Vec<usize> = active.iter().filter(|&&i| txs[i].phase == Phase::Routed).copied().collect();
-        let approved_indices: Vec<usize> = active.iter().filter(|&&i| txs[i].phase == Phase::Approved).copied().collect();
-        let executed_indices: Vec<usize> = active.iter().filter(|&&i| txs[i].phase == Phase::Executed).copied().collect();
+        let voted_indices: Vec<usize> = active
+            .iter()
+            .filter(|&&i| txs[i].phase == Phase::Voted)
+            .copied()
+            .collect();
+        let hub_indices: Vec<usize> = active
+            .iter()
+            .filter(|&&i| txs[i].phase == Phase::HubApproved)
+            .copied()
+            .collect();
+        let discover_indices: Vec<usize> = active
+            .iter()
+            .filter(|&&i| txs[i].phase == Phase::DiscoverSecondLeg)
+            .copied()
+            .collect();
+        let routed_indices: Vec<usize> = active
+            .iter()
+            .filter(|&&i| txs[i].phase == Phase::Routed)
+            .copied()
+            .collect();
+        let approved_indices: Vec<usize> = active
+            .iter()
+            .filter(|&&i| txs[i].phase == Phase::Approved)
+            .copied()
+            .collect();
+        let executed_indices: Vec<usize> = active
+            .iter()
+            .filter(|&&i| txs[i].phase == Phase::Executed)
+            .copied()
+            .collect();
 
         // Build owned data for batch queries
-        let voted_data: Vec<(usize, String, String, String)> = voted_indices.iter().map(|&i| {
-            (i, txs[i].message_id.clone(), txs[i].source_address.clone(), txs[i].payload_hash_hex.clone())
-        }).collect();
-        let hub_data: Vec<(usize, String)> = hub_indices.iter().map(|&i| {
-            (i, txs[i].message_id.clone())
-        }).collect();
-        let routed_data: Vec<(usize, String)> = routed_indices.iter().map(|&i| {
-            (i, txs[i].second_leg_message_id.clone().unwrap_or_default())
-        }).collect();
+        let voted_data: Vec<(usize, String, String, String)> = voted_indices
+            .iter()
+            .map(|&i| {
+                (
+                    i,
+                    txs[i].message_id.clone(),
+                    txs[i].source_address.clone(),
+                    txs[i].payload_hash_hex.clone(),
+                )
+            })
+            .collect();
+        let hub_data: Vec<(usize, String)> = hub_indices
+            .iter()
+            .map(|&i| (i, txs[i].message_id.clone()))
+            .collect();
+        let routed_data: Vec<(usize, String)> = routed_indices
+            .iter()
+            .map(|&i| (i, txs[i].second_leg_message_id.clone().unwrap_or_default()))
+            .collect();
 
-        let dest_chain_for_vv = txs.first().map(|t| t.gmp_destination_chain.clone()).unwrap_or_default();
-        let dest_addr_for_vv = txs.first().map(|t| t.gmp_destination_address.clone()).unwrap_or_default();
+        let dest_chain_for_vv = txs
+            .first()
+            .map(|t| t.gmp_destination_chain.clone())
+            .unwrap_or_default();
+        let dest_addr_for_vv = txs
+            .first()
+            .map(|t| t.gmp_destination_address.clone())
+            .unwrap_or_default();
 
         // --- Batch Cosmos phases concurrently ---
         let (voted_results, hub_results, routed_results) = tokio::join!(
             async {
-                if voted_data.is_empty() { return Vec::new(); }
+                if voted_data.is_empty() {
+                    return Vec::new();
+                }
                 if let Some(vv) = voting_verifier {
                     batch_check_voting_verifier_owned(
-                        lcd, vv, source_chain, &dest_chain_for_vv, &dest_addr_for_vv, &voted_data,
-                    ).await
+                        lcd,
+                        vv,
+                        source_chain,
+                        &dest_chain_for_vv,
+                        &dest_addr_for_vv,
+                        &voted_data,
+                    )
+                    .await
                 } else {
                     voted_data.iter().map(|(i, ..)| (*i, true)).collect()
                 }
             },
             async {
-                if hub_data.is_empty() { return Vec::new(); }
-                batch_check_hub_approved_owned(lcd, axelarnet_gateway, source_chain, &hub_data).await
+                if hub_data.is_empty() {
+                    return Vec::new();
+                }
+                batch_check_hub_approved_owned(lcd, axelarnet_gateway, source_chain, &hub_data)
+                    .await
             },
             async {
-                if routed_data.is_empty() { return Vec::new(); }
-                batch_check_cosmos_routed_owned(lcd, cosm_gateway_dest, "axelar", &routed_data).await
+                if routed_data.is_empty() {
+                    return Vec::new();
+                }
+                batch_check_cosmos_routed_owned(lcd, cosm_gateway_dest, "axelar", &routed_data)
+                    .await
             },
         );
 
@@ -2007,15 +2186,18 @@ async fn poll_pipeline_its_hub_evm<P: Provider>(
 
         // --- DiscoverSecondLeg: individual RPC tx_search ---
         if !discover_indices.is_empty() {
-            let discover_futs: Vec<_> = discover_indices.iter().map(|&i| {
-                let msg_id = txs[i].message_id.clone();
-                async move {
-                    match discover_second_leg(rpc, &msg_id).await {
-                        Ok(Some(info)) => (i, Some(info)),
-                        _ => (i, None),
+            let discover_futs: Vec<_> = discover_indices
+                .iter()
+                .map(|&i| {
+                    let msg_id = txs[i].message_id.clone();
+                    async move {
+                        match discover_second_leg(rpc, &msg_id).await {
+                            Ok(Some(info)) => (i, Some(info)),
+                            _ => (i, None),
+                        }
                     }
-                }
-            }).collect();
+                })
+                .collect();
             let discover_results: Vec<_> = futures::stream::iter(discover_futs)
                 .buffer_unordered(20)
                 .collect()
@@ -2033,23 +2215,40 @@ async fn poll_pipeline_its_hub_evm<P: Provider>(
         }
 
         // --- EVM Approved/Executed checks (individual, buffer_unordered) ---
-        let evm_check_indices: Vec<usize> = approved_indices.iter().chain(executed_indices.iter()).copied().collect();
+        let evm_check_indices: Vec<usize> = approved_indices
+            .iter()
+            .chain(executed_indices.iter())
+            .copied()
+            .collect();
         if !evm_check_indices.is_empty() {
-            let evm_futs: Vec<_> = evm_check_indices.iter().map(|&i| {
-                let phase = txs[i].phase;
-                let sl_id = txs[i].second_leg_message_id.clone().unwrap_or_default();
-                let sl_ph = txs[i].second_leg_payload_hash.clone().unwrap_or_default();
-                let sl_src = txs[i].second_leg_source_address.clone().unwrap_or_default();
-                let sl_dst = txs[i].second_leg_destination_address.clone().unwrap_or_default();
-                async move {
-                    let ph = parse_payload_hash(&sl_ph).unwrap_or_default();
-                    let dst_addr: Address = sl_dst.parse().unwrap_or(Address::ZERO);
-                    let approved = check_evm_is_message_approved(
-                        gw_contract, "axelar", &sl_id, &sl_src, dst_addr, ph,
-                    ).await.unwrap_or(false);
-                    (i, phase, approved)
-                }
-            }).collect();
+            let evm_futs: Vec<_> = evm_check_indices
+                .iter()
+                .map(|&i| {
+                    let phase = txs[i].phase;
+                    let sl_id = txs[i].second_leg_message_id.clone().unwrap_or_default();
+                    let sl_ph = txs[i].second_leg_payload_hash.clone().unwrap_or_default();
+                    let sl_src = txs[i].second_leg_source_address.clone().unwrap_or_default();
+                    let sl_dst = txs[i]
+                        .second_leg_destination_address
+                        .clone()
+                        .unwrap_or_default();
+                    async move {
+                        let ph = parse_payload_hash(&sl_ph).unwrap_or_default();
+                        let dst_addr: Address = sl_dst.parse().unwrap_or(Address::ZERO);
+                        let approved = check_evm_is_message_approved(
+                            gw_contract,
+                            "axelar",
+                            &sl_id,
+                            &sl_src,
+                            dst_addr,
+                            ph,
+                        )
+                        .await
+                        .unwrap_or(false);
+                        (i, phase, approved)
+                    }
+                })
+                .collect();
             let evm_results: Vec<_> = futures::stream::iter(evm_futs)
                 .buffer_unordered(20)
                 .collect()
@@ -2057,13 +2256,15 @@ async fn poll_pipeline_its_hub_evm<P: Provider>(
             for (i, phase, approved) in evm_results {
                 match phase {
                     Phase::Approved if approved => {
-                        txs[i].timing.approved_secs = Some(txs[i].send_instant.elapsed().as_secs_f64());
+                        txs[i].timing.approved_secs =
+                            Some(txs[i].send_instant.elapsed().as_secs_f64());
                         txs[i].phase = Phase::Executed;
                         last_progress = Instant::now();
                     }
                     Phase::Executed if !approved => {
                         // false = approval consumed = executed
-                        txs[i].timing.executed_secs = Some(txs[i].send_instant.elapsed().as_secs_f64());
+                        txs[i].timing.executed_secs =
+                            Some(txs[i].send_instant.elapsed().as_secs_f64());
                         txs[i].timing.executed_ok = Some(true);
                         txs[i].phase = Phase::Done;
                         last_progress = Instant::now();
@@ -2074,7 +2275,10 @@ async fn poll_pipeline_its_hub_evm<P: Provider>(
         }
 
         let (voted, _, hub_approved, approved, executed) = phase_counts(txs);
-        let routed = txs.iter().filter(|t| t.timing.routed_secs.is_some()).count();
+        let routed = txs
+            .iter()
+            .filter(|t| t.timing.routed_secs.is_some())
+            .count();
         let counts = [voted, routed, hub_approved, approved, executed];
         rt_stats.update(counts, txs);
 
@@ -2082,7 +2286,11 @@ async fn poll_pipeline_its_hub_evm<P: Provider>(
             spinner.set_message(rt_stats.spinner_msg_its(counts, total, error_msg.as_deref()));
         }
 
-        let timeout = if sending_complete { INACTIVITY_TIMEOUT } else { INACTIVITY_TIMEOUT * 2 };
+        let timeout = if sending_complete {
+            INACTIVITY_TIMEOUT
+        } else {
+            INACTIVITY_TIMEOUT * 2
+        };
         if last_progress.elapsed() >= timeout {
             break;
         }
@@ -2112,7 +2320,10 @@ async fn poll_pipeline_its_hub_evm<P: Provider>(
     }
 
     let (voted, _, hub_approved, approved, executed) = phase_counts(txs);
-    let routed = txs.iter().filter(|t| t.timing.routed_secs.is_some()).count();
+    let routed = txs
+        .iter()
+        .filter(|t| t.timing.routed_secs.is_some())
+        .count();
 
     spinner.finish_and_clear();
     ui::success(&format!(
@@ -2587,10 +2798,7 @@ async fn batch_check_voting_verifier(
                 if let Some(arr) = resp.as_array() {
                     for (j, item) in arr.iter().enumerate() {
                         if j < chunk.len() {
-                            let status = item
-                                .get("status")
-                                .and_then(|s| s.as_str())
-                                .unwrap_or("");
+                            let status = item.get("status").and_then(|s| s.as_str()).unwrap_or("");
                             results.push((chunk[j].0, status.to_lowercase().contains("succeeded")));
                         }
                     }
@@ -2744,17 +2952,25 @@ async fn batch_check_voting_verifier_owned(
                     } else {
                         let s = serde_json::to_string(&resp).unwrap_or_default();
                         let ok = s.to_lowercase().contains("succeeded");
-                        for (idx, ..) in chunk { out.push((*idx, ok)); }
+                        for (idx, ..) in chunk {
+                            out.push((*idx, ok));
+                        }
                     }
                 }
                 Err(_) => {
-                    for (idx, ..) in chunk { out.push((*idx, false)); }
+                    for (idx, ..) in chunk {
+                        out.push((*idx, false));
+                    }
                 }
             }
             out
         })
         .collect();
-    futures::future::join_all(futs).await.into_iter().flatten().collect()
+    futures::future::join_all(futs)
+        .await
+        .into_iter()
+        .flatten()
+        .collect()
 }
 
 /// Batch Cosmos Gateway routed check with owned data and concurrent chunks.
@@ -2777,18 +2993,30 @@ async fn batch_check_cosmos_routed_owned(
                 Ok(resp) => {
                     if let Some(arr) = resp.as_array() {
                         for (j, item) in arr.iter().enumerate() {
-                            if j < chunk.len() { out.push((chunk[j].0, !item.is_null())); }
+                            if j < chunk.len() {
+                                out.push((chunk[j].0, !item.is_null()));
+                            }
                         }
                     } else {
-                        for (idx, _) in chunk { out.push((*idx, false)); }
+                        for (idx, _) in chunk {
+                            out.push((*idx, false));
+                        }
                     }
                 }
-                Err(_) => { for (idx, _) in chunk { out.push((*idx, false)); } }
+                Err(_) => {
+                    for (idx, _) in chunk {
+                        out.push((*idx, false));
+                    }
+                }
             }
             out
         })
         .collect();
-    futures::future::join_all(futs).await.into_iter().flatten().collect()
+    futures::future::join_all(futs)
+        .await
+        .into_iter()
+        .flatten()
+        .collect()
 }
 
 /// Batch AxelarnetGateway hub-approved check with owned data and concurrent chunks.
@@ -2811,18 +3039,30 @@ async fn batch_check_hub_approved_owned(
                 Ok(resp) => {
                     if let Some(arr) = resp.as_array() {
                         for (j, item) in arr.iter().enumerate() {
-                            if j < chunk.len() { out.push((chunk[j].0, !item.is_null())); }
+                            if j < chunk.len() {
+                                out.push((chunk[j].0, !item.is_null()));
+                            }
                         }
                     } else {
-                        for (idx, _) in chunk { out.push((*idx, false)); }
+                        for (idx, _) in chunk {
+                            out.push((*idx, false));
+                        }
                     }
                 }
-                Err(_) => { for (idx, _) in chunk { out.push((*idx, false)); } }
+                Err(_) => {
+                    for (idx, _) in chunk {
+                        out.push((*idx, false));
+                    }
+                }
             }
             out
         })
         .collect();
-    futures::future::join_all(futs).await.into_iter().flatten().collect()
+    futures::future::join_all(futs)
+        .await
+        .into_iter()
+        .flatten()
+        .collect()
 }
 
 /// Batch-check Solana incoming message PDAs via `getMultipleAccounts`.
