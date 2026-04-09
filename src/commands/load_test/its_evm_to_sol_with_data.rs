@@ -302,6 +302,47 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         ).0;
         ui::kv("extra accounts", &extra_accounts.to_string());
         ui::address("first extra (ATA)", &ata.to_string());
+
+        // Create the ATA on Solana if it doesn't exist yet, so the memo program
+        // can transfer tokens to it during execution.
+        let sol_keypair = crate::solana::load_keypair(args.keypair.as_deref())?;
+        use solana_sdk::signer::Signer;
+        let sol_rpc = solana_client::rpc_client::RpcClient::new_with_commitment(
+            &args.destination_rpc,
+            solana_commitment_config::CommitmentConfig::confirmed(),
+        );
+        if sol_rpc.get_account_data(&ata).is_err() {
+            ui::info("creating ATA on Solana for memo program...");
+            let create_ata_ix = solana_sdk::instruction::Instruction {
+                program_id: ata_program,
+                accounts: vec![
+                    solana_sdk::instruction::AccountMeta::new(sol_keypair.pubkey(), true),
+                    solana_sdk::instruction::AccountMeta::new(ata, false),
+                    solana_sdk::instruction::AccountMeta::new_readonly(memo_program_id, false),
+                    solana_sdk::instruction::AccountMeta::new_readonly(sol_mint, false),
+                    solana_sdk::instruction::AccountMeta::new_readonly(
+                        Pubkey::from_str_const("11111111111111111111111111111111"),
+                        false,
+                    ),
+                    solana_sdk::instruction::AccountMeta::new_readonly(token_program, false),
+                ],
+                data: vec![1], // CreateIdempotent
+            };
+            let blockhash = sol_rpc.get_latest_blockhash()?;
+            let tx = solana_sdk::transaction::Transaction::new_signed_with_payer(
+                &[create_ata_ix],
+                Some(&sol_keypair.pubkey()),
+                &[&sol_keypair],
+                blockhash,
+            );
+            sol_rpc
+                .send_and_confirm_transaction(&tx)
+                .map_err(|e| eyre!("failed to create ATA: {e}"))?;
+            ui::success("ATA created");
+        } else {
+            ui::info("ATA already exists");
+        }
+
         Some(ata)
     } else {
         None
