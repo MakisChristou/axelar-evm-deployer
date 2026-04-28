@@ -111,7 +111,7 @@ const MAINNET_VERIFIERS: &[(&str, &str)] = &[
         "axelar1lkg5zs5zgywc0ua9mpd9d63gdnl3ka9n07r5fg",
         "DSRV / Encapsulate",
     ),
-    ("axelar1p0z7ff4wru5yq0v2ny5h6vx5e6ceg06kqnhfpg", "Axelar"),
+    ("axelar1p0z7ff4wru5yq0v2ny5h6vx5e6ceg06kqnhfpg", "axelar1"),
     ("axelar1qgwu4jjgeapqm82w4nslhwlzxa3mjd8fvn4xdx", "AlexZ"),
     (
         "axelar1s2cf963rm0u6kxgker95dh5urmq0utqq3rezdn",
@@ -135,7 +135,7 @@ const MAINNET_VERIFIERS: &[(&str, &str)] = &[
     ),
     ("axelar1zqnwrhv35cyf65u0059a8rvw8njtqeqjckzhlx", "Polkachu"),
     ("axelar1k22ud8g8k7dqx4u5a77gklf6f6exth0u474vt2", "Imperator"),
-    ("axelar1k4whz7vj0jurjlwmu3rnx7gfanme8wx4lhzecu", "unknown?"),
+    ("axelar1k4whz7vj0jurjlwmu3rnx7gfanme8wx4lhzecu", "axelar2"),
 ];
 
 const SUPPORTED_NETWORKS: &[&str] = &["testnet", "mainnet"];
