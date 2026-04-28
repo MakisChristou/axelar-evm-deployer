@@ -416,20 +416,18 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     let total_failed = metrics.iter().filter(|m| !m.success).count() as u64;
 
     if total_failed > 0 {
-        let mut error_counts: std::collections::HashMap<String, u64> =
+        let mut error_counts: std::collections::HashMap<String, (u64, String)> =
             std::collections::HashMap::new();
         for m in metrics.iter().filter(|m| !m.success) {
-            let reason = m
-                .error
-                .as_deref()
-                .unwrap_or("unknown")
-                .chars()
-                .take(120)
-                .collect::<String>();
-            *error_counts.entry(reason).or_default() += 1;
+            // Group by a short key (deduplicates identical failures) but
+            // print the full error message — Solana program-log dumps are
+            // multi-line and a 120-char cap drops the actionable part.
+            let full = m.error.as_deref().unwrap_or("unknown").to_string();
+            let key: String = full.chars().take(80).collect();
+            error_counts.entry(key).or_insert((0u64, full)).0 += 1;
         }
-        for (reason, count) in &error_counts {
-            ui::warn(&format!("{count} txs failed: {reason}"));
+        for (_key, (count, full)) in &error_counts {
+            ui::warn(&format!("{count} txs failed:\n{full}"));
         }
     }
 
@@ -629,14 +627,19 @@ async fn setup_its_token(
     ui::success("remote deploy tx confirmed on Solana");
 
     // Wait for the remote deploy to propagate through the hub and execute on EVM.
-    // The deploy message ID is {signature}-1.3 (empirically determined).
+    // The deploy message ID is {signature}-{top_ix}.{inner_ix} where the inner
+    // index varies by program version. We MUST extract it from the tx logs —
+    // a wrong fallback ID would silently send the verifier into a 5-minute
+    // pipeline timeout waiting for a message that does not exist.
     let deploy_message_id =
-        solana::extract_its_message_id(solana_rpc, &remote_sig).unwrap_or_else(|e| {
-            ui::warn(&format!(
-                "could not extract message ID from tx logs: {e}, falling back to -1.3"
-            ));
-            format!("{remote_sig}-1.3")
-        });
+        solana::extract_its_message_id(solana_rpc, &remote_sig).map_err(|e| {
+            eyre!(
+                "could not extract remote-deploy message ID from tx logs: {e}\n\
+                 Tip: the public Solana devnet RPC is rate-limited and slow to index. \
+                 Pass --source-rpc <faster-rpc-url> (e.g. a QuickNode/Helius endpoint) \
+                 to fix this."
+            )
+        })?;
     super::verify::wait_for_its_remote_deploy(
         config,
         src,
