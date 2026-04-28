@@ -42,6 +42,22 @@ pub enum Commands {
         #[arg(long)]
         json: bool,
     },
+
+    /// Show recent votes cast by a single verifier on a given chain
+    VerifierVotes {
+        /// Axelar network (testnet, mainnet)
+        network: String,
+        /// Chain axelar ID (e.g. solana, xrpl, hedera)
+        chain: String,
+        /// Verifier axelar1... address
+        verifier: String,
+        /// Maximum number of recent votes to show (default: 20)
+        #[arg(long, default_value = "20")]
+        limit: usize,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
