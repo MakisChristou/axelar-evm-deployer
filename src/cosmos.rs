@@ -462,6 +462,44 @@ pub async fn rpc_tx_search_event(rpc: &str, event_key: &str, event_value: &str) 
     Ok(resp)
 }
 
+/// Query Tendermint RPC `tx_search` with a raw query string (e.g.
+/// `key1='value' AND key2='value'`). Returns the parsed `result` payload (with
+/// keys `total_count`, `txs`).
+pub async fn rpc_tx_search(
+    rpc: &str,
+    query: &str,
+    per_page: u32,
+    page: u32,
+    order_desc: bool,
+) -> Result<Value> {
+    let json_quoted = serde_json::to_string(query)?;
+    let order = if order_desc { "\"desc\"" } else { "\"asc\"" };
+    let resp = reqwest::Client::new()
+        .get(format!("{rpc}/tx_search"))
+        .query(&[
+            ("query", json_quoted.as_str()),
+            ("per_page", &per_page.to_string()),
+            ("page", &page.to_string()),
+            ("order_by", order),
+        ])
+        .send()
+        .await?
+        .json::<Value>()
+        .await?;
+    Ok(resp.get("result").cloned().unwrap_or(Value::Null))
+}
+
+/// Query Tendermint RPC `block` endpoint for a given height. Returns block.header.time.
+pub async fn rpc_block_time(rpc: &str, height: u64) -> Result<String> {
+    let url = format!("{rpc}/block?height={height}");
+    let resp: Value = reqwest::get(&url).await?.json().await?;
+    Ok(resp
+        .pointer("/result/block/header/time")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_default())
+}
+
 /// Fetch the current verifier set from Axelar chain via LCD REST endpoint.
 /// Returns (signers sorted by address, threshold, nonce, verifierSetId)
 pub async fn fetch_verifier_set(
