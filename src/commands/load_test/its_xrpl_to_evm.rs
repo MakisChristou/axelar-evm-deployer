@@ -278,15 +278,28 @@ pub(super) fn read_xrpl_chain_config(
     Ok((rpc, multisig, network_type))
 }
 
-/// Load the XRPL main wallet from `--private-key` / `XRPL_PRIVATE_KEY` (hex).
-fn load_xrpl_main_wallet(private_key: Option<&str>) -> Result<XrplWallet> {
-    let key = private_key
-        .map(String::from)
-        .or_else(|| std::env::var("XRPL_PRIVATE_KEY").ok())
-        .ok_or_else(|| {
+/// Load the XRPL main wallet for the SOURCE side of an XRPL → EVM transfer.
+///
+/// Resolution order:
+/// 1. `XRPL_PRIVATE_KEY` env (preferred — supports both 32-byte hex and the
+///    canonical XRPL family seed `s...` format).
+/// 2. `--private-key` / `EVM_PRIVATE_KEY` interpreted as a 32-byte secp256k1
+///    seed (legacy fallback so existing testnet flows still work).
+fn load_xrpl_main_wallet(fallback_private_key: Option<&str>) -> Result<XrplWallet> {
+    if let Ok(key) = std::env::var("XRPL_PRIVATE_KEY") {
+        return XrplWallet::from_secret_str(&key)
+            .map_err(|e| eyre!("XRPL_PRIVATE_KEY parse failed: {e}"));
+    }
+    if let Some(k) = fallback_private_key {
+        return XrplWallet::from_hex(k).map_err(|e| {
             eyre!(
-                "XRPL main wallet required. Set XRPL_PRIVATE_KEY env var (32-byte hex secp256k1 secret)."
+                "no XRPL_PRIVATE_KEY set; tried interpreting --private-key as a 32-byte hex \
+                 secp256k1 seed but: {e}. Set XRPL_PRIVATE_KEY (s-prefix family seed or 64-char hex) \
+                 to fix."
             )
-        })?;
-    XrplWallet::from_hex(&key)
+        });
+    }
+    Err(eyre!(
+        "XRPL main wallet required. Set XRPL_PRIVATE_KEY (s-prefix family seed or 64-char hex)."
+    ))
 }

@@ -842,6 +842,12 @@ async fn run_sol_to_evm(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
 
     ui::address("EVM gateway", &format!("{gateway_addr}"));
 
+    // Without this check, a missing/undeployed EVM gateway causes the verifier
+    // to silently report 30/30 executed (eth_call on an EOA returns 0x →
+    // alloy decodes it as `false` → our pipeline interprets that as "approval
+    // consumed = executed"). Fail fast instead.
+    ensure_evm_contract_deployed(rpc_url, "destination AxelarGateway", gateway_addr).await?;
+
     // --- Deploy/reuse SenderReceiver on destination EVM chain ---
     let cache = read_cache(dest);
 
@@ -1255,6 +1261,11 @@ async fn run_evm_to_evm(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
         read_contract_address(&args.config, dest, "AxelarGasService").unwrap_or(Address::ZERO);
     ui::address("destination gateway", &format!("{dest_gateway_addr}"));
 
+    // Bail loudly if the configured gateway has no bytecode — otherwise the
+    // verifier silently reports false-positive 30/30 executed.
+    ensure_evm_contract_deployed(&dest_rpc_url, "destination AxelarGateway", dest_gateway_addr)
+        .await?;
+
     let dest_read_provider = ProviderBuilder::new().connect_http(dest_rpc_url.parse()?);
     let dest_write_provider = ProviderBuilder::new()
         .wallet(signer.clone())
@@ -1618,6 +1629,34 @@ pub async fn validate_evm_rpc(rpc_url: &str) -> Result<()> {
     Ok(())
 }
 
+/// Pre-flight check that a contract address actually has bytecode at the
+/// given EVM RPC. Without this, the EVM destination verifier silently reports
+/// false-positive 30/30 executed — `eth_call` against an EOA returns `0x`,
+/// which alloy decodes as `false`, which our pipeline interprets as
+/// "approval consumed by execution = success." See verify.rs:266 for the
+/// dependent decode logic.
+pub async fn ensure_evm_contract_deployed(
+    rpc_url: &str,
+    contract_label: &str,
+    addr: alloy::primitives::Address,
+) -> Result<()> {
+    let provider = ProviderBuilder::new()
+        .connect_http(rpc_url.parse().map_err(|e| eyre::eyre!("{e}"))?);
+    let code = provider
+        .get_code_at(addr)
+        .await
+        .map_err(|e| eyre::eyre!("eth_getCode for {contract_label} ({addr}) failed: {e}"))?;
+    if code.is_empty() {
+        eyre::bail!(
+            "{contract_label} at {addr} on {rpc_url} has no bytecode. \
+             The chain config likely points at an undeployed/stale address — \
+             this environment cannot relay messages to that contract. \
+             Pick a different chain pair or update the chain config to a deployed address."
+        );
+    }
+    Ok(())
+}
+
 /// Validate that an RPC endpoint speaks Solana JSON-RPC (getVersion).
 pub async fn validate_solana_rpc(rpc_url: &str) -> Result<()> {
     let client = solana_client::nonblocking::rpc_client::RpcClient::new(rpc_url.to_string());
@@ -1972,6 +2011,9 @@ async fn run_stellar_to_evm(args: LoadTestArgs, _run_start: Instant) -> Result<(
     let gateway_addr = read_contract_address(&args.config, dest, "AxelarGateway")?;
     let gas_service_addr = read_contract_address(&args.config, dest, "AxelarGasService")?;
     ui::address("EVM gateway", &format!("{gateway_addr}"));
+
+    // Pre-flight: bail if the destination gateway has no bytecode.
+    ensure_evm_contract_deployed(&evm_rpc_url, "destination AxelarGateway", gateway_addr).await?;
 
     let evm_private_key = args
         .private_key

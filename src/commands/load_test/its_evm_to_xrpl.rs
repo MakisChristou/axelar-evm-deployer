@@ -31,7 +31,18 @@ use crate::cosmos::{lcd_cosmwasm_smart_query, read_axelar_config, read_axelar_co
 use crate::evm::InterchainTokenService;
 use crate::ui;
 use crate::utils::read_contract_address;
-use crate::xrpl::{XrplClient, XrplWallet, faucet_url_for_network};
+use crate::xrpl::{XrplClient, faucet_url_for_network, parse_address};
+
+/// Hard-coded default XRPL recipient.
+///
+/// Pinned per-network so the receiver is stable across runs and does not
+/// depend on whichever signing key happens to be loaded. The sender (and
+/// signer that pays for the EVM-side tx) is still derived live from
+/// EVM_PRIVATE_KEY.
+#[cfg(feature = "mainnet")]
+const DEFAULT_XRPL_RECIPIENT: &str = "rhnu1DRT9AmPmz9C78WoAiEyXFdaGvxgfk";
+#[cfg(not(feature = "mainnet"))]
+const DEFAULT_XRPL_RECIPIENT: &str = "r3Xqy7SVtkNQyCU9TZx46BAHFMhcJRopQh";
 
 #[cfg(feature = "devnet-amplifier")]
 fn default_gas_value_wei(_source_chain: &str) -> u128 {
@@ -109,13 +120,14 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
                 FixedBytes::<32>::from(id)
             }
             Err(e) => {
-                eyre::bail!(
-                    "auto-discovery of XRP token id failed: {e}\n\
-                     Workaround: pass `--token-id 0x<hex>` explicitly. \
-                     The canonical id is the same across all networks where XRP is registered; \
-                     for testnet/mainnet/stagenet the value is \
-                     `0xba5a21ca88ef6bba2bfff5088994f90e1077e2a1cc3dcc38bd261f00fce2824f`."
-                );
+                let canonical_hex =
+                    "ba5a21ca88ef6bba2bfff5088994f90e1077e2a1cc3dcc38bd261f00fce2824f";
+                let canonical: FixedBytes<32> = format!("0x{canonical_hex}").parse()?;
+                ui::warn(&format!(
+                    "XrplGateway lookup failed ({e}); falling back to canonical XRP token id 0x{canonical_hex}"
+                ));
+                ui::kv("token ID (canonical fallback)", &format!("0x{canonical_hex}"));
+                canonical
             }
         }
     };
@@ -155,21 +167,11 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         super::its_xrpl_to_evm::read_xrpl_chain_config(&args.config, dest)?;
     let xrpl_client = XrplClient::new(&xrpl_rpc);
 
-    // Recipient: derive deterministically from XRPL_PRIVATE_KEY (or generate
-    // a fresh wallet if not set — only viable on testnet with friendbot).
-    let recipient_wallet = match std::env::var("XRPL_PRIVATE_KEY")
-        .ok()
-        .or_else(|| args.private_key.clone())
-    {
-        Some(k) if k.len() == 64 || k.len() == 66 => XrplWallet::from_hex(&k)?,
-        _ => {
-            // Derive from the EVM main key so it's deterministic across runs.
-            let mut seed = [0u8; 32];
-            seed.copy_from_slice(&main_key);
-            XrplWallet::from_bytes(&seed)?
-        }
-    };
-    let recipient_addr = recipient_wallet.address();
+    // Recipient is fixed, not derived: see DEFAULT_XRPL_RECIPIENT above.
+    let recipient_addr = DEFAULT_XRPL_RECIPIENT.to_string();
+    // Sanity-check the constant parses as an XRPL address; bail loudly if it
+    // ever gets mistyped.
+    parse_address(&recipient_addr)?;
     ui::address("XRPL recipient", &recipient_addr);
 
     // Activate the recipient if needed (testnet/devnet only).

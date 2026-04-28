@@ -249,10 +249,15 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
 
     // --- Receiver bytes for Stellar destination ---
     // ITS expects `encodeITSDestination` for Stellar = ASCII bytes of the
-    // destination contract's C-address. We target the AxelarExample contract
-    // which implements `__authorized_execute_with_token` (the ITS callback).
-    let receiver_bytes = Bytes::from(stellar_example_addr.as_bytes().to_vec());
-    ui::address("destination Stellar contract", &stellar_example_addr);
+    // destination address. For plain `interchain_transfer` (no data), the
+    // recipient must be a Stellar account (G-address) — sending to a contract
+    // C-address makes ITS try `execute_with_data` with empty data, which the
+    // AxelarExample callback rejects (Contract Error #17).
+    let stellar_recipient_wallet = super::load_stellar_main_wallet(args.private_key.as_deref())
+        .map_err(|e| eyre!("EVM→Stellar ITS needs STELLAR_PRIVATE_KEY for the recipient: {e}"))?;
+    let stellar_recipient_addr = stellar_recipient_wallet.address();
+    let receiver_bytes = Bytes::from(stellar_recipient_addr.as_bytes().to_vec());
+    ui::address("destination Stellar account", &stellar_recipient_addr);
 
     // === SUSTAINED MODE ===
     if !burst_mode {
@@ -358,7 +363,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
             result,
             src,
             dest,
-            &stellar_example_addr,
+            &stellar_recipient_addr,
             total_expected,
             num_keys,
         );
@@ -452,7 +457,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     let mut report = LoadTestReport {
         source_chain: src.to_string(),
         destination_chain: dest.to_string(),
-        destination_address: stellar_example_addr.clone(),
+        destination_address: stellar_recipient_addr.clone(),
         protocol: String::new(),
         tps: None,
         duration_secs: None,
@@ -495,7 +500,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         &args.config,
         &args.source_axelar_id,
         &args.destination_axelar_id,
-        &stellar_example_addr,
+        &stellar_recipient_addr,
         stellar_rpc,
         &stellar_network_type,
         &stellar_gateway_addr,

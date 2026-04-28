@@ -159,11 +159,11 @@ pub enum TestCommands {
         keypair: Option<String>,
 
         /// Override source chain RPC URL (default: from config)
-        #[arg(long)]
+        #[arg(long, env = "SOURCE_RPC")]
         source_rpc: Option<String>,
 
         /// Override destination chain RPC URL (default: from config)
-        #[arg(long)]
+        #[arg(long, env = "DESTINATION_RPC")]
         destination_rpc: Option<String>,
 
         /// Hex-encoded payload to send (default: random test message)
