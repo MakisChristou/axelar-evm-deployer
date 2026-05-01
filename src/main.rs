@@ -105,6 +105,7 @@ async fn main() -> Result<()> {
                 evm_private_key,
                 amount,
                 gas_value,
+                fresh_token,
             } => {
                 if let Some(config) = config {
                     commands::test_its::run_config(
@@ -115,6 +116,7 @@ async fn main() -> Result<()> {
                         evm_private_key,
                         amount,
                         gas_value,
+                        fresh_token,
                     )
                     .await
                 } else {

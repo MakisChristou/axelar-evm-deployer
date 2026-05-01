@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use alloy::{
@@ -937,6 +937,55 @@ const ITS_MESSAGE_TYPE_INTERCHAIN_TRANSFER: u64 = 0;
 const ITS_MESSAGE_TYPE_DEPLOY_INTERCHAIN_TOKEN: u64 = 1;
 const ITS_MESSAGE_TYPE_RECEIVE_FROM_HUB: u64 = 4;
 
+/// The Axelar network name baked in by feature flags. Used to namespace cache
+/// files so a `mainnet` build doesn't read a `testnet` deploy from disk.
+fn network_name() -> &'static str {
+    if cfg!(feature = "mainnet") {
+        "mainnet"
+    } else if cfg!(feature = "testnet") {
+        "testnet"
+    } else if cfg!(feature = "stagenet") {
+        "stagenet"
+    } else {
+        "devnet-amplifier"
+    }
+}
+
+/// Cache of a successful Phase A run. Keyed on
+/// `(network, src, dst, deployer_pubkey)` so a fresh run can skip the deploy
+/// and go straight to Phase B if the previously-deployed token still exists.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ItsTestCache {
+    deployer: String,
+    salt_hex: String,
+    token_id_hex: String,
+    dest_token_address: String,
+}
+
+fn cache_path(src: &str, dst: &str, deployer: &str) -> PathBuf {
+    let data_dir = dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("axe");
+    data_dir.join(format!(
+        "its-test-{}-{src}-{dst}-{deployer}.json",
+        network_name()
+    ))
+}
+
+fn read_cache(path: &Path) -> Option<ItsTestCache> {
+    let content = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
+fn save_cache(path: &Path, cache: &ItsTestCache) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, serde_json::to_string_pretty(cache)?)?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn run_config(
     config: PathBuf,
     source_chain: Option<String>,
@@ -945,6 +994,7 @@ pub async fn run_config(
     evm_private_key_override: Option<String>,
     amount: Option<u64>,
     gas_value: Option<u64>,
+    fresh_token: bool,
 ) -> Result<()> {
     let start = Instant::now();
     // `amount` is consumed in Phase B (interchain transfer); silence the unused
@@ -1161,194 +1211,82 @@ pub async fn run_config(
 
     // ─────────────────────────────────────────────────────────────────────
     // Phase A: deploy interchain token (local + remote with manual relay)
+    //
+    // Idempotent: if a previous Phase A run for the same
+    // (network, src, dst, deployer) is cached on disk and the destination
+    // token still responds to `name()`, skip the deploy entirely and reuse
+    // the cached tokenId. Pass `--fresh-token` to force a redeploy.
     // ─────────────────────────────────────────────────────────────────────
-    ui::section("Phase A: deploy local + remote (manual relay)");
-
-    // Step A1: generate salt, derive token id
-    let salt = generate_salt();
-    let salt_bytes: [u8; 32] = salt.0;
-    let token_id = crate::solana::interchain_token_id(&sol_pubkey, &salt_bytes);
-    let token_id_b32 = FixedBytes::<32>::from(token_id);
-
-    ui::step_header(1, PHASE_A_STEPS, "Generate salt + tokenId");
-    ui::kv("salt", &format!("0x{}", alloy::hex::encode(salt_bytes)));
-    ui::kv("tokenId", &format!("0x{}", alloy::hex::encode(token_id)));
-
-    // Step A2: Solana — deploy local interchain token
-    ui::step_header(2, PHASE_A_STEPS, "Deploy local interchain token (Solana)");
-    let local_sig = crate::solana::send_its_deploy_interchain_token(
-        &src_rpc,
-        &sol_keypair,
-        &salt_bytes,
-        TOKEN_NAME_CFG,
-        TOKEN_SYMBOL_CFG,
-        TOKEN_DECIMALS_CFG,
-        INITIAL_SUPPLY,
-        None,
-    )?;
-    ui::tx_hash("solana tx", &local_sig);
-    ui::success(&format!(
-        "local mint deployed (initial supply {INITIAL_SUPPLY})"
-    ));
-
-    // Step A3: Solana — deploy remote interchain token (fires GMP)
-    ui::step_header(
-        3,
-        PHASE_A_STEPS,
-        "Deploy remote interchain token (Solana → hub)",
-    );
-    let remote_sig = crate::solana::send_its_deploy_remote_interchain_token(
-        &src_rpc,
-        &sol_keypair,
-        &salt_bytes,
-        &dst_axelar_id,
-        gas_value,
-    )?;
-    ui::tx_hash("solana tx", &remote_sig);
-
-    let first_leg_id = crate::solana::extract_its_message_id(&src_rpc, &remote_sig)?;
-    ui::kv("first-leg message_id", &first_leg_id);
-
-    // Read the actual on-chain CallContractEvent. The verifiers will look up
-    // the same fields; using on-chain values eliminates encoding-mismatch risk.
-    let gw = crate::solana::extract_gateway_call_contract_payload(&src_rpc, &remote_sig)?;
-    ui::kv("gateway sender", &gw.sender);
-    ui::kv("gateway destination_chain", &gw.destination_chain);
-    ui::kv("gateway destination_address", &gw.destination_address);
-    ui::kv(
-        "gateway payload_hash",
-        &format!("0x{}", alloy::hex::encode(gw.payload_hash)),
-    );
-    ui::kv(
-        "gateway payload (len)",
-        &format!("{} bytes", gw.payload.len()),
-    );
-
-    // Sanity: the local reconstruction should match what the gateway actually saw.
-    let local_payload = encode_send_to_hub_deploy(
-        &dst_axelar_id,
-        &token_id,
-        TOKEN_NAME_CFG,
-        TOKEN_SYMBOL_CFG,
-        TOKEN_DECIMALS_CFG,
-        None,
-    )?;
-    let local_hash = keccak256(&local_payload);
-    if local_hash.as_slice() != gw.payload_hash {
-        ui::warn("local payload reconstruction does not match on-chain payload:");
-        ui::warn(&format!(
-            "  local  : 0x{}",
-            alloy::hex::encode(local_hash.as_slice())
-        ));
-        ui::warn(&format!(
-            "  on-chain: 0x{}",
-            alloy::hex::encode(gw.payload_hash)
-        ));
-        ui::warn(&format!("  local len: {}", local_payload.len()));
-        ui::warn(&format!("  on-chain len: {}", gw.payload.len()));
-        ui::warn(&format!(
-            "  local hex: {}",
-            alloy::hex::encode(&local_payload)
-        ));
-        ui::warn(&format!("  chain hex: {}", alloy::hex::encode(&gw.payload)));
-    }
-
-    // Use the on-chain values (verifiers will read these from the same tx).
-    let first_leg_payload = gw.payload.clone();
-    let first_leg_payload_hash = FixedBytes::<32>::from(gw.payload_hash);
-    let gw_sender = gw.sender.clone();
-    ui::kv(
-        "first-leg payload_hash",
-        &format!(
-            "0x{}",
-            alloy::hex::encode(first_leg_payload_hash.as_slice())
-        ),
-    );
-
-    // Step A4: drive source → hub via existing relay_to_hub helper
-    ui::step_header(
-        4,
-        PHASE_A_STEPS,
-        "Source → hub (verify, route, hub-execute)",
-    );
-    // The gateway's CallContractEvent.sender is the *caller program*, which for
-    // an ITS-routed message is the Solana ITS program ID, not the user's
-    // keypair. The voting verifier matches against the on-chain event, so we
-    // must declare the program ID (base58) as source_address.
-    relay_to_hub(
-        &src_axelar_id,
-        &first_leg_id,
-        &gw_sender,
-        "axelar",
-        &its_hub_address,
-        &first_leg_payload_hash,
-        &first_leg_payload,
-        &signing_key,
-        &axelar_address,
-        &lcd,
-        &chain_id,
-        &fee_denom,
-        gas_price,
-        &src_cosm_gateway,
-        &voting_verifier,
-        &axelarnet_gateway,
-    )
-    .await?;
-
-    // Step A5-A11: hub → destination EVM, manual proof + execute
-    let deploy_inner = encode_inner_deploy(
-        &token_id,
-        TOKEN_NAME_CFG,
-        TOKEN_SYMBOL_CFG,
-        TOKEN_DECIMALS_CFG,
-        &[],
-    );
-    let dest_payload_deploy = encode_receive_from_hub(&src_axelar_id, &deploy_inner);
-
-    let _command_id = relay_to_destination(
-        &first_leg_id,
-        &src_axelar_id,
-        &dest_payload_deploy,
-        &dst_axelar_id,
-        &dst,
-        dst_its_proxy,
-        dst_evm_gateway,
-        &dst_provider,
-        &signing_key,
-        &axelar_address,
-        &lcd,
-        &chain_id,
-        &fee_denom,
-        gas_price,
-        &dst_cosm_gateway,
-        &dst_multisig_prover,
-        &axelarnet_gateway,
-        &axelar_rpc,
-        5, // step base for ui
-        PHASE_A_STEPS,
-    )
-    .await?;
-
-    // Verify destination token is deployed
-    ui::step_header(11, PHASE_A_STEPS, "Verify destination token deployed");
-    let dest_token_addr = its.interchainTokenAddress(token_id_b32).call().await?;
-    ui::address("dest token address", &format!("{dest_token_addr}"));
-    let token = ERC20::new(dest_token_addr, &dst_provider);
-    match token.name().call().await {
-        Ok(name) => {
-            ui::success(&format!("dest token responds to name() → \"{name}\""));
+    let cache_file = cache_path(&src, &dst, &sol_pubkey.to_string());
+    let cached: Option<(String, [u8; 32], Address)> = if fresh_token {
+        None
+    } else if let Some(c) = read_cache(&cache_file) {
+        if c.deployer != sol_pubkey.to_string() {
+            None
+        } else {
+            let tid_bytes = match alloy::hex::decode(c.token_id_hex.trim_start_matches("0x")) {
+                Ok(b) if b.len() == 32 => {
+                    let mut a = [0u8; 32];
+                    a.copy_from_slice(&b);
+                    a
+                }
+                _ => [0u8; 32],
+            };
+            match c.dest_token_address.parse::<Address>() {
+                Ok(addr) if tid_bytes != [0u8; 32] => {
+                    // Validate the cached token still exists on the dest chain.
+                    let token = ERC20::new(addr, &dst_provider);
+                    match token.name().call().await {
+                        Ok(name) => Some((name, tid_bytes, addr)),
+                        Err(_) => None,
+                    }
+                }
+                _ => None,
+            }
         }
-        Err(e) => {
-            ui::warn(&format!("dest token name() failed: {e}"));
-            ui::info("token may still be propagating — try again or check explorer");
-        }
-    }
+    } else {
+        None
+    };
 
-    ui::section("Phase A complete");
-    ui::success(&format!(
-        "deploy + manual relay finished ({})",
-        ui::format_elapsed(start)
-    ));
+    let (token_id, dest_token_addr) = if let Some((name, tid, addr)) = cached {
+        ui::section("Phase A: skipped (cached deploy still valid)");
+        ui::kv("cache file", &cache_file.display().to_string());
+        ui::kv("tokenId", &format!("0x{}", alloy::hex::encode(tid)));
+        ui::address("dest token address", &format!("{addr}"));
+        ui::success(&format!("dest token responds to name() → \"{name}\""));
+        (tid, addr)
+    } else {
+        run_phase_a_deploy(
+            &src,
+            &dst,
+            &src_axelar_id,
+            &dst_axelar_id,
+            &src_rpc,
+            &sol_keypair,
+            sol_pubkey,
+            &signing_key,
+            &axelar_address,
+            &lcd,
+            &chain_id,
+            &fee_denom,
+            gas_price,
+            &src_cosm_gateway,
+            &voting_verifier,
+            &axelarnet_gateway,
+            &dst_cosm_gateway,
+            &dst_multisig_prover,
+            &axelar_rpc,
+            &its_hub_address,
+            dst_its_proxy,
+            dst_evm_gateway,
+            &dst_provider,
+            &its,
+            gas_value,
+            &cache_file,
+            start,
+        )
+        .await?
+    };
 
     // ─────────────────────────────────────────────────────────────────────
     // Phase B: interchain transfer (manual relay)
@@ -1506,6 +1444,233 @@ pub async fn run_config(
     ui::success(&format!("total elapsed: {}", ui::format_elapsed(start)));
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase A driver (deploy local + remote, manual relay both legs)
+// ---------------------------------------------------------------------------
+
+/// Returns `(token_id, dest_token_addr)` on success and writes the result to
+/// `cache_file` so a subsequent run skips this entire phase.
+#[allow(clippy::too_many_arguments)]
+async fn run_phase_a_deploy<P: Provider>(
+    src: &str,
+    dst: &str,
+    src_axelar_id: &str,
+    dst_axelar_id: &str,
+    src_rpc: &str,
+    sol_keypair: &solana_sdk::signature::Keypair,
+    sol_pubkey: solana_sdk::pubkey::Pubkey,
+    signing_key: &cosmrs::crypto::secp256k1::SigningKey,
+    axelar_address: &str,
+    lcd: &str,
+    chain_id: &str,
+    fee_denom: &str,
+    gas_price: f64,
+    src_cosm_gateway: &str,
+    voting_verifier: &str,
+    axelarnet_gateway: &str,
+    dst_cosm_gateway: &str,
+    dst_multisig_prover: &str,
+    axelar_rpc: &str,
+    its_hub_address: &str,
+    dst_its_proxy: Address,
+    dst_evm_gateway: Address,
+    dst_provider: &P,
+    its: &InterchainTokenService::InterchainTokenServiceInstance<&P>,
+    gas_value: u64,
+    cache_file: &Path,
+    phase_start: Instant,
+) -> Result<([u8; 32], Address)> {
+    let _ = src;
+    let _ = dst;
+
+    ui::section("Phase A: deploy local + remote (manual relay)");
+
+    // Step A1: generate salt, derive token id
+    let salt = generate_salt();
+    let salt_bytes: [u8; 32] = salt.0;
+    let token_id = crate::solana::interchain_token_id(&sol_pubkey, &salt_bytes);
+    let token_id_b32 = FixedBytes::<32>::from(token_id);
+
+    ui::step_header(1, PHASE_A_STEPS, "Generate salt + tokenId");
+    ui::kv("salt", &format!("0x{}", alloy::hex::encode(salt_bytes)));
+    ui::kv("tokenId", &format!("0x{}", alloy::hex::encode(token_id)));
+
+    // Step A2: Solana — deploy local interchain token
+    ui::step_header(2, PHASE_A_STEPS, "Deploy local interchain token (Solana)");
+    let local_sig = crate::solana::send_its_deploy_interchain_token(
+        src_rpc,
+        sol_keypair,
+        &salt_bytes,
+        TOKEN_NAME_CFG,
+        TOKEN_SYMBOL_CFG,
+        TOKEN_DECIMALS_CFG,
+        INITIAL_SUPPLY,
+        None,
+    )?;
+    ui::tx_hash("solana tx", &local_sig);
+    ui::success(&format!(
+        "local mint deployed (initial supply {INITIAL_SUPPLY})"
+    ));
+
+    // Step A3: Solana — deploy remote interchain token (fires GMP)
+    ui::step_header(
+        3,
+        PHASE_A_STEPS,
+        "Deploy remote interchain token (Solana → hub)",
+    );
+    let remote_sig = crate::solana::send_its_deploy_remote_interchain_token(
+        src_rpc,
+        sol_keypair,
+        &salt_bytes,
+        dst_axelar_id,
+        gas_value,
+    )?;
+    ui::tx_hash("solana tx", &remote_sig);
+
+    let first_leg_id = crate::solana::extract_its_message_id(src_rpc, &remote_sig)?;
+    ui::kv("first-leg message_id", &first_leg_id);
+
+    // Read the actual on-chain CallContractEvent. The verifiers will look up
+    // the same fields; using on-chain values eliminates encoding-mismatch risk.
+    let gw = crate::solana::extract_gateway_call_contract_payload(src_rpc, &remote_sig)?;
+    ui::kv("gateway sender", &gw.sender);
+    ui::kv("gateway destination_chain", &gw.destination_chain);
+    ui::kv("gateway destination_address", &gw.destination_address);
+    ui::kv(
+        "gateway payload_hash",
+        &format!("0x{}", alloy::hex::encode(gw.payload_hash)),
+    );
+    ui::kv(
+        "gateway payload (len)",
+        &format!("{} bytes", gw.payload.len()),
+    );
+
+    // Sanity: the local reconstruction should match what the gateway actually saw.
+    let local_payload = encode_send_to_hub_deploy(
+        dst_axelar_id,
+        &token_id,
+        TOKEN_NAME_CFG,
+        TOKEN_SYMBOL_CFG,
+        TOKEN_DECIMALS_CFG,
+        None,
+    )?;
+    let local_hash = keccak256(&local_payload);
+    if local_hash.as_slice() != gw.payload_hash {
+        ui::warn("local payload reconstruction does not match on-chain payload:");
+        ui::warn(&format!(
+            "  local  : 0x{}",
+            alloy::hex::encode(local_hash.as_slice())
+        ));
+        ui::warn(&format!(
+            "  on-chain: 0x{}",
+            alloy::hex::encode(gw.payload_hash)
+        ));
+    }
+
+    let first_leg_payload = gw.payload.clone();
+    let first_leg_payload_hash = FixedBytes::<32>::from(gw.payload_hash);
+    let gw_sender = gw.sender.clone();
+
+    // Step A4: drive source → hub via existing relay_to_hub helper
+    ui::step_header(
+        4,
+        PHASE_A_STEPS,
+        "Source → hub (verify, route, hub-execute)",
+    );
+    relay_to_hub(
+        src_axelar_id,
+        &first_leg_id,
+        &gw_sender,
+        "axelar",
+        its_hub_address,
+        &first_leg_payload_hash,
+        &first_leg_payload,
+        signing_key,
+        axelar_address,
+        lcd,
+        chain_id,
+        fee_denom,
+        gas_price,
+        src_cosm_gateway,
+        voting_verifier,
+        axelarnet_gateway,
+    )
+    .await?;
+
+    // Step A5..10: hub → destination EVM, manual proof + execute
+    let deploy_inner = encode_inner_deploy(
+        &token_id,
+        TOKEN_NAME_CFG,
+        TOKEN_SYMBOL_CFG,
+        TOKEN_DECIMALS_CFG,
+        &[],
+    );
+    let dest_payload_deploy = encode_receive_from_hub(src_axelar_id, &deploy_inner);
+
+    let _command_id = relay_to_destination(
+        &first_leg_id,
+        src_axelar_id,
+        &dest_payload_deploy,
+        dst_axelar_id,
+        dst,
+        dst_its_proxy,
+        dst_evm_gateway,
+        dst_provider,
+        signing_key,
+        axelar_address,
+        lcd,
+        chain_id,
+        fee_denom,
+        gas_price,
+        dst_cosm_gateway,
+        dst_multisig_prover,
+        axelarnet_gateway,
+        axelar_rpc,
+        5, // step base for ui
+        PHASE_A_STEPS,
+    )
+    .await?;
+
+    // Step A11: verify destination token is deployed
+    ui::step_header(11, PHASE_A_STEPS, "Verify destination token deployed");
+    let dest_token_addr = its.interchainTokenAddress(token_id_b32).call().await?;
+    ui::address("dest token address", &format!("{dest_token_addr}"));
+    let token = ERC20::new(dest_token_addr, dst_provider);
+    match token.name().call().await {
+        Ok(name) => {
+            ui::success(&format!("dest token responds to name() → \"{name}\""));
+        }
+        Err(e) => {
+            ui::warn(&format!("dest token name() failed: {e}"));
+            ui::info("token may still be propagating — try again or check explorer");
+        }
+    }
+
+    // Persist for next run.
+    let cache = ItsTestCache {
+        deployer: sol_pubkey.to_string(),
+        salt_hex: format!("0x{}", alloy::hex::encode(salt_bytes)),
+        token_id_hex: format!("0x{}", alloy::hex::encode(token_id)),
+        dest_token_address: format!("{dest_token_addr}"),
+    };
+    if let Err(e) = save_cache(cache_file, &cache) {
+        ui::warn(&format!(
+            "failed to write cache to {}: {e}",
+            cache_file.display()
+        ));
+    } else {
+        ui::info(&format!("cached tokenId at {}", cache_file.display()));
+    }
+
+    ui::section("Phase A complete");
+    ui::success(&format!(
+        "deploy + manual relay finished ({})",
+        ui::format_elapsed(phase_start)
+    ));
+
+    Ok((token_id, dest_token_addr))
 }
 
 // ---------------------------------------------------------------------------

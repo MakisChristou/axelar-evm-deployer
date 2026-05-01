@@ -155,6 +155,11 @@ pub enum TestCommands {
         /// Gas value (lamports) attached to the cross-chain ITS deploy/transfer (default: 0.01 SOL)
         #[arg(long)]
         gas_value: Option<u64>,
+
+        /// Force a fresh token deploy even if a cached token already exists
+        /// for this network/src/dst/deployer combination.
+        #[arg(long)]
+        fresh_token: bool,
     },
 
     /// Cross-chain load test (auto-detects chains, RPCs, and test type from config)
