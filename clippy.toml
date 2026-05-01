@@ -1,0 +1,8 @@
+# Lint thresholds for the `axe` crate.
+#
+# Threshold tuned to grandfather the eight functions that already exceed
+# the clippy default of 25 (worst is `load_test::verify::poll_pipeline`
+# at ~71). Any new function whose cognitive complexity exceeds 75 will
+# be denied by the `[lints.clippy] cognitive_complexity = "deny"` setting
+# in `Cargo.toml`. Lower this number when refactoring lands.
+cognitive-complexity-threshold = 75

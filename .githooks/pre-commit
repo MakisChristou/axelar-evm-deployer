@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+#
+# Pre-commit hook: fmt + clippy + tests on the default feature flag.
+#
+# This is the *fast* gate (~30s). The full matrix across all four feature
+# flags runs in the pre-push hook (~2-3 min).
+#
+# Enable for this clone:
+#   git config core.hooksPath .githooks
+#
+set -euo pipefail
+
+# Find the repo root so the hook works regardless of how git invokes it.
+ROOT=$(git rev-parse --show-toplevel)
+cd "$ROOT"
+
+echo "==> cargo fmt --all --check"
+cargo fmt --all --check
+
+echo "==> cargo clippy --all-targets -- -D warnings"
+cargo clippy --all-targets -- -D warnings
+
+echo "==> cargo test --all-targets"
+cargo test --all-targets --quiet
+
+echo "pre-commit OK"
