@@ -3,22 +3,27 @@ use std::time::Instant;
 
 use alloy::{
     primitives::{Address, Bytes, FixedBytes, U256, keccak256},
-    providers::ProviderBuilder,
+    providers::{Provider, ProviderBuilder},
+    rpc::types::TransactionRequest,
     signers::local::PrivateKeySigner,
     sol_types::{SolEvent, SolValue},
 };
 use eyre::Result;
 use serde_json::json;
+use solana_sdk::signer::Signer as SolSigner;
 
 use crate::cli::resolve_axelar_id;
-use crate::commands::test_helpers::{extract_poll_id, wait_for_poll_votes};
+use crate::commands::test_helpers::{
+    extract_event_attr, extract_poll_id, wait_for_poll_votes, wait_for_proof,
+};
 use crate::cosmos::{
-    build_execute_msg_any, derive_axelar_wallet, lcd_cosmwasm_smart_query, read_axelar_config,
-    read_axelar_contract_field, sign_and_broadcast_cosmos_tx,
+    SecondLegInfo, build_execute_msg_any, check_cosmos_routed, check_hub_approved,
+    derive_axelar_wallet, discover_second_leg, lcd_cosmwasm_smart_query, read_axelar_config,
+    read_axelar_contract_field, read_axelar_rpc, sign_and_broadcast_cosmos_tx,
 };
 use crate::evm::{
-    ContractCall, ERC20, InterchainToken, InterchainTokenDeployed, InterchainTokenFactory,
-    InterchainTokenService, Ownable,
+    AxelarAmplifierGateway, ContractCall, ERC20, InterchainToken, InterchainTokenDeployed,
+    InterchainTokenFactory, InterchainTokenService, Ownable,
 };
 use crate::preflight;
 use crate::state::read_state;
@@ -911,4 +916,776 @@ pub fn extract_contract_call_event(
     }
 
     Err(eyre::eyre!("ContractCall event not found in receipt logs"))
+}
+
+// ---------------------------------------------------------------------------
+// Config-based ITS test (Solana → EVM with manual relay through ITS hub)
+// ---------------------------------------------------------------------------
+
+const PHASE_A_STEPS: usize = 11;
+
+const TOKEN_NAME_CFG: &str = "Axe ITS Test";
+const TOKEN_SYMBOL_CFG: &str = "AXE";
+const TOKEN_DECIMALS_CFG: u8 = 9;
+// Initial supply on the source side (in base units at TOKEN_DECIMALS_CFG decimals).
+const INITIAL_SUPPLY: u64 = 1_000_000_000_000; // 1000 tokens
+
+/// ABI message types for the ITS hub envelope (must match
+/// `interchain-token-service/contracts/InterchainTokenService.sol`).
+const ITS_MESSAGE_TYPE_INTERCHAIN_TRANSFER: u64 = 0;
+const ITS_MESSAGE_TYPE_DEPLOY_INTERCHAIN_TOKEN: u64 = 1;
+const ITS_MESSAGE_TYPE_RECEIVE_FROM_HUB: u64 = 4;
+
+pub async fn run_config(
+    config: PathBuf,
+    source_chain: Option<String>,
+    destination_chain: Option<String>,
+    mnemonic_override: Option<String>,
+    evm_private_key_override: Option<String>,
+    amount: Option<u64>,
+    gas_value: Option<u64>,
+) -> Result<()> {
+    let start = Instant::now();
+    let amount = amount.unwrap_or(1_000_000);
+    let gas_value = gas_value.unwrap_or(10_000_000);
+
+    let config_content =
+        std::fs::read_to_string(&config).map_err(|e| eyre::eyre!("failed to read config: {e}"))?;
+    let config_root: serde_json::Value = serde_json::from_str(&config_content)?;
+
+    let chains = config_root
+        .get("chains")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| eyre::eyre!("no 'chains' in config"))?;
+
+    let src = source_chain.ok_or_else(|| eyre::eyre!("--source-chain required"))?;
+    let dst = destination_chain.ok_or_else(|| eyre::eyre!("--destination-chain required"))?;
+
+    let src_entry = chains
+        .get(&src)
+        .ok_or_else(|| eyre::eyre!("source chain '{src}' not found in config"))?;
+    let dst_entry = chains
+        .get(&dst)
+        .ok_or_else(|| eyre::eyre!("destination chain '{dst}' not found in config"))?;
+
+    let src_type = src_entry
+        .get("chainType")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| eyre::eyre!("source chain '{src}' has no chainType"))?;
+    let dst_type = dst_entry
+        .get("chainType")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| eyre::eyre!("destination chain '{dst}' has no chainType"))?;
+
+    if src_type != "svm" || dst_type != "evm" {
+        return Err(eyre::eyre!(
+            "ITS config-mode currently supports svm → evm only (got {src_type} → {dst_type})"
+        ));
+    }
+
+    let src_rpc = src_entry
+        .get("rpc")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| eyre::eyre!("no RPC for source chain '{src}'"))?
+        .to_string();
+    let dst_rpc = dst_entry
+        .get("rpc")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| eyre::eyre!("no RPC for destination chain '{dst}'"))?
+        .to_string();
+
+    // Cosmos-side identifiers for the source/destination chains. Consensus
+    // chains use a capitalised axelarId distinct from the JSON key.
+    let src_axelar_id = src_entry
+        .get("axelarId")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&src)
+        .to_string();
+    let dst_axelar_id = dst_entry
+        .get("axelarId")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&dst)
+        .to_string();
+
+    ui::section(&format!("ITS Test: {src} → {dst}"));
+    ui::kv("source", &format!("{src} ({src_axelar_id}, {src_type})"));
+    ui::kv("destination", &format!("{dst} ({dst_axelar_id}, {dst_type})"));
+
+    // --- Preflight: derive Axelar wallet, fund checks ---
+    let mnemonic = mnemonic_override
+        .or_else(|| std::env::var("MNEMONIC").ok())
+        .ok_or_else(|| eyre::eyre!("MNEMONIC env var or --mnemonic required for relay"))?;
+    let (signing_key, axelar_address) = derive_axelar_wallet(&mnemonic)?;
+    let (lcd, chain_id, fee_denom, gas_price) = read_axelar_config(&config)?;
+    let axelar_rpc = read_axelar_rpc(&config)?;
+
+    ui::section("Preflight");
+    ui::address("axelar address", &axelar_address);
+    // ITS does ~7-8 cosmos txs per phase across 2 phases; bump min from GMP's 100k.
+    const MIN_RELAY_BALANCE_UAXL: u128 = 200_000;
+    crate::cosmos::check_axelar_balance(
+        &lcd,
+        &chain_id,
+        &axelar_address,
+        &fee_denom,
+        MIN_RELAY_BALANCE_UAXL,
+    )
+    .await?;
+
+    let sol_keypair = crate::solana::load_keypair(None)?;
+    let sol_pubkey = sol_keypair.pubkey();
+    crate::solana::check_solana_balance(
+        &src_rpc,
+        "source",
+        &sol_pubkey,
+        crate::solana::MIN_SOL_ITS_LAMPORTS,
+    )?;
+
+    // EVM signer is only used to derive the receiver address (we never send EVM
+    // txs from this key — that's done with deployer / cosm-mnemonic-derived flow).
+    let evm_pk = evm_private_key_override
+        .or_else(|| std::env::var("EVM_PRIVATE_KEY").ok())
+        .ok_or_else(|| {
+            eyre::eyre!("EVM_PRIVATE_KEY env var or --evm-private-key required (used to sign destination EVM txs)")
+        })?;
+    let evm_signer: PrivateKeySigner = evm_pk.parse()?;
+    let evm_signer_address = evm_signer.address();
+    ui::address("evm signer / receiver", &format!("{evm_signer_address}"));
+
+    let token_symbol = dst_entry
+        .get("tokenSymbol")
+        .and_then(|v| v.as_str())
+        .unwrap_or("ETH");
+    preflight::check_evm_balances(
+        &dst_rpc,
+        &[("dest evm signer", evm_signer_address)],
+        token_symbol,
+    )
+    .await?;
+
+    let dst_provider = ProviderBuilder::new()
+        .wallet(evm_signer.clone())
+        .connect_http(dst_rpc.parse()?);
+
+    // --- Resolve contract addresses ---
+    let dst_its_proxy = read_contract_address(&config, &dst, "InterchainTokenService")?;
+    let dst_evm_gateway = read_contract_address(&config, &dst, "AxelarGateway")?;
+    let src_cosm_gateway =
+        read_axelar_contract_field(&config, &format!("/axelar/contracts/Gateway/{src_axelar_id}/address"))?;
+    let voting_verifier = read_axelar_contract_field(
+        &config,
+        &format!("/axelar/contracts/VotingVerifier/{src_axelar_id}/address"),
+    )?;
+    let dst_cosm_gateway = read_axelar_contract_field(
+        &config,
+        &format!("/axelar/contracts/Gateway/{dst_axelar_id}/address"),
+    )?;
+    let dst_multisig_prover = read_axelar_contract_field(
+        &config,
+        &format!("/axelar/contracts/MultisigProver/{dst_axelar_id}/address"),
+    )?;
+    let axelarnet_gateway =
+        read_axelar_contract_field(&config, "/axelar/contracts/AxelarnetGateway/address")?;
+    let its_hub_address =
+        read_axelar_contract_field(&config, "/axelar/contracts/InterchainTokenService/address")?;
+
+    ui::address("dest ITS proxy", &format!("{dst_its_proxy}"));
+    ui::address("dest EVM gateway", &format!("{dst_evm_gateway}"));
+    ui::address("source cosm gateway", &src_cosm_gateway);
+    ui::address("dest cosm gateway", &dst_cosm_gateway);
+    ui::address("multisig prover (dst)", &dst_multisig_prover);
+    ui::address("AxelarnetGateway", &axelarnet_gateway);
+    ui::address("ITS hub (cosm)", &its_hub_address);
+
+    // --- Trust-chain check: dest ITS must trust the source chain ---
+    // Two ITS API generations are deployed in the wild:
+    //   * Older (the canonical 0xB5FB... testnet/mainnet deployment): exposes
+    //     `trustedAddress(chain)` — returns "hub" for hub-routed chains and the
+    //     hub's bech32 for "axelar". `isTrustedChain` reverts on this version.
+    //   * Newer: exposes `isTrustedChain(chain)` + `itsHubAddress()` getters.
+    // We probe the legacy API first since it's on more deployments today.
+    let its = InterchainTokenService::new(dst_its_proxy, &dst_provider);
+    let legacy_trust = its.trustedAddress(src_axelar_id.clone()).call().await.ok();
+    let new_trust = its.isTrustedChain(src_axelar_id.clone()).call().await.ok();
+    let trusted = match (legacy_trust.as_deref(), new_trust) {
+        (Some(s), _) if !s.is_empty() => true,
+        (_, Some(b)) => b,
+        _ => false,
+    };
+    if !trusted {
+        ui::error(&format!(
+            "destination ITS at {dst_its_proxy} on {dst} does not trust source chain '{src_axelar_id}'"
+        ));
+        let owner = Ownable::new(dst_its_proxy, &dst_provider).owner().call().await.ok();
+        let mut lines: Vec<String> = vec![format!(
+            "Set '{src_axelar_id}' as trusted on the destination ITS:"
+        )];
+        if let Some(owner) = owner {
+            lines.push(format!("  owner: {owner}"));
+        }
+        lines.push(format!(
+            "  cast send {dst_its_proxy} 'setTrustedChain(string)' '{src_axelar_id}' \\"
+        ));
+        lines.push(format!(
+            "    --rpc-url {dst_rpc} --private-key $PRIVATE_KEY"
+        ));
+        let line_refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+        ui::action_required(&line_refs);
+        return Ok(());
+    }
+    ui::success(&format!("destination ITS trusts '{src_axelar_id}'"));
+
+    // Resolve the hub address that the destination ITS expects in `execute`'s
+    // sourceAddress. Try legacy `trustedAddress("axelar")` first, then new
+    // `itsHubAddress()`. Fall back to the cosm config.
+    let hub_address_evm_view: String = match its.trustedAddress("axelar".to_string()).call().await {
+        Ok(s) if !s.is_empty() => s,
+        _ => match its.itsHubAddress().call().await {
+            Ok(s) if !s.is_empty() => s,
+            _ => its_hub_address.clone(),
+        },
+    };
+    ui::kv("hub address (EVM view)", &hub_address_evm_view);
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Phase A: deploy interchain token (local + remote with manual relay)
+    // ─────────────────────────────────────────────────────────────────────
+    ui::section("Phase A: deploy local + remote (manual relay)");
+
+    // Step A1: generate salt, derive token id
+    let salt = generate_salt();
+    let salt_bytes: [u8; 32] = salt.0;
+    let token_id = crate::solana::interchain_token_id(&sol_pubkey, &salt_bytes);
+    let token_id_b32 = FixedBytes::<32>::from(token_id);
+
+    ui::step_header(1, PHASE_A_STEPS, "Generate salt + tokenId");
+    ui::kv("salt", &format!("0x{}", alloy::hex::encode(salt_bytes)));
+    ui::kv("tokenId", &format!("0x{}", alloy::hex::encode(token_id)));
+
+    // Step A2: Solana — deploy local interchain token
+    ui::step_header(2, PHASE_A_STEPS, "Deploy local interchain token (Solana)");
+    let local_sig = crate::solana::send_its_deploy_interchain_token(
+        &src_rpc,
+        &sol_keypair,
+        &salt_bytes,
+        TOKEN_NAME_CFG,
+        TOKEN_SYMBOL_CFG,
+        TOKEN_DECIMALS_CFG,
+        INITIAL_SUPPLY,
+        None,
+    )?;
+    ui::tx_hash("solana tx", &local_sig);
+    ui::success(&format!("local mint deployed (initial supply {INITIAL_SUPPLY})"));
+
+    // Step A3: Solana — deploy remote interchain token (fires GMP)
+    ui::step_header(3, PHASE_A_STEPS, "Deploy remote interchain token (Solana → hub)");
+    let remote_sig = crate::solana::send_its_deploy_remote_interchain_token(
+        &src_rpc,
+        &sol_keypair,
+        &salt_bytes,
+        &dst_axelar_id,
+        gas_value,
+    )?;
+    ui::tx_hash("solana tx", &remote_sig);
+
+    let first_leg_id = crate::solana::extract_its_message_id(&src_rpc, &remote_sig)?;
+    ui::kv("first-leg message_id", &first_leg_id);
+
+    // Read the actual on-chain CallContractEvent. The verifiers will look up
+    // the same fields; using on-chain values eliminates encoding-mismatch risk.
+    let (gw_sender, gw_dest_chain, gw_dest_addr, gw_payload_hash, gw_payload) =
+        crate::solana::extract_gateway_call_contract_payload(&src_rpc, &remote_sig)?;
+    ui::kv("gateway sender", &gw_sender);
+    ui::kv("gateway destination_chain", &gw_dest_chain);
+    ui::kv("gateway destination_address", &gw_dest_addr);
+    ui::kv(
+        "gateway payload_hash",
+        &format!("0x{}", alloy::hex::encode(gw_payload_hash)),
+    );
+    ui::kv(
+        "gateway payload (len)",
+        &format!("{} bytes", gw_payload.len()),
+    );
+
+    // Sanity: the local reconstruction should match what the gateway actually saw.
+    let local_payload = encode_send_to_hub_deploy(
+        &dst_axelar_id,
+        &token_id,
+        TOKEN_NAME_CFG,
+        TOKEN_SYMBOL_CFG,
+        TOKEN_DECIMALS_CFG,
+        None,
+    )?;
+    let local_hash = keccak256(&local_payload);
+    if local_hash.as_slice() != gw_payload_hash {
+        ui::warn("local payload reconstruction does not match on-chain payload:");
+        ui::warn(&format!("  local  : 0x{}", alloy::hex::encode(local_hash.as_slice())));
+        ui::warn(&format!("  on-chain: 0x{}", alloy::hex::encode(gw_payload_hash)));
+        ui::warn(&format!("  local len: {}", local_payload.len()));
+        ui::warn(&format!("  on-chain len: {}", gw_payload.len()));
+        ui::warn(&format!("  local hex: {}", alloy::hex::encode(&local_payload)));
+        ui::warn(&format!("  chain hex: {}", alloy::hex::encode(&gw_payload)));
+    }
+
+    // Use the on-chain values (verifiers will read these from the same tx).
+    let first_leg_payload = gw_payload.clone();
+    let first_leg_payload_hash = FixedBytes::<32>::from(gw_payload_hash);
+    ui::kv(
+        "first-leg payload_hash",
+        &format!("0x{}", alloy::hex::encode(first_leg_payload_hash.as_slice())),
+    );
+
+    // Step A4: drive source → hub via existing relay_to_hub helper
+    ui::step_header(4, PHASE_A_STEPS, "Source → hub (verify, route, hub-execute)");
+    // The gateway's CallContractEvent.sender is the *caller program*, which for
+    // an ITS-routed message is the Solana ITS program ID, not the user's
+    // keypair. The voting verifier matches against the on-chain event, so we
+    // must declare the program ID (base58) as source_address.
+    relay_to_hub(
+        &src_axelar_id,
+        &first_leg_id,
+        &gw_sender,
+        "axelar",
+        &its_hub_address,
+        &first_leg_payload_hash,
+        &first_leg_payload,
+        &signing_key,
+        &axelar_address,
+        &lcd,
+        &chain_id,
+        &fee_denom,
+        gas_price,
+        &src_cosm_gateway,
+        &voting_verifier,
+        &axelarnet_gateway,
+    )
+    .await?;
+
+    // Step A5-A11: hub → destination EVM, manual proof + execute
+    let deploy_inner = encode_inner_deploy(
+        &token_id,
+        TOKEN_NAME_CFG,
+        TOKEN_SYMBOL_CFG,
+        TOKEN_DECIMALS_CFG,
+        &[],
+    );
+    let dest_payload_deploy = encode_receive_from_hub(&src_axelar_id, &deploy_inner);
+
+    let _command_id = relay_to_destination(
+        &first_leg_id,
+        &src_axelar_id,
+        &dest_payload_deploy,
+        &dst_axelar_id,
+        &dst,
+        dst_its_proxy,
+        dst_evm_gateway,
+        &dst_provider,
+        &signing_key,
+        &axelar_address,
+        &lcd,
+        &chain_id,
+        &fee_denom,
+        gas_price,
+        &dst_cosm_gateway,
+        &dst_multisig_prover,
+        &axelarnet_gateway,
+        &axelar_rpc,
+        5, // step base for ui
+    )
+    .await?;
+
+    // Verify destination token is deployed
+    ui::step_header(11, PHASE_A_STEPS, "Verify destination token deployed");
+    let dest_token_addr = its.interchainTokenAddress(token_id_b32).call().await?;
+    ui::address("dest token address", &format!("{dest_token_addr}"));
+    let token = ERC20::new(dest_token_addr, &dst_provider);
+    match token.name().call().await {
+        Ok(name) => {
+            ui::success(&format!("dest token responds to name() → \"{name}\""));
+        }
+        Err(e) => {
+            ui::warn(&format!("dest token name() failed: {e}"));
+            ui::info("token may still be propagating — try again or check explorer");
+        }
+    }
+
+    ui::section("Phase A complete");
+    ui::success(&format!(
+        "deploy + manual relay finished ({})",
+        ui::format_elapsed(start)
+    ));
+
+    // Phase B is added in a follow-up commit.
+    ui::info("Phase B (interchain transfer) not yet wired up — coming next.");
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Helpers: encode payloads + relay second leg
+// ---------------------------------------------------------------------------
+
+/// Borsh-encode a HubMessage::SendToHub{ DeployInterchainToken } the way the
+/// Solana ITS program does in `gmp::send_to_hub_wrap` + `encoding::HubMessage`.
+/// Returns the raw bytes that get put on the wire to the cosmos hub.
+fn encode_send_to_hub_deploy(
+    destination_chain: &str,
+    token_id: &[u8; 32],
+    name: &str,
+    symbol: &str,
+    decimals: u8,
+    minter: Option<Vec<u8>>,
+) -> Result<Vec<u8>> {
+    use solana_axelar_its::encoding::{DeployInterchainToken, HubMessage, Message};
+    let inner = Message::DeployInterchainToken(DeployInterchainToken {
+        token_id: *token_id,
+        name: name.to_string(),
+        symbol: symbol.to_string(),
+        decimals,
+        minter,
+    });
+    let hub = HubMessage::SendToHub {
+        destination_chain: destination_chain.to_string(),
+        message: inner,
+    };
+    Ok(borsh::to_vec(&hub).map_err(|e| eyre::eyre!("borsh encode failed: {e}"))?)
+}
+
+/// Borsh-encode a HubMessage::SendToHub{ InterchainTransfer }.
+#[allow(dead_code)]
+fn encode_send_to_hub_transfer(
+    destination_chain: &str,
+    token_id: &[u8; 32],
+    source_address: &[u8],
+    destination_address: &[u8],
+    amount: u64,
+    data: Option<Vec<u8>>,
+) -> Result<Vec<u8>> {
+    use solana_axelar_its::encoding::{HubMessage, InterchainTransfer, Message};
+    let inner = Message::InterchainTransfer(InterchainTransfer {
+        token_id: *token_id,
+        source_address: source_address.to_vec(),
+        destination_address: destination_address.to_vec(),
+        amount,
+        data,
+    });
+    let hub = HubMessage::SendToHub {
+        destination_chain: destination_chain.to_string(),
+        message: inner,
+    };
+    Ok(borsh::to_vec(&hub).map_err(|e| eyre::eyre!("borsh encode failed: {e}"))?)
+}
+
+/// ABI-encode the inner ITS deploy payload destined for the EVM ITS proxy.
+/// Format: `abi.encode(uint256 messageType=1, bytes32 tokenId, string name, string symbol, uint8 decimals, bytes minter)`.
+/// Note: `uint8` and `uint256` produce identical 32-byte encodings in tuple position
+/// for values that fit, so we widen to U256 for alloy's `abi_encode_params` tuple support.
+fn encode_inner_deploy(
+    token_id: &[u8; 32],
+    name: &str,
+    symbol: &str,
+    decimals: u8,
+    minter: &[u8],
+) -> Vec<u8> {
+    (
+        U256::from(ITS_MESSAGE_TYPE_DEPLOY_INTERCHAIN_TOKEN),
+        FixedBytes::<32>::from(*token_id),
+        name.to_string(),
+        symbol.to_string(),
+        U256::from(decimals),
+        Bytes::copy_from_slice(minter),
+    )
+        .abi_encode_params()
+}
+
+/// ABI-encode the inner ITS interchain-transfer payload.
+/// Format: `abi.encode(uint256 messageType=0, bytes32 tokenId, bytes sourceAddress, bytes destinationAddress, uint256 amount, bytes data)`.
+#[allow(dead_code)]
+fn encode_inner_transfer(
+    token_id: &[u8; 32],
+    source_address: &[u8],
+    destination_address: &[u8],
+    amount: u64,
+    data: &[u8],
+) -> Vec<u8> {
+    (
+        U256::from(ITS_MESSAGE_TYPE_INTERCHAIN_TRANSFER),
+        FixedBytes::<32>::from(*token_id),
+        Bytes::copy_from_slice(source_address),
+        Bytes::copy_from_slice(destination_address),
+        U256::from(amount),
+        Bytes::copy_from_slice(data),
+    )
+        .abi_encode_params()
+}
+
+/// ABI-encode the outer hub envelope for an inbound ITS message.
+/// Format: `abi.encode(uint256 messageType=4, string originalSourceChain, bytes innerPayload)`.
+fn encode_receive_from_hub(original_source_chain: &str, inner: &[u8]) -> Vec<u8> {
+    (
+        U256::from(ITS_MESSAGE_TYPE_RECEIVE_FROM_HUB),
+        original_source_chain.to_string(),
+        Bytes::copy_from_slice(inner),
+    )
+        .abi_encode_params()
+}
+
+/// Drive the second leg actively: wait for hub-routed message → discover its
+/// cc_id → wait for the destination cosm gateway to have it → construct_proof
+/// on the destination MultisigProver → submit to the EVM gateway →
+/// `ITS.execute(...)` on the destination ITS proxy. Returns the commandId.
+#[allow(clippy::too_many_arguments)]
+async fn relay_to_destination<P: Provider>(
+    first_leg_message_id: &str,
+    src_axelar_id: &str,
+    dest_payload: &[u8],
+    _dst_axelar_id: &str,
+    _dst_chain_key: &str,
+    dst_its_proxy: Address,
+    dst_evm_gateway: Address,
+    dst_provider: &P,
+    signing_key: &cosmrs::crypto::secp256k1::SigningKey,
+    axelar_address: &str,
+    lcd: &str,
+    chain_id: &str,
+    fee_denom: &str,
+    gas_price: f64,
+    dst_cosm_gateway: &str,
+    dst_multisig_prover: &str,
+    axelarnet_gateway: &str,
+    axelar_rpc: &str,
+    step_base: usize,
+) -> Result<FixedBytes<32>> {
+    // Wait until the AxelarnetGateway hub has approved the first-leg message.
+    // executable_messages is keyed by the *source* chain of the message.
+    ui::step_header(step_base, PHASE_A_STEPS, "Wait for hub approval");
+    let spinner = ui::wait_spinner("Polling hub for approval...");
+    let mut hub_approved = false;
+    for i in 0..60 {
+        if i > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+        if check_hub_approved(lcd, axelarnet_gateway, src_axelar_id, first_leg_message_id)
+            .await
+            .unwrap_or(false)
+        {
+            hub_approved = true;
+            spinner.finish_and_clear();
+            ui::success("hub approved first-leg message");
+            break;
+        }
+        spinner.set_message(format!(
+            "Waiting for hub approval (attempt {}/60)...",
+            i + 1
+        ));
+    }
+    if !hub_approved {
+        spinner.finish_and_clear();
+        ui::warn("hub never reported the message as approved — proceeding anyway since it may have already been forwarded");
+    }
+
+    // Discover the second-leg message_id
+    ui::step_header(step_base + 1, PHASE_A_STEPS, "Discover second-leg cc_id");
+    let spinner = ui::wait_spinner("Searching tendermint for hub-execute tx...");
+    let second_leg = loop_discover_second_leg(axelar_rpc, first_leg_message_id, &spinner).await?;
+    spinner.finish_and_clear();
+    ui::kv("second-leg message_id", &second_leg.message_id);
+    ui::kv("second-leg source_chain", &second_leg.source_chain);
+    ui::kv("second-leg destination_chain", &second_leg.destination_chain);
+    ui::kv("second-leg source_address", &second_leg.source_address);
+    ui::kv("second-leg destination_address", &second_leg.destination_address);
+    ui::kv("second-leg payload_hash", &second_leg.payload_hash);
+
+    // Sanity-check our reconstruction
+    let local_hash = keccak256(dest_payload);
+    let expected_hash_str = second_leg
+        .payload_hash
+        .strip_prefix("0x")
+        .unwrap_or(&second_leg.payload_hash)
+        .to_lowercase();
+    let local_hash_str = alloy::hex::encode(local_hash.as_slice());
+    if local_hash_str != expected_hash_str {
+        ui::warn("payload hash mismatch between local reconstruction and hub event:");
+        ui::warn(&format!("  local:    0x{local_hash_str}"));
+        ui::warn(&format!("  expected: 0x{expected_hash_str}"));
+        return Err(eyre::eyre!(
+            "payload hash mismatch — would cause ITS.execute to revert"
+        ));
+    }
+    ui::success("payload hash matches second-leg event");
+
+    // Wait until the destination cosmos Gateway has the outgoing message
+    ui::step_header(
+        step_base + 2,
+        PHASE_A_STEPS,
+        "Wait for destination cosmos gateway to publish",
+    );
+    let spinner = ui::wait_spinner("Polling destination cosm gateway...");
+    let mut routed = false;
+    for i in 0..120 {
+        if i > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+        if check_cosmos_routed(lcd, dst_cosm_gateway, "axelar", &second_leg.message_id)
+            .await
+            .unwrap_or(false)
+        {
+            routed = true;
+            spinner.finish_and_clear();
+            ui::success("destination cosm gateway has the message");
+            break;
+        }
+        spinner.set_message(format!(
+            "Waiting for routing (attempt {}/120)...",
+            i + 1
+        ));
+    }
+    if !routed {
+        spinner.finish_and_clear();
+        return Err(eyre::eyre!(
+            "destination cosm gateway never received second-leg message"
+        ));
+    }
+
+    // construct_proof on destination MultisigProver
+    ui::step_header(step_base + 3, PHASE_A_STEPS, "construct_proof on dest MultisigProver");
+    let construct_proof_msg = json!({
+        "construct_proof": [{
+            "source_chain": "axelar",
+            "message_id": second_leg.message_id,
+        }]
+    });
+    let construct_any =
+        build_execute_msg_any(axelar_address, dst_multisig_prover, &construct_proof_msg)?;
+    let construct_resp = sign_and_broadcast_cosmos_tx(
+        signing_key,
+        axelar_address,
+        lcd,
+        chain_id,
+        fee_denom,
+        gas_price,
+        vec![construct_any],
+    )
+    .await?;
+    let session_id = extract_event_attr(&construct_resp, "multisig_session_id")?;
+    ui::kv("multisig_session_id", &session_id);
+
+    // Wait for proof
+    ui::step_header(step_base + 4, PHASE_A_STEPS, "Wait for proof signing");
+    let proof = wait_for_proof(lcd, dst_multisig_prover, &session_id).await?;
+    ui::success("proof ready");
+
+    let execute_data_hex = proof["status"]["completed"]["execute_data"]
+        .as_str()
+        .ok_or_else(|| eyre::eyre!("no execute_data in proof response"))?;
+    let execute_data = alloy::hex::decode(execute_data_hex)?;
+
+    // Submit to EVM gateway
+    ui::step_header(step_base + 5, PHASE_A_STEPS, "Submit proof to dest EVM gateway");
+    let approve_tx = TransactionRequest::default()
+        .to(dst_evm_gateway)
+        .input(Bytes::from(execute_data).into());
+    let pending_approve = dst_provider.send_transaction(approve_tx).await?;
+    let approve_hash = *pending_approve.tx_hash();
+    ui::tx_hash("evm approve tx", &format!("{approve_hash}"));
+    let approve_receipt = tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        pending_approve.get_receipt(),
+    )
+    .await
+    .map_err(|_| eyre::eyre!("approve tx timed out after 120s"))??;
+    ui::success(&format!(
+        "approve confirmed in block {}",
+        approve_receipt.block_number.unwrap_or(0)
+    ));
+
+    // Extract commandId from ContractCallApproved event (topic[1] of log emitted by gateway)
+    let command_id = approve_receipt
+        .inner
+        .logs()
+        .iter()
+        .find_map(|log| {
+            if log.topics().len() >= 2 && log.address() == dst_evm_gateway {
+                Some(log.topics()[1])
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| eyre::eyre!("commandId not found in approve tx logs"))?;
+    ui::kv("commandId", &format!("{command_id}"));
+
+    // Sanity: isContractCallApproved on the gateway with the values we'll pass to ITS.execute
+    let gw = AxelarAmplifierGateway::new(dst_evm_gateway, dst_provider);
+    let payload_hash_b32 = keccak256(dest_payload);
+    let approved = gw
+        .isContractCallApproved(
+            command_id,
+            "axelar".to_string(),
+            second_leg.source_address.clone(),
+            dst_its_proxy,
+            payload_hash_b32,
+        )
+        .call()
+        .await?;
+    ui::kv("isContractCallApproved", &format!("{approved}"));
+    if !approved {
+        return Err(eyre::eyre!(
+            "gateway says message not approved for ITS proxy + hub source — check source_address case / encoding"
+        ));
+    }
+
+    // Execute on destination ITS proxy
+    ui::step_header(step_base + 6, PHASE_A_STEPS, "Execute on destination ITS");
+    let its = InterchainTokenService::new(dst_its_proxy, dst_provider);
+    let exec_call = its.execute(
+        command_id,
+        "axelar".to_string(),
+        second_leg.source_address.clone(),
+        Bytes::copy_from_slice(dest_payload),
+    );
+    let pending_exec = exec_call.send().await?;
+    let exec_hash = *pending_exec.tx_hash();
+    ui::tx_hash("its execute tx", &format!("{exec_hash}"));
+    let exec_receipt = tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        pending_exec.get_receipt(),
+    )
+    .await
+    .map_err(|_| eyre::eyre!("ITS execute tx timed out after 120s"))??;
+    ui::success(&format!(
+        "ITS execute confirmed in block {}",
+        exec_receipt.block_number.unwrap_or(0)
+    ));
+
+    Ok(command_id)
+}
+
+/// Poll `discover_second_leg` until it returns Some, with a spinner.
+async fn loop_discover_second_leg(
+    axelar_rpc: &str,
+    first_leg_message_id: &str,
+    spinner: &indicatif::ProgressBar,
+) -> Result<SecondLegInfo> {
+    for i in 0..60 {
+        if i > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+        if let Some(info) = discover_second_leg(axelar_rpc, first_leg_message_id).await? {
+            return Ok(info);
+        }
+        spinner.set_message(format!(
+            "Searching for hub-execute tx (attempt {}/60)...",
+            i + 1
+        ));
+    }
+    Err(eyre::eyre!(
+        "could not discover second-leg cc_id after 5 minutes"
+    ))
+}
+
+// quiet warnings for items wired up in Phase B
+#[allow(dead_code)]
+fn _phase_b_placeholder() {
+    let _ = encode_send_to_hub_transfer;
+    let _ = encode_inner_transfer;
 }

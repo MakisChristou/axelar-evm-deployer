@@ -96,7 +96,31 @@ async fn main() -> Result<()> {
                     commands::test_gmp::run(axelar_id).await
                 }
             }
-            cli::TestCommands::Its { axelar_id } => commands::test_its::run(axelar_id).await,
+            cli::TestCommands::Its {
+                axelar_id,
+                config,
+                source_chain,
+                destination_chain,
+                mnemonic,
+                evm_private_key,
+                amount,
+                gas_value,
+            } => {
+                if let Some(config) = config {
+                    commands::test_its::run_config(
+                        config,
+                        source_chain,
+                        destination_chain,
+                        mnemonic,
+                        evm_private_key,
+                        amount,
+                        gas_value,
+                    )
+                    .await
+                } else {
+                    commands::test_its::run(axelar_id).await
+                }
+            }
             cli::TestCommands::LoadTest {
                 config,
                 test_type,

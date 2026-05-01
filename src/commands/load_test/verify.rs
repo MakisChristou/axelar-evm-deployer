@@ -15,8 +15,8 @@ use super::metrics::{
     AmplifierTiming, FailureCategory, PeakThroughput, TxMetrics, VerificationReport,
 };
 use crate::cosmos::{
-    lcd_cosmwasm_smart_query, read_axelar_config, read_axelar_contract_field, read_axelar_rpc,
-    rpc_tx_search_event,
+    check_cosmos_routed, check_hub_approved, discover_second_leg, lcd_cosmwasm_smart_query,
+    read_axelar_config, read_axelar_contract_field, read_axelar_rpc,
 };
 use crate::evm::AxelarAmplifierGateway;
 use crate::solana::solana_call_contract_index;
@@ -722,95 +722,6 @@ async fn poll_pipeline<P: Provider>(
 // ---------------------------------------------------------------------------
 // ITS hub-only pipeline (Voted → HubApproved)
 // ---------------------------------------------------------------------------
-
-/// Second-leg message info extracted from hub execution tx.
-struct SecondLegInfo {
-    message_id: String,
-    #[allow(dead_code)]
-    source_chain: String,
-    #[allow(dead_code)]
-    destination_chain: String,
-    payload_hash: String,
-    source_address: String,
-    destination_address: String,
-}
-
-/// Discover the second-leg message_id by searching for the hub execution tx
-/// that consumed the first-leg message, then extracting routing event attributes.
-async fn discover_second_leg(
-    rpc: &str,
-    first_leg_message_id: &str,
-) -> Result<Option<SecondLegInfo>> {
-    let resp = rpc_tx_search_event(
-        rpc,
-        "wasm-message_executed.message_id",
-        first_leg_message_id,
-    )
-    .await?;
-
-    let txs = resp
-        .pointer("/result/txs")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-
-    if txs.is_empty() {
-        return Ok(None);
-    }
-
-    // Search through events for wasm-routing attributes
-    let events = txs[0]
-        .pointer("/tx_result/events")
-        .and_then(|v| v.as_array());
-
-    let events = match events {
-        Some(e) => e,
-        None => return Ok(None),
-    };
-
-    for event in events {
-        let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        if event_type != "wasm-routing" {
-            continue;
-        }
-
-        let attrs = match event.get("attributes").and_then(|v| v.as_array()) {
-            Some(a) => a,
-            None => continue,
-        };
-
-        let get_attr = |key: &str| -> Option<String> {
-            attrs.iter().find_map(|a| {
-                let k = a.get("key").and_then(|v| v.as_str())?;
-                if k == key {
-                    a.get("value")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
-                } else {
-                    None
-                }
-            })
-        };
-
-        if let (Some(msg_id), Some(src), Some(dst), Some(ph)) = (
-            get_attr("message_id"),
-            get_attr("source_chain"),
-            get_attr("destination_chain"),
-            get_attr("payload_hash"),
-        ) {
-            return Ok(Some(SecondLegInfo {
-                message_id: msg_id,
-                source_chain: src,
-                destination_chain: dst,
-                payload_hash: ph,
-                source_address: get_attr("source_address").unwrap_or_default(),
-                destination_address: get_attr("destination_address").unwrap_or_default(),
-            }));
-        }
-    }
-
-    Ok(None)
-}
 
 /// Full ITS polling pipeline: Voted → HubApproved → DiscoverSecondLeg → Routed → Approved → Executed.
 #[allow(clippy::too_many_arguments)]
@@ -2347,53 +2258,6 @@ async fn check_voting_verifier(
     let resp = lcd_cosmwasm_smart_query(lcd, voting_verifier, &query).await?;
     let resp_str = serde_json::to_string(&resp)?;
     Ok(resp_str.to_lowercase().contains("succeeded"))
-}
-
-/// Check if message is routed on destination Cosmos Gateway via `outgoing_messages`.
-async fn check_cosmos_routed(
-    lcd: &str,
-    cosm_gateway: &str,
-    source_chain: &str,
-    message_id: &str,
-) -> Result<bool> {
-    let query = json!({
-        "outgoing_messages": [{
-            "source_chain": source_chain,
-            "message_id": message_id,
-        }]
-    });
-
-    let resp = lcd_cosmwasm_smart_query(lcd, cosm_gateway, &query).await?;
-    let data = resp.get("data").or_else(|| resp.as_array().map(|_| &resp));
-    Ok(match data {
-        Some(arr) if arr.is_array() => {
-            let items = arr.as_array().unwrap();
-            !items.is_empty() && !items.iter().all(|v| v.is_null())
-        }
-        _ => false,
-    })
-}
-
-/// Check if a message is approved on the AxelarnetGateway hub via `executable_messages`.
-async fn check_hub_approved(
-    lcd: &str,
-    axelarnet_gateway: &str,
-    source_chain: &str,
-    message_id: &str,
-) -> Result<bool> {
-    let query = json!({
-        "executable_messages": {
-            "cc_ids": [{
-                "source_chain": source_chain,
-                "message_id": message_id,
-            }]
-        }
-    });
-
-    let resp = lcd_cosmwasm_smart_query(lcd, axelarnet_gateway, &query).await?;
-    let resp_str = serde_json::to_string(&resp)?;
-    // The message is executable if the response is non-null and contains the message_id
-    Ok(!resp_str.contains("null") && resp_str.contains(message_id))
 }
 
 /// Check `isMessageApproved` on the EVM gateway (single attempt).

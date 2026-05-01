@@ -142,6 +142,11 @@ sol! {
     contract InterchainTokenService {
         function interchainTokenAddress(bytes32 tokenId) external view returns (address);
         function isTrustedChain(string calldata chainName) external view returns (bool);
+        function itsHubAddress() external view returns (string memory);
+        /// Legacy ITS trust API. Returns the trusted address for a chain — for
+        /// hub-routed chains this is the literal string "hub". For "axelar"
+        /// this returns the actual hub's bech32 address. Reverts if not set.
+        function trustedAddress(string calldata chain) external view returns (string memory);
         function interchainTransfer(
             bytes32 tokenId,
             string calldata destinationChain,
@@ -150,6 +155,12 @@ sol! {
             bytes calldata metadata,
             uint256 gasValue
         ) external payable;
+        function execute(
+            bytes32 commandId,
+            string calldata sourceChain,
+            string calldata sourceAddress,
+            bytes calldata payload
+        ) external;
     }
 
     // InterchainTokenDeployed event (emitted by ITS when a token is deployed)

@@ -1,4 +1,5 @@
 use anchor_lang::InstructionData;
+use base64::Engine;
 use eyre::Result;
 use solana_client::rpc_client::RpcClient;
 use solana_commitment_config::CommitmentConfig;
@@ -28,6 +29,10 @@ pub const MIN_SOL_SEND_LAMPORTS: u64 = 20_000_000; // 0.02 SOL
 /// destination-side gateway approval flow (init session + N verify_signature
 /// + approve_message + execute) where each tx pays fees and some create rent-exempt PDAs.
 pub const MIN_SOL_RELAY_LAMPORTS: u64 = 50_000_000; // 0.05 SOL
+
+/// Minimum balance for the ITS test command: deploy local mint + token manager
+/// + ATAs + 2x cross-chain GMP gas, plus fees.
+pub const MIN_SOL_ITS_LAMPORTS: u64 = 100_000_000; // 0.1 SOL
 
 /// Preflight: ensure a Solana wallet on the given RPC has at least `min_lamports`.
 /// Errors with a clear "fund this address" message if the account is missing or
@@ -592,25 +597,127 @@ fn fetch_tx_details(
 
 /// Fetch a confirmed transaction with retries.
 ///
-/// Keep retry count and backoff low to avoid blocking the tokio blocking thread
-/// pool for too long under sustained load. This is best-effort metadata; a
-/// missing result just means `compute_units`/`slot` will be `None`.
+/// Used both for best-effort metadata enrichment (compute units, slot — fine
+/// to return None) and for the message-id extraction path which actually
+/// requires the logs. Testnet RPCs can lag a few seconds beyond
+/// `send_and_confirm`, so we retry generously.
 fn fetch_confirmed_tx(
     rpc_client: &RpcClient,
     signature: &Signature,
 ) -> Result<Option<solana_transaction_status::EncodedConfirmedTransactionWithStatusMeta>> {
-    for i in 0..5 {
+    for i in 0..15 {
         match rpc_client.get_transaction(signature, UiTransactionEncoding::Json) {
             Ok(tx) => return Ok(Some(tx)),
             Err(_) => {
-                // Testnet/stagenet RPCs can be slow to index transactions.
-                // Exponential backoff: 500ms, 1s, 2s, capped at 3s.
-                let delay = std::cmp::min(500 * (1 << i), 3000);
+                // Exponential backoff: 500ms, 1s, 2s, capped at 5s. Total ~60s.
+                let delay = std::cmp::min(500 * (1 << i), 5000);
                 std::thread::sleep(std::time::Duration::from_millis(delay));
             }
         }
     }
     Ok(None)
+}
+
+/// Fetch all `Program data:` log lines from a Solana tx, base64-decode them,
+/// and return the raw event payloads. Each entry is one Anchor `emit_cpi!`
+/// event (8-byte discriminator + borsh-encoded event body).
+pub fn extract_program_data_events(rpc_url: &str, signature_str: &str) -> Result<Vec<Vec<u8>>> {
+    let rpc_client = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+    let sig: Signature = signature_str
+        .parse()
+        .map_err(|e| eyre::eyre!("invalid signature: {e}"))?;
+    let tx = fetch_confirmed_tx(&rpc_client, &sig)?
+        .ok_or_else(|| eyre::eyre!("could not fetch transaction {signature_str}"))?;
+    let meta = tx
+        .transaction
+        .meta
+        .ok_or_else(|| eyre::eyre!("transaction has no metadata"))?;
+    let logs: Vec<String> = match meta.log_messages {
+        solana_transaction_status::option_serializer::OptionSerializer::Some(logs) => logs,
+        _ => return Err(eyre::eyre!("transaction has no log messages")),
+    };
+    let mut out = Vec::new();
+    for log in &logs {
+        if let Some(b64) = log.strip_prefix("Program data: ") {
+            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64.trim()) {
+                out.push(bytes);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Find the gateway-emitted CallContractEvent in a Solana tx and return the
+/// raw payload bytes the gateway saw, plus a few other event fields.
+/// Anchor `emit_cpi!` writes events to the program's event-authority via a
+/// CPI whose instruction `data` is
+/// `[8-byte EVENT_IX_TAG_LE || 8-byte event-disc || borsh(event)]`.
+/// Returns `(sender_base58, destination_chain, destination_address, payload_hash, payload)`.
+pub fn extract_gateway_call_contract_payload(
+    rpc_url: &str,
+    signature_str: &str,
+) -> Result<(String, String, String, [u8; 32], Vec<u8>)> {
+    use anchor_lang::Discriminator;
+    use solana_transaction_status::{
+        UiInnerInstructions, UiInstruction, option_serializer::OptionSerializer,
+    };
+
+    // Anchor's event-CPI discriminator prefix.
+    const EVENT_IX_TAG_LE: [u8; 8] = 0x1d9a_cb51_2ea5_45e4u64.to_le_bytes();
+
+    let rpc_client = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+    let sig: Signature = signature_str
+        .parse()
+        .map_err(|e| eyre::eyre!("invalid signature: {e}"))?;
+    let tx = fetch_confirmed_tx(&rpc_client, &sig)?
+        .ok_or_else(|| eyre::eyre!("could not fetch transaction {signature_str}"))?;
+    let meta = tx
+        .transaction
+        .meta
+        .ok_or_else(|| eyre::eyre!("transaction has no metadata"))?;
+
+    let inner_lists: Vec<UiInnerInstructions> = match meta.inner_instructions {
+        OptionSerializer::Some(v) => v,
+        _ => return Err(eyre::eyre!("transaction has no inner_instructions")),
+    };
+
+    let want_disc = solana_axelar_gateway::events::CallContractEvent::DISCRIMINATOR;
+
+    for ii in &inner_lists {
+        for (inner_pos, inst) in ii.instructions.iter().enumerate() {
+            let ix = match inst {
+                UiInstruction::Compiled(c) => c,
+                _ => continue,
+            };
+            let data = bs58::decode(&ix.data).into_vec().unwrap_or_default();
+            if data.len() < 16 || data[..8] != EVENT_IX_TAG_LE || &data[8..16] != want_disc {
+                continue;
+            }
+            let event: solana_axelar_gateway::events::CallContractEvent =
+                borsh::BorshDeserialize::try_from_slice(&data[16..])
+                    .map_err(|e| eyre::eyre!("decode CallContractEvent failed: {e}"))?;
+            // ii.index is the 0-based top-level instruction this group belongs to.
+            // inner_pos is the 0-based position within the group.
+            eprintln!(
+                "[debug] CallContractEvent at top-level={} inner-pos={} (1-based: {}.{})",
+                ii.index,
+                inner_pos,
+                ii.index + 1,
+                inner_pos + 1
+            );
+            return Ok((
+                event.sender.to_string(),
+                event.destination_chain,
+                event.destination_contract_address,
+                event.payload_hash,
+                event.payload,
+            ));
+        }
+    }
+
+    Err(eyre::eyre!(
+        "no gateway CallContractEvent found in inner instructions"
+    ))
 }
 
 /// Extract the ITS gateway message ID from a confirmed transaction.
