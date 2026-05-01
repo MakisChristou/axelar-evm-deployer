@@ -6,13 +6,16 @@ use alloy::{
     providers::{Provider, ProviderBuilder},
     rpc::types::TransactionRequest,
     signers::local::PrivateKeySigner,
-    sol_types::{SolEvent, SolValue},
+    sol_types::SolValue,
 };
 use eyre::Result;
 use serde_json::json;
 use solana_sdk::signer::Signer as SolSigner;
 
 use crate::cli::resolve_axelar_id;
+use crate::commands::event_extractors::{
+    extract_contract_call_event, extract_token_deployed_event, generate_salt,
+};
 use crate::commands::test_helpers::{
     end_poll_with_retry, execute_on_axelarnet_gateway, extract_event_attr,
     route_messages_with_retry, submit_verify_messages_amplifier, wait_for_poll_votes,
@@ -24,8 +27,8 @@ use crate::cosmos::{
     read_axelar_rpc, sign_and_broadcast_cosmos_tx,
 };
 use crate::evm::{
-    AxelarAmplifierGateway, ContractCall, ERC20, InterchainToken, InterchainTokenDeployed,
-    InterchainTokenFactory, InterchainTokenService, Ownable,
+    AxelarAmplifierGateway, ERC20, InterchainToken, InterchainTokenFactory, InterchainTokenService,
+    Ownable,
 };
 use crate::preflight;
 use crate::state::read_state;
@@ -374,16 +377,6 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
     Ok(())
 }
 
-/// Generate a random salt using timestamp to avoid collisions.
-pub fn generate_salt() -> FixedBytes<32> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let encoded = ("its-test", U256::from(nanos)).abi_encode_params();
-    keccak256(&encoded)
-}
-
 /// Relay a message through the Amplifier pipeline: verify → poll → route → execute on hub.
 #[allow(clippy::too_many_arguments)]
 async fn relay_to_hub(
@@ -650,64 +643,6 @@ async fn poll_for_balance_on_destination<P: Provider>(
         ui::warn(&format!("Balance still 0 on {DEST_CHAIN} after 5 minutes"));
         ui::info("The relayer may still be processing. Check axelarscan for status.");
     }
-}
-
-/// Extract tokenId and token address from InterchainTokenDeployed event in receipt logs.
-/// Reads topics/data directly to avoid ABI decode issues with indexed field differences.
-pub fn extract_token_deployed_event(
-    receipt: &alloy::rpc::types::TransactionReceipt,
-) -> Result<(FixedBytes<32>, Address)> {
-    for log in receipt.inner.logs() {
-        if log.topics().first() == Some(&InterchainTokenDeployed::SIGNATURE_HASH) {
-            // tokenId is always topics[1] (first indexed param)
-            let token_id = *log
-                .topics()
-                .get(1)
-                .ok_or_else(|| eyre::eyre!("InterchainTokenDeployed missing tokenId topic"))?;
-
-            // tokenAddress is always the first ABI-encoded field in data (bytes 12..32)
-            let data = log.data().data.as_ref();
-            if data.len() >= 32 {
-                let token_address = Address::from_slice(&data[12..32]);
-                return Ok((token_id, token_address));
-            }
-
-            return Ok((token_id, Address::ZERO));
-        }
-    }
-
-    Err(eyre::eyre!(
-        "InterchainTokenDeployed event not found in receipt logs"
-    ))
-}
-
-/// Extract ContractCall event data from a transaction receipt.
-/// Returns (event_index, payload, payload_hash, destination_chain, destination_address).
-pub fn extract_contract_call_event(
-    receipt: &alloy::rpc::types::TransactionReceipt,
-) -> Result<(usize, Vec<u8>, FixedBytes<32>, String, String)> {
-    for (i, log) in receipt.inner.logs().iter().enumerate() {
-        if log.topics().first() == Some(&ContractCall::SIGNATURE_HASH) {
-            // Decode the event data (non-indexed fields)
-            let decoded = ContractCall::decode_log(&log.inner)
-                .map_err(|e| eyre::eyre!("failed to decode ContractCall event: {e}"))?;
-
-            let payload_hash = decoded.topics().2; // payloadHash is the 3rd topic
-            let destination_chain = decoded.data.destinationChain;
-            let destination_address = decoded.data.destinationContractAddress;
-            let payload = decoded.data.payload.to_vec();
-
-            return Ok((
-                i,
-                payload,
-                payload_hash,
-                destination_chain,
-                destination_address,
-            ));
-        }
-    }
-
-    Err(eyre::eyre!("ContractCall event not found in receipt logs"))
 }
 
 // ---------------------------------------------------------------------------

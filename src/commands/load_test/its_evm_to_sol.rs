@@ -22,7 +22,7 @@ use super::{
     LoadTestArgs, check_evm_balance, finish_report, read_its_cache, save_its_cache,
     validate_evm_rpc, validate_solana_rpc,
 };
-use crate::commands::test_its::{
+use crate::commands::event_extractors::{
     extract_contract_call_event, extract_token_deployed_event, generate_salt,
 };
 use crate::cosmos::read_axelar_contract_field;
