@@ -24,6 +24,9 @@ use crate::cosmos::{
 use crate::evm::{AxelarAmplifierGateway, ContractCall, SenderReceiver, read_artifact_bytecode};
 use crate::preflight;
 use crate::state::{read_state, save_state};
+use crate::timing::{
+    AMPLIFIER_POLL_ATTEMPTS_5MIN, AMPLIFIER_POLL_INTERVAL, EVM_TX_RECEIPT_TIMEOUT,
+};
 use crate::ui;
 use crate::utils::read_contract_address;
 
@@ -113,9 +116,14 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
     ui::tx_hash("tx", &format!("{tx_hash}"));
     ui::info("waiting for confirmation...");
 
-    let receipt = tokio::time::timeout(std::time::Duration::from_secs(120), pending.get_receipt())
+    let receipt = tokio::time::timeout(EVM_TX_RECEIPT_TIMEOUT, pending.get_receipt())
         .await
-        .map_err(|_| eyre::eyre!("tx {tx_hash} timed out after 120s"))??;
+        .map_err(|_| {
+            eyre::eyre!(
+                "tx {tx_hash} timed out after {}s",
+                EVM_TX_RECEIPT_TIMEOUT.as_secs()
+            )
+        })??;
 
     ui::success(&format!(
         "confirmed in block {}",
@@ -276,12 +284,15 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
     ui::tx_hash("tx", &format!("{approve_hash}"));
     ui::info("waiting for confirmation...");
 
-    let approve_receipt = tokio::time::timeout(
-        std::time::Duration::from_secs(120),
-        pending_approve.get_receipt(),
-    )
-    .await
-    .map_err(|_| eyre::eyre!("approve tx timed out after 120s"))??;
+    let approve_receipt =
+        tokio::time::timeout(EVM_TX_RECEIPT_TIMEOUT, pending_approve.get_receipt())
+            .await
+            .map_err(|_| {
+                eyre::eyre!(
+                    "approve tx timed out after {}s",
+                    EVM_TX_RECEIPT_TIMEOUT.as_secs()
+                )
+            })??;
 
     ui::success(&format!(
         "confirmed in block {}",
@@ -334,12 +345,14 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
     ui::tx_hash("tx", &format!("{exec_hash}"));
     ui::info("waiting for confirmation...");
 
-    let exec_receipt = tokio::time::timeout(
-        std::time::Duration::from_secs(120),
-        pending_exec.get_receipt(),
-    )
-    .await
-    .map_err(|_| eyre::eyre!("execute tx timed out after 120s"))??;
+    let exec_receipt = tokio::time::timeout(EVM_TX_RECEIPT_TIMEOUT, pending_exec.get_receipt())
+        .await
+        .map_err(|_| {
+            eyre::eyre!(
+                "execute tx timed out after {}s",
+                EVM_TX_RECEIPT_TIMEOUT.as_secs()
+            )
+        })??;
 
     ui::success(&format!(
         "confirmed in block {}",
@@ -566,9 +579,9 @@ pub async fn run_config(
             .as_ref()
             .ok_or_else(|| eyre::eyre!("voting verifier address required to end poll"))?;
         let spinner = ui::wait_spinner("Ending poll (waiting for block expiry)...");
-        for attempt in 0..60 {
+        for attempt in 0..AMPLIFIER_POLL_ATTEMPTS_5MIN {
             if attempt > 0 {
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                tokio::time::sleep(AMPLIFIER_POLL_INTERVAL).await;
             }
             let end_poll_msg = json!({ "end_poll": { "poll_id": poll_id } });
             let end_poll_any = build_execute_msg_any(&axelar_address, vv_addr, &end_poll_msg)?;
@@ -613,9 +626,9 @@ pub async fn run_config(
     let _dest_gateway =
         read_axelar_contract_field(&config, &format!("/axelar/contracts/Gateway/{dst}/address"))?;
     let spinner = ui::wait_spinner("Routing message...");
-    for attempt in 0..60 {
+    for attempt in 0..AMPLIFIER_POLL_ATTEMPTS_5MIN {
         if attempt > 0 {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            tokio::time::sleep(AMPLIFIER_POLL_INTERVAL).await;
         }
         let route_msg = json!({ "route_messages": [gmp_msg] });
         let route_any = build_execute_msg_any(&axelar_address, &cosm_gateway, &route_msg)?;
@@ -760,9 +773,14 @@ async fn deploy_sender_receiver<P: Provider>(
     ui::tx_hash("deploy tx", &format!("{tx_hash}"));
     ui::info("waiting for confirmation...");
 
-    let receipt = tokio::time::timeout(std::time::Duration::from_secs(120), pending.get_receipt())
+    let receipt = tokio::time::timeout(EVM_TX_RECEIPT_TIMEOUT, pending.get_receipt())
         .await
-        .map_err(|_| eyre::eyre!("deploy tx {tx_hash} timed out after 120s"))??;
+        .map_err(|_| {
+            eyre::eyre!(
+                "deploy tx {tx_hash} timed out after {}s",
+                EVM_TX_RECEIPT_TIMEOUT.as_secs()
+            )
+        })??;
 
     let addr = receipt
         .contract_address

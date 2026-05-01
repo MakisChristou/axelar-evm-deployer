@@ -25,6 +25,7 @@ use owo_colors::OwoColorize;
 
 use crate::cosmos::read_axelar_contract_field;
 use crate::evm::read_artifact_bytecode;
+use crate::timing::EVM_TX_RECEIPT_TIMEOUT;
 use crate::ui;
 use crate::utils::read_contract_address;
 
@@ -1363,9 +1364,14 @@ async fn deploy_sender_receiver<P: alloy::providers::Provider>(
     ui::tx_hash("deploy tx", &format!("{tx_hash}"));
     ui::info("waiting for confirmation...");
 
-    let receipt = tokio::time::timeout(std::time::Duration::from_secs(120), pending.get_receipt())
+    let receipt = tokio::time::timeout(EVM_TX_RECEIPT_TIMEOUT, pending.get_receipt())
         .await
-        .map_err(|_| eyre::eyre!("deploy tx timed out after 120s"))??;
+        .map_err(|_| {
+            eyre::eyre!(
+                "deploy tx timed out after {}s",
+                EVM_TX_RECEIPT_TIMEOUT.as_secs()
+            )
+        })??;
 
     let addr = receipt
         .contract_address

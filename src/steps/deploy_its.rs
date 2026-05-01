@@ -14,6 +14,7 @@ use crate::evm::{
     ConstAddressDeployer, Create3Deployer, get_salt_from_key, read_artifact_bytecode,
 };
 use crate::state::{Step, save_state};
+use crate::timing::EVM_TX_RECEIPT_TIMEOUT;
 use crate::ui;
 use crate::utils::{deployments_root, read_contract_address, update_target_json};
 
@@ -422,10 +423,13 @@ async fn deploy_via_create2<P: Provider>(
     let tx_hash = *pending.tx_hash();
     ui::tx_hash(&format!("{name}: tx"), &format!("{tx_hash}"));
     ui::info("waiting for confirmation...");
-    let receipt = tokio::time::timeout(std::time::Duration::from_secs(120), pending.get_receipt())
+    let receipt = tokio::time::timeout(EVM_TX_RECEIPT_TIMEOUT, pending.get_receipt())
         .await
         .map_err(|_| {
-            eyre::eyre!("{name}: tx {tx_hash} timed out after 120s — check explorer and re-run")
+            eyre::eyre!(
+                "{name}: tx {tx_hash} timed out after {}s — check explorer and re-run",
+                EVM_TX_RECEIPT_TIMEOUT.as_secs()
+            )
         })??;
     ui::success(&format!(
         "{name}: confirmed in block {} -> {predicted}",
@@ -470,10 +474,13 @@ async fn deploy_via_create3<P: Provider>(
     let tx_hash = *pending.tx_hash();
     ui::tx_hash(&format!("{name}: tx"), &format!("{tx_hash}"));
     ui::info("waiting for confirmation...");
-    let receipt = tokio::time::timeout(std::time::Duration::from_secs(120), pending.get_receipt())
+    let receipt = tokio::time::timeout(EVM_TX_RECEIPT_TIMEOUT, pending.get_receipt())
         .await
         .map_err(|_| {
-            eyre::eyre!("{name}: tx {tx_hash} timed out after 120s — check explorer and re-run")
+            eyre::eyre!(
+                "{name}: tx {tx_hash} timed out after {}s — check explorer and re-run",
+                EVM_TX_RECEIPT_TIMEOUT.as_secs()
+            )
         })??;
     ui::success(&format!(
         "{name}: confirmed in block {} -> {predicted}",

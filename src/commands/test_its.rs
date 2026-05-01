@@ -29,6 +29,10 @@ use crate::evm::{
 };
 use crate::preflight;
 use crate::state::read_state;
+use crate::timing::{
+    AMPLIFIER_POLL_ATTEMPTS_5MIN, AMPLIFIER_POLL_ATTEMPTS_10MIN, AMPLIFIER_POLL_INTERVAL,
+    DEST_CHAIN_POLL_ATTEMPTS, DEST_CHAIN_POLL_INTERVAL, EVM_TX_RECEIPT_TIMEOUT,
+};
 use crate::ui;
 use crate::utils::read_contract_address;
 
@@ -137,9 +141,14 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
     ui::tx_hash("tx", &format!("{tx_hash}"));
     ui::info("waiting for confirmation...");
 
-    let receipt = tokio::time::timeout(std::time::Duration::from_secs(120), pending.get_receipt())
+    let receipt = tokio::time::timeout(EVM_TX_RECEIPT_TIMEOUT, pending.get_receipt())
         .await
-        .map_err(|_| eyre::eyre!("tx {tx_hash} timed out after 120s"))??;
+        .map_err(|_| {
+            eyre::eyre!(
+                "tx {tx_hash} timed out after {}s",
+                EVM_TX_RECEIPT_TIMEOUT.as_secs()
+            )
+        })??;
 
     ui::success(&format!(
         "confirmed in block {}",
@@ -190,9 +199,14 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
     ui::tx_hash("tx", &format!("{tx_hash}"));
     ui::info("waiting for confirmation...");
 
-    let receipt = tokio::time::timeout(std::time::Duration::from_secs(120), pending.get_receipt())
+    let receipt = tokio::time::timeout(EVM_TX_RECEIPT_TIMEOUT, pending.get_receipt())
         .await
-        .map_err(|_| eyre::eyre!("tx {tx_hash} timed out after 120s"))??;
+        .map_err(|_| {
+            eyre::eyre!(
+                "tx {tx_hash} timed out after {}s",
+                EVM_TX_RECEIPT_TIMEOUT.as_secs()
+            )
+        })??;
 
     ui::success(&format!(
         "confirmed in block {}",
@@ -348,9 +362,14 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
     ui::tx_hash("tx", &format!("{tx_hash}"));
     ui::info("waiting for confirmation...");
 
-    let receipt = tokio::time::timeout(std::time::Duration::from_secs(120), pending.get_receipt())
+    let receipt = tokio::time::timeout(EVM_TX_RECEIPT_TIMEOUT, pending.get_receipt())
         .await
-        .map_err(|_| eyre::eyre!("tx {tx_hash} timed out after 120s"))??;
+        .map_err(|_| {
+            eyre::eyre!(
+                "tx {tx_hash} timed out after {}s",
+                EVM_TX_RECEIPT_TIMEOUT.as_secs()
+            )
+        })??;
 
     ui::success(&format!(
         "confirmed in block {}",
@@ -595,9 +614,9 @@ async fn poll_for_remote_token_deploy<P: Provider>(
     let spinner = ui::wait_spinner(&format!("Waiting for token to appear on {DEST_CHAIN}..."));
     let mut deployed = false;
 
-    for i in 0..30 {
+    for i in 0..DEST_CHAIN_POLL_ATTEMPTS {
         if i > 0 {
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            tokio::time::sleep(DEST_CHAIN_POLL_INTERVAL).await;
         }
         let token = ERC20::new(predicted_addr, dest_provider);
         match token.name().call().await {
@@ -650,9 +669,9 @@ async fn poll_for_balance_on_destination<P: Provider>(
     let spinner = ui::wait_spinner(&format!("Waiting for balance to appear on {DEST_CHAIN}..."));
 
     let mut final_balance = U256::ZERO;
-    for i in 0..30 {
+    for i in 0..DEST_CHAIN_POLL_ATTEMPTS {
         if i > 0 {
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            tokio::time::sleep(DEST_CHAIN_POLL_INTERVAL).await;
         }
         match dest_token.balanceOf(receiver).call().await {
             Ok(bal) => {
@@ -1625,9 +1644,9 @@ async fn relay_to_destination<P: Provider>(
     ui::step_header(step_base, step_total, "Wait for hub approval");
     let spinner = ui::wait_spinner("Polling hub for approval...");
     let mut hub_approved = false;
-    for i in 0..60 {
+    for i in 0..AMPLIFIER_POLL_ATTEMPTS_5MIN {
         if i > 0 {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            tokio::time::sleep(AMPLIFIER_POLL_INTERVAL).await;
         }
         if check_hub_approved(
             lcd,
@@ -1699,9 +1718,9 @@ async fn relay_to_destination<P: Provider>(
     );
     let spinner = ui::wait_spinner("Polling destination cosm gateway...");
     let mut routed = false;
-    for i in 0..120 {
+    for i in 0..AMPLIFIER_POLL_ATTEMPTS_10MIN {
         if i > 0 {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            tokio::time::sleep(AMPLIFIER_POLL_INTERVAL).await;
         }
         if check_cosmos_routed(
             lcd,
@@ -1775,12 +1794,15 @@ async fn relay_to_destination<P: Provider>(
     let pending_approve = dst_provider.send_transaction(approve_tx).await?;
     let approve_hash = *pending_approve.tx_hash();
     ui::tx_hash("evm approve tx", &format!("{approve_hash}"));
-    let approve_receipt = tokio::time::timeout(
-        std::time::Duration::from_secs(120),
-        pending_approve.get_receipt(),
-    )
-    .await
-    .map_err(|_| eyre::eyre!("approve tx timed out after 120s"))??;
+    let approve_receipt =
+        tokio::time::timeout(EVM_TX_RECEIPT_TIMEOUT, pending_approve.get_receipt())
+            .await
+            .map_err(|_| {
+                eyre::eyre!(
+                    "approve tx timed out after {}s",
+                    EVM_TX_RECEIPT_TIMEOUT.as_secs()
+                )
+            })??;
     ui::success(&format!(
         "approve confirmed in block {}",
         approve_receipt.block_number.unwrap_or(0)
@@ -1827,12 +1849,14 @@ async fn relay_to_destination<P: Provider>(
     let pending_exec = exec_call.send().await?;
     let exec_hash = *pending_exec.tx_hash();
     ui::tx_hash("its execute tx", &format!("{exec_hash}"));
-    let exec_receipt = tokio::time::timeout(
-        std::time::Duration::from_secs(120),
-        pending_exec.get_receipt(),
-    )
-    .await
-    .map_err(|_| eyre::eyre!("ITS execute tx timed out after 120s"))??;
+    let exec_receipt = tokio::time::timeout(EVM_TX_RECEIPT_TIMEOUT, pending_exec.get_receipt())
+        .await
+        .map_err(|_| {
+            eyre::eyre!(
+                "ITS execute tx timed out after {}s",
+                EVM_TX_RECEIPT_TIMEOUT.as_secs()
+            )
+        })??;
     ui::success(&format!(
         "ITS execute confirmed in block {}",
         exec_receipt.block_number.unwrap_or(0)
@@ -1847,9 +1871,9 @@ async fn loop_discover_second_leg(
     first_leg_message_id: &str,
     spinner: &indicatif::ProgressBar,
 ) -> Result<SecondLegInfo> {
-    for i in 0..60 {
+    for i in 0..AMPLIFIER_POLL_ATTEMPTS_5MIN {
         if i > 0 {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            tokio::time::sleep(AMPLIFIER_POLL_INTERVAL).await;
         }
         if let Some(info) = discover_second_leg(axelar_rpc, first_leg_message_id).await? {
             return Ok(info);

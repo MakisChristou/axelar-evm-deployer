@@ -3,6 +3,7 @@ use eyre::Result;
 use crate::commands::deploy::DeployContext;
 use crate::cosmos::{lcd_query_proposal, read_axelar_config};
 use crate::state::Step;
+use crate::timing::COSMOS_PROPOSAL_POLL_INTERVAL;
 use crate::ui;
 
 pub async fn run(ctx: &DeployContext, step: &Step) -> Result<()> {
@@ -45,7 +46,7 @@ pub async fn run(ctx: &DeployContext, step: &Step) -> Result<()> {
                 ));
             }
             _ => {
-                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                tokio::time::sleep(COSMOS_PROPOSAL_POLL_INTERVAL).await;
             }
         }
     }

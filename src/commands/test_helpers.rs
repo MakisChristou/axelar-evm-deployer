@@ -5,6 +5,9 @@ use serde_json::json;
 use crate::cosmos::{
     build_execute_msg_any, lcd_cosmwasm_smart_query, sign_and_broadcast_cosmos_tx,
 };
+use crate::timing::{
+    AMPLIFIER_POLL_ATTEMPTS_5MIN, AMPLIFIER_POLL_ATTEMPTS_10MIN, AMPLIFIER_POLL_INTERVAL,
+};
 use crate::ui;
 
 /// Extract poll_id from the verify_messages tx response events.
@@ -68,9 +71,9 @@ pub async fn wait_for_proof(
     let query = json!({ "proof": { "multisig_session_id": session_id } });
     let spinner = ui::wait_spinner("Waiting for proof signing...");
 
-    for i in 0..120 {
+    for i in 0..AMPLIFIER_POLL_ATTEMPTS_10MIN {
         if i > 0 {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            tokio::time::sleep(AMPLIFIER_POLL_INTERVAL).await;
         }
 
         let resp = lcd_cosmwasm_smart_query(lcd, multisig_prover, &query).await?;
@@ -82,7 +85,11 @@ pub async fn wait_for_proof(
         }
 
         let status = resp["status"].as_str().unwrap_or("unknown");
-        spinner.set_message(format!("Proof status: {status} (attempt {}/120)", i + 1));
+        spinner.set_message(format!(
+            "Proof status: {status} (attempt {}/{})",
+            i + 1,
+            AMPLIFIER_POLL_ATTEMPTS_10MIN
+        ));
     }
 
     spinner.finish_and_clear();
@@ -96,9 +103,9 @@ pub async fn wait_for_poll_votes(lcd: &str, voting_verifier: &str, poll_id: &str
     let query = json!({ "poll": { "poll_id": poll_id } });
     let spinner = ui::wait_spinner("Waiting for verifier votes...");
 
-    for i in 0..120 {
+    for i in 0..AMPLIFIER_POLL_ATTEMPTS_10MIN {
         if i > 0 {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            tokio::time::sleep(AMPLIFIER_POLL_INTERVAL).await;
         }
 
         let resp = lcd_cosmwasm_smart_query(lcd, voting_verifier, &query).await?;
@@ -193,9 +200,9 @@ pub async fn end_poll_with_retry(
     voting_verifier: &str,
 ) -> Result<()> {
     let spinner = ui::wait_spinner("Ending poll (waiting for block expiry)...");
-    for attempt in 0..60 {
+    for attempt in 0..AMPLIFIER_POLL_ATTEMPTS_5MIN {
         if attempt > 0 {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            tokio::time::sleep(AMPLIFIER_POLL_INTERVAL).await;
         }
         let end_poll_msg = json!({ "end_poll": { "poll_id": poll_id } });
         let end_poll_any = build_execute_msg_any(axelar_address, voting_verifier, &end_poll_msg)?;
@@ -245,9 +252,9 @@ pub async fn route_messages_with_retry(
     cosm_gateway: &str,
 ) -> Result<()> {
     let spinner = ui::wait_spinner("Routing message to hub...");
-    for attempt in 0..60 {
+    for attempt in 0..AMPLIFIER_POLL_ATTEMPTS_5MIN {
         if attempt > 0 {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            tokio::time::sleep(AMPLIFIER_POLL_INTERVAL).await;
         }
         let route_msg = json!({ "route_messages": [cosmos_msg] });
         let route_any = build_execute_msg_any(axelar_address, cosm_gateway, &route_msg)?;
@@ -271,8 +278,9 @@ pub async fn route_messages_with_retry(
                 let msg = format!("{e}");
                 if msg.contains("not verified") {
                     spinner.set_message(format!(
-                        "Message not yet verified (attempt {}/60)...",
-                        attempt + 1
+                        "Message not yet verified (attempt {}/{})...",
+                        attempt + 1,
+                        AMPLIFIER_POLL_ATTEMPTS_5MIN
                     ));
                     continue;
                 }
@@ -312,9 +320,9 @@ pub async fn execute_on_axelarnet_gateway(
         }
     });
     let spinner = ui::wait_spinner("Waiting for message to be approved on hub...");
-    for i in 0..120 {
+    for i in 0..AMPLIFIER_POLL_ATTEMPTS_10MIN {
         if i > 0 {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            tokio::time::sleep(AMPLIFIER_POLL_INTERVAL).await;
         }
         let status = lcd_cosmwasm_smart_query(lcd, axelarnet_gateway, &exec_query).await?;
         let status_str = serde_json::to_string(&status)?;
@@ -329,7 +337,11 @@ pub async fn execute_on_axelarnet_gateway(
                 "message not approved on AxelarnetGateway after 10 minutes"
             ));
         }
-        spinner.set_message(format!("Not yet approved (attempt {}/120)...", i + 1));
+        spinner.set_message(format!(
+            "Not yet approved (attempt {}/{})...",
+            i + 1,
+            AMPLIFIER_POLL_ATTEMPTS_10MIN
+        ));
     }
 
     let payload_hex = alloy::hex::encode(payload);

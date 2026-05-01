@@ -8,6 +8,7 @@ use crate::cosmos::{
     build_execute_msg_any, derive_axelar_wallet, lcd_cosmwasm_smart_query, read_axelar_config,
     read_axelar_contract_field, sign_and_broadcast_cosmos_tx,
 };
+use crate::timing::VERIFIER_SET_POLL_INTERVAL;
 use crate::ui;
 
 pub async fn run(ctx: &DeployContext) -> Result<()> {
@@ -129,13 +130,17 @@ pub async fn run(ctx: &DeployContext) -> Result<()> {
                     break;
                 }
                 spinner.set_message(format!(
-                    "{count}/{min_verifiers} verifiers, retrying in 30s..."
+                    "{count}/{min_verifiers} verifiers, retrying in {}s...",
+                    VERIFIER_SET_POLL_INTERVAL.as_secs()
                 ));
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                tokio::time::sleep(VERIFIER_SET_POLL_INTERVAL).await;
             }
             _ => {
-                spinner.set_message("not enough verifiers yet, retrying in 30s...".to_string());
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                spinner.set_message(format!(
+                    "not enough verifiers yet, retrying in {}s...",
+                    VERIFIER_SET_POLL_INTERVAL.as_secs()
+                ));
+                tokio::time::sleep(VERIFIER_SET_POLL_INTERVAL).await;
             }
         }
     }
@@ -171,7 +176,7 @@ pub async fn run(ctx: &DeployContext) -> Result<()> {
                     break;
                 }
                 _ => {
-                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    tokio::time::sleep(VERIFIER_SET_POLL_INTERVAL).await;
                 }
             }
         }

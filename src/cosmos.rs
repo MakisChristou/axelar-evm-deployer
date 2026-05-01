@@ -182,8 +182,8 @@ pub async fn lcd_broadcast_tx(lcd: &str, tx_bytes: &[u8]) -> Result<Value> {
 
 /// Wait for a tx to be included in a block and return the full tx response with events.
 pub async fn lcd_wait_for_tx(lcd: &str, tx_hash: &str) -> Result<Value> {
-    for _ in 0..30 {
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    for _ in 0..crate::timing::LCD_WAIT_MAX_ATTEMPTS {
+        tokio::time::sleep(crate::timing::LCD_WAIT_RETRY_INTERVAL).await;
         let url = format!("{lcd}/cosmos/tx/v1beta1/txs/{tx_hash}");
         let resp: Value = match reqwest::get(&url).await {
             Ok(r) => r.json().await.unwrap_or(serde_json::json!({})),
