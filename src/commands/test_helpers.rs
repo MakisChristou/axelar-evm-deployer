@@ -1,7 +1,10 @@
+use cosmrs::crypto::secp256k1::SigningKey;
 use eyre::Result;
 use serde_json::json;
 
-use crate::cosmos::lcd_cosmwasm_smart_query;
+use crate::cosmos::{
+    build_execute_msg_any, lcd_cosmwasm_smart_query, sign_and_broadcast_cosmos_tx,
+};
 use crate::ui;
 
 /// Extract poll_id from the verify_messages tx response events.
@@ -146,4 +149,226 @@ pub async fn wait_for_poll_votes(lcd: &str, voting_verifier: &str, poll_id: &str
 
     spinner.finish_and_clear();
     Err(eyre::eyre!("poll {poll_id} timed out after 10 minutes"))
+}
+
+/// Submit `verify_messages` on the source-chain Gateway and return the poll_id
+/// (or None if the message is already under active verification).
+#[allow(clippy::too_many_arguments)]
+pub async fn submit_verify_messages_amplifier(
+    cosmos_msg: &serde_json::Value,
+    signing_key: &SigningKey,
+    axelar_address: &str,
+    lcd: &str,
+    chain_id: &str,
+    fee_denom: &str,
+    gas_price: f64,
+    cosm_gateway: &str,
+) -> Result<Option<String>> {
+    let verify_msg = json!({ "verify_messages": [cosmos_msg] });
+    let verify_any = build_execute_msg_any(axelar_address, cosm_gateway, &verify_msg)?;
+    let verify_resp = sign_and_broadcast_cosmos_tx(
+        signing_key,
+        axelar_address,
+        lcd,
+        chain_id,
+        fee_denom,
+        gas_price,
+        vec![verify_any],
+    )
+    .await?;
+    Ok(extract_poll_id(&verify_resp))
+}
+
+/// End a poll on the VotingVerifier, retrying while the poll is still within
+/// its block-expiry window ("cannot tally before poll end").
+#[allow(clippy::too_many_arguments)]
+pub async fn end_poll_with_retry(
+    poll_id: &str,
+    signing_key: &SigningKey,
+    axelar_address: &str,
+    lcd: &str,
+    chain_id: &str,
+    fee_denom: &str,
+    gas_price: f64,
+    voting_verifier: &str,
+) -> Result<()> {
+    let spinner = ui::wait_spinner("Ending poll (waiting for block expiry)...");
+    for attempt in 0..60 {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+        let end_poll_msg = json!({ "end_poll": { "poll_id": poll_id } });
+        let end_poll_any = build_execute_msg_any(axelar_address, voting_verifier, &end_poll_msg)?;
+        match sign_and_broadcast_cosmos_tx(
+            signing_key,
+            axelar_address,
+            lcd,
+            chain_id,
+            fee_denom,
+            gas_price,
+            vec![end_poll_any],
+        )
+        .await
+        {
+            Ok(_) => {
+                spinner.finish_and_clear();
+                ui::success("poll ended");
+                return Ok(());
+            }
+            Err(e) => {
+                let msg = format!("{e}");
+                if msg.contains("cannot tally before poll end") {
+                    spinner
+                        .set_message(format!("Poll not expired yet (attempt {})...", attempt + 1));
+                    continue;
+                }
+                spinner.finish_and_clear();
+                return Err(e);
+            }
+        }
+    }
+    spinner.finish_and_clear();
+    Err(eyre::eyre!("end_poll did not complete after 60 attempts"))
+}
+
+/// Route an already-verified message through the source-chain Gateway,
+/// retrying while it shows "not verified" (verifier votes still propagating).
+#[allow(clippy::too_many_arguments)]
+pub async fn route_messages_with_retry(
+    cosmos_msg: &serde_json::Value,
+    signing_key: &SigningKey,
+    axelar_address: &str,
+    lcd: &str,
+    chain_id: &str,
+    fee_denom: &str,
+    gas_price: f64,
+    cosm_gateway: &str,
+) -> Result<()> {
+    let spinner = ui::wait_spinner("Routing message to hub...");
+    for attempt in 0..60 {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+        let route_msg = json!({ "route_messages": [cosmos_msg] });
+        let route_any = build_execute_msg_any(axelar_address, cosm_gateway, &route_msg)?;
+        match sign_and_broadcast_cosmos_tx(
+            signing_key,
+            axelar_address,
+            lcd,
+            chain_id,
+            fee_denom,
+            gas_price,
+            vec![route_any],
+        )
+        .await
+        {
+            Ok(_) => {
+                spinner.finish_and_clear();
+                ui::success("message routed to hub");
+                return Ok(());
+            }
+            Err(e) => {
+                let msg = format!("{e}");
+                if msg.contains("not verified") {
+                    spinner.set_message(format!(
+                        "Message not yet verified (attempt {}/60)...",
+                        attempt + 1
+                    ));
+                    continue;
+                }
+                spinner.finish_and_clear();
+                return Err(e);
+            }
+        }
+    }
+    spinner.finish_and_clear();
+    Err(eyre::eyre!(
+        "route_messages did not complete after 60 attempts"
+    ))
+}
+
+/// Wait for AxelarnetGateway to mark the message executable, then submit the
+/// `execute` cosmwasm tx. Tolerates `already executed` (relayer raced us).
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_on_axelarnet_gateway(
+    message_id: &str,
+    source_chain: &str,
+    destination_chain_label: &str,
+    payload: &[u8],
+    signing_key: &SigningKey,
+    axelar_address: &str,
+    lcd: &str,
+    chain_id: &str,
+    fee_denom: &str,
+    gas_price: f64,
+    axelarnet_gateway: &str,
+) -> Result<()> {
+    let exec_query = json!({
+        "executable_messages": {
+            "cc_ids": [{
+                "source_chain": source_chain,
+                "message_id": message_id,
+            }]
+        }
+    });
+    let spinner = ui::wait_spinner("Waiting for message to be approved on hub...");
+    for i in 0..120 {
+        if i > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+        let status = lcd_cosmwasm_smart_query(lcd, axelarnet_gateway, &exec_query).await?;
+        let status_str = serde_json::to_string(&status)?;
+        if !status_str.contains("null") && status_str.contains(message_id) {
+            spinner.finish_and_clear();
+            ui::success("message approved on hub");
+            break;
+        }
+        if i == 119 {
+            spinner.finish_and_clear();
+            return Err(eyre::eyre!(
+                "message not approved on AxelarnetGateway after 10 minutes"
+            ));
+        }
+        spinner.set_message(format!("Not yet approved (attempt {}/120)...", i + 1));
+    }
+
+    let payload_hex = alloy::hex::encode(payload);
+    let execute_msg = json!({
+        "execute": {
+            "cc_id": {
+                "message_id": message_id,
+                "source_chain": source_chain,
+            },
+            "payload": payload_hex,
+        }
+    });
+    let execute_any = build_execute_msg_any(axelar_address, axelarnet_gateway, &execute_msg)?;
+    match sign_and_broadcast_cosmos_tx(
+        signing_key,
+        axelar_address,
+        lcd,
+        chain_id,
+        fee_denom,
+        gas_price,
+        vec![execute_any],
+    )
+    .await
+    {
+        Ok(_) => {
+            ui::success(&format!(
+                "hub executed — message routed to {destination_chain_label} (relayer will handle delivery)"
+            ));
+        }
+        Err(e) => {
+            let msg = format!("{e}");
+            if msg.contains("already executed") {
+                ui::success(&format!(
+                    "message already executed on hub by relayer — continuing to {destination_chain_label}"
+                ));
+            } else {
+                return Err(e);
+            }
+        }
+    }
+    Ok(())
 }

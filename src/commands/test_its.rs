@@ -14,12 +14,14 @@ use solana_sdk::signer::Signer as SolSigner;
 
 use crate::cli::resolve_axelar_id;
 use crate::commands::test_helpers::{
-    extract_event_attr, extract_poll_id, wait_for_poll_votes, wait_for_proof,
+    end_poll_with_retry, execute_on_axelarnet_gateway, extract_event_attr,
+    route_messages_with_retry, submit_verify_messages_amplifier, wait_for_poll_votes,
+    wait_for_proof,
 };
 use crate::cosmos::{
     SecondLegInfo, build_execute_msg_any, check_cosmos_routed, check_hub_approved,
-    derive_axelar_wallet, discover_second_leg, lcd_cosmwasm_smart_query, read_axelar_config,
-    read_axelar_contract_field, read_axelar_rpc, sign_and_broadcast_cosmos_tx,
+    derive_axelar_wallet, discover_second_leg, read_axelar_config, read_axelar_contract_field,
+    read_axelar_rpc, sign_and_broadcast_cosmos_tx,
 };
 use crate::evm::{
     AxelarAmplifierGateway, ContractCall, ERC20, InterchainToken, InterchainTokenDeployed,
@@ -284,65 +286,35 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
 
     // ── Step 3: verify_messages ─────────────────────────────────────────
     ui::step_header(3, TOTAL_STEPS, "verify_messages");
-    let verify_msg = json!({ "verify_messages": [its_msg] });
-    let verify_any = build_execute_msg_any(&axelar_address, &cosm_gateway, &verify_msg)?;
-    let verify_resp = sign_and_broadcast_cosmos_tx(
+    let poll_id = submit_verify_messages_amplifier(
+        &its_msg,
         &signing_key,
         &axelar_address,
         &lcd,
         &chain_id,
         &fee_denom,
         gas_price,
-        vec![verify_any],
+        &cosm_gateway,
     )
     .await?;
 
-    if let Some(poll_id) = extract_poll_id(&verify_resp) {
+    if let Some(poll_id) = poll_id {
         ui::kv("poll_id", &poll_id);
 
         // ── Step 4: Wait for poll votes + end poll ──────────────────────────
         ui::step_header(4, TOTAL_STEPS, "Wait for poll votes + end poll");
         wait_for_poll_votes(&lcd, &voting_verifier, &poll_id).await?;
-
-        // End the poll — retry if it hasn't expired yet
-        let spinner = ui::wait_spinner("Ending poll (waiting for block expiry)...");
-        for attempt in 0..60 {
-            if attempt > 0 {
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            }
-            let end_poll_msg = json!({ "end_poll": { "poll_id": poll_id } });
-            let end_poll_any =
-                build_execute_msg_any(&axelar_address, &voting_verifier, &end_poll_msg)?;
-            match sign_and_broadcast_cosmos_tx(
-                &signing_key,
-                &axelar_address,
-                &lcd,
-                &chain_id,
-                &fee_denom,
-                gas_price,
-                vec![end_poll_any],
-            )
-            .await
-            {
-                Ok(_) => {
-                    spinner.finish_and_clear();
-                    ui::success("poll ended");
-                    break;
-                }
-                Err(e) => {
-                    let msg = format!("{e}");
-                    if msg.contains("cannot tally before poll end") {
-                        spinner.set_message(format!(
-                            "Poll not expired yet (attempt {})...",
-                            attempt + 1
-                        ));
-                        continue;
-                    }
-                    spinner.finish_and_clear();
-                    return Err(e);
-                }
-            }
-        }
+        end_poll_with_retry(
+            &poll_id,
+            &signing_key,
+            &axelar_address,
+            &lcd,
+            &chain_id,
+            &fee_denom,
+            gas_price,
+            &voting_verifier,
+        )
+        .await?;
     } else {
         ui::info("no new poll created — message already being verified by active verifiers");
         ui::step_header(4, TOTAL_STEPS, "Wait for poll votes + end poll");
@@ -351,43 +323,17 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
 
     // ── Step 5: route_messages ──────────────────────────────────────────
     ui::step_header(5, TOTAL_STEPS, "route_messages");
-    let spinner = ui::wait_spinner("Routing message to hub...");
-    for attempt in 0..60 {
-        if attempt > 0 {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        }
-        let route_msg = json!({ "route_messages": [its_msg] });
-        let route_any = build_execute_msg_any(&axelar_address, &cosm_gateway, &route_msg)?;
-        match sign_and_broadcast_cosmos_tx(
-            &signing_key,
-            &axelar_address,
-            &lcd,
-            &chain_id,
-            &fee_denom,
-            gas_price,
-            vec![route_any],
-        )
-        .await
-        {
-            Ok(_) => {
-                spinner.finish_and_clear();
-                ui::success("message routed to hub");
-                break;
-            }
-            Err(e) => {
-                let msg = format!("{e}");
-                if msg.contains("not verified") {
-                    spinner.set_message(format!(
-                        "Message not yet verified (attempt {}/60)...",
-                        attempt + 1
-                    ));
-                    continue;
-                }
-                spinner.finish_and_clear();
-                return Err(e);
-            }
-        }
-    }
+    route_messages_with_retry(
+        &its_msg,
+        &signing_key,
+        &axelar_address,
+        &lcd,
+        &chain_id,
+        &fee_denom,
+        gas_price,
+        &cosm_gateway,
+    )
+    .await?;
 
     // ── Step 6: Execute on AxelarnetGateway (hub) ───────────────────────
     ui::step_header(6, TOTAL_STEPS, "Execute on AxelarnetGateway (hub)");
@@ -396,75 +342,20 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
         read_axelar_contract_field(&target_json, "/axelar/contracts/AxelarnetGateway/address")?;
     ui::address("AxelarnetGateway", &axelarnet_gateway);
 
-    // Wait for message to become executable (Router needs time to approve it)
-    let exec_query = json!({
-        "executable_messages": {
-            "cc_ids": [{
-                "source_chain": axelar_id,
-                "message_id": message_id,
-            }]
-        }
-    });
-    let spinner = ui::wait_spinner("Waiting for message to be approved on hub...");
-    for i in 0..120 {
-        if i > 0 {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        }
-        let status = lcd_cosmwasm_smart_query(&lcd, &axelarnet_gateway, &exec_query).await?;
-        let status_str = serde_json::to_string(&status)?;
-        if !status_str.contains("null") && status_str.contains(&message_id) {
-            spinner.finish_and_clear();
-            ui::success("message approved on hub");
-            break;
-        }
-        if i == 119 {
-            spinner.finish_and_clear();
-            return Err(eyre::eyre!(
-                "message not approved on AxelarnetGateway after 10 minutes"
-            ));
-        }
-        spinner.set_message(format!("Not yet approved (attempt {}/120)...", i + 1));
-    }
-
-    // Execute with payload
-    let payload_hex = alloy::hex::encode(&payload);
-    let execute_msg = json!({
-        "execute": {
-            "cc_id": {
-                "message_id": message_id,
-                "source_chain": axelar_id,
-            },
-            "payload": payload_hex,
-        }
-    });
-    let execute_any = build_execute_msg_any(&axelar_address, &axelarnet_gateway, &execute_msg)?;
-    match sign_and_broadcast_cosmos_tx(
+    execute_on_axelarnet_gateway(
+        &message_id,
+        &axelar_id,
+        DEST_CHAIN,
+        &payload,
         &signing_key,
         &axelar_address,
         &lcd,
         &chain_id,
         &fee_denom,
         gas_price,
-        vec![execute_any],
+        &axelarnet_gateway,
     )
-    .await
-    {
-        Ok(_) => {
-            ui::success(&format!(
-                "hub executed — message routed to {DEST_CHAIN} (relayer will handle delivery)"
-            ));
-        }
-        Err(e) => {
-            let msg = format!("{e}");
-            if msg.contains("already executed") {
-                ui::success(&format!(
-                    "message already executed on hub by relayer — continuing to {DEST_CHAIN}"
-                ));
-            } else {
-                return Err(e);
-            }
-        }
-    }
+    .await?;
 
     // ── Step 7: Poll destination chain to confirm token deployed ─────────
     ui::step_header(
@@ -689,163 +580,65 @@ async fn relay_to_hub(
         "payload_hash": alloy::hex::encode(payload_hash.as_slice()),
     });
 
-    // verify_messages
     ui::info("verify_messages...");
-    let verify_msg = json!({ "verify_messages": [msg] });
-    let verify_any = build_execute_msg_any(axelar_address, cosm_gateway, &verify_msg)?;
-    let verify_resp = sign_and_broadcast_cosmos_tx(
+    let poll_id = submit_verify_messages_amplifier(
+        &msg,
         signing_key,
         axelar_address,
         lcd,
         chain_id,
         fee_denom,
         gas_price,
-        vec![verify_any],
+        cosm_gateway,
     )
     .await?;
 
-    if let Some(poll_id) = extract_poll_id(&verify_resp) {
+    if let Some(poll_id) = poll_id {
         ui::kv("poll_id", &poll_id);
         wait_for_poll_votes(lcd, voting_verifier, &poll_id).await?;
-
-        // End poll
-        let spinner = ui::wait_spinner("Ending poll...");
-        for attempt in 0..60 {
-            if attempt > 0 {
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            }
-            let end_poll_msg = json!({ "end_poll": { "poll_id": poll_id } });
-            let end_poll_any =
-                build_execute_msg_any(axelar_address, voting_verifier, &end_poll_msg)?;
-            match sign_and_broadcast_cosmos_tx(
-                signing_key,
-                axelar_address,
-                lcd,
-                chain_id,
-                fee_denom,
-                gas_price,
-                vec![end_poll_any],
-            )
-            .await
-            {
-                Ok(_) => {
-                    spinner.finish_and_clear();
-                    ui::success("poll ended");
-                    break;
-                }
-                Err(e) => {
-                    let err = format!("{e}");
-                    if err.contains("cannot tally before poll end") {
-                        spinner.set_message(format!(
-                            "Poll not expired yet (attempt {})...",
-                            attempt + 1
-                        ));
-                        continue;
-                    }
-                    spinner.finish_and_clear();
-                    return Err(e);
-                }
-            }
-        }
-    } else {
-        ui::info("no new poll — already being verified by active verifiers");
-    }
-
-    // route_messages
-    ui::info("route_messages...");
-    let spinner = ui::wait_spinner("Routing message to hub...");
-    for attempt in 0..60 {
-        if attempt > 0 {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        }
-        let route_msg = json!({ "route_messages": [msg] });
-        let route_any = build_execute_msg_any(axelar_address, cosm_gateway, &route_msg)?;
-        match sign_and_broadcast_cosmos_tx(
+        end_poll_with_retry(
+            &poll_id,
             signing_key,
             axelar_address,
             lcd,
             chain_id,
             fee_denom,
             gas_price,
-            vec![route_any],
+            voting_verifier,
         )
-        .await
-        {
-            Ok(_) => {
-                spinner.finish_and_clear();
-                ui::success("message routed");
-                break;
-            }
-            Err(e) => {
-                let err = format!("{e}");
-                if err.contains("not verified") {
-                    spinner
-                        .set_message(format!("Not yet verified (attempt {}/60)...", attempt + 1));
-                    continue;
-                }
-                spinner.finish_and_clear();
-                return Err(e);
-            }
-        }
+        .await?;
+    } else {
+        ui::info("no new poll — already being verified by active verifiers");
     }
 
-    // Execute on AxelarnetGateway
-    ui::info("execute on AxelarnetGateway...");
-    let exec_query = json!({
-        "executable_messages": {
-            "cc_ids": [{ "source_chain": axelar_id, "message_id": message_id }]
-        }
-    });
-    let spinner = ui::wait_spinner("Waiting for approval on hub...");
-    for i in 0..120 {
-        if i > 0 {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        }
-        let status = lcd_cosmwasm_smart_query(lcd, axelarnet_gateway, &exec_query).await?;
-        let status_str = serde_json::to_string(&status)?;
-        if !status_str.contains("null") && status_str.contains(message_id) {
-            spinner.finish_and_clear();
-            ui::success("message approved on hub");
-            break;
-        }
-        if i == 119 {
-            spinner.finish_and_clear();
-            return Err(eyre::eyre!(
-                "message not approved on AxelarnetGateway after 10 minutes"
-            ));
-        }
-        spinner.set_message(format!("Not yet approved (attempt {}/120)...", i + 1));
-    }
-
-    let payload_hex = alloy::hex::encode(payload);
-    let execute_msg = json!({
-        "execute": {
-            "cc_id": { "message_id": message_id, "source_chain": axelar_id },
-            "payload": payload_hex,
-        }
-    });
-    let execute_any = build_execute_msg_any(axelar_address, axelarnet_gateway, &execute_msg)?;
-    match sign_and_broadcast_cosmos_tx(
+    ui::info("route_messages...");
+    route_messages_with_retry(
+        &msg,
         signing_key,
         axelar_address,
         lcd,
         chain_id,
         fee_denom,
         gas_price,
-        vec![execute_any],
+        cosm_gateway,
     )
-    .await
-    {
-        Ok(_) => ui::success("hub executed — message forwarded to destination"),
-        Err(e) => {
-            let err = format!("{e}");
-            if err.contains("already executed") {
-                ui::success("already executed by relayer");
-            } else {
-                return Err(e);
-            }
-        }
-    }
+    .await?;
+
+    ui::info("execute on AxelarnetGateway...");
+    execute_on_axelarnet_gateway(
+        message_id,
+        axelar_id,
+        destination_chain,
+        payload,
+        signing_key,
+        axelar_address,
+        lcd,
+        chain_id,
+        fee_denom,
+        gas_price,
+        axelarnet_gateway,
+    )
+    .await?;
 
     Ok(())
 }

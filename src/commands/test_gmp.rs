@@ -14,7 +14,8 @@ use serde_json::json;
 
 use crate::cli::resolve_axelar_id;
 use crate::commands::test_helpers::{
-    extract_event_attr, extract_poll_id, wait_for_poll_votes, wait_for_proof,
+    end_poll_with_retry, extract_event_attr, extract_poll_id, route_messages_with_retry,
+    submit_verify_messages_amplifier, wait_for_poll_votes, wait_for_proof,
 };
 use crate::cosmos::{
     build_execute_msg_any, check_axelar_balance, derive_axelar_wallet, read_axelar_config,
@@ -176,65 +177,35 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
 
     // Step 2: verify_messages
     ui::step_header(2, TOTAL_STEPS, "verify_messages");
-    let verify_msg = json!({ "verify_messages": [gmp_msg] });
-    let verify_any = build_execute_msg_any(&axelar_address, &cosm_gateway, &verify_msg)?;
-    let verify_resp = sign_and_broadcast_cosmos_tx(
+    let poll_id = submit_verify_messages_amplifier(
+        &gmp_msg,
         &signing_key,
         &axelar_address,
         &lcd,
         &chain_id,
         &fee_denom,
         gas_price,
-        vec![verify_any],
+        &cosm_gateway,
     )
     .await?;
 
-    if let Some(poll_id) = extract_poll_id(&verify_resp) {
+    if let Some(poll_id) = poll_id {
         ui::kv("poll_id", &poll_id);
 
         // Step 3: Wait for votes + end poll
         ui::step_header(3, TOTAL_STEPS, "Wait for poll votes + end poll");
         wait_for_poll_votes(&lcd, &voting_verifier, &poll_id).await?;
-
-        // End the poll — retry if it hasn't expired yet (blockExpiry not reached)
-        let spinner = ui::wait_spinner("Ending poll (waiting for block expiry)...");
-        for attempt in 0..60 {
-            if attempt > 0 {
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            }
-            let end_poll_msg = json!({ "end_poll": { "poll_id": poll_id } });
-            let end_poll_any =
-                build_execute_msg_any(&axelar_address, &voting_verifier, &end_poll_msg)?;
-            match sign_and_broadcast_cosmos_tx(
-                &signing_key,
-                &axelar_address,
-                &lcd,
-                &chain_id,
-                &fee_denom,
-                gas_price,
-                vec![end_poll_any],
-            )
-            .await
-            {
-                Ok(_) => {
-                    spinner.finish_and_clear();
-                    ui::success("poll ended");
-                    break;
-                }
-                Err(e) => {
-                    let msg = format!("{e}");
-                    if msg.contains("cannot tally before poll end") {
-                        spinner.set_message(format!(
-                            "Poll not expired yet (attempt {})...",
-                            attempt + 1
-                        ));
-                        continue;
-                    }
-                    spinner.finish_and_clear();
-                    return Err(e);
-                }
-            }
-        }
+        end_poll_with_retry(
+            &poll_id,
+            &signing_key,
+            &axelar_address,
+            &lcd,
+            &chain_id,
+            &fee_denom,
+            gas_price,
+            &voting_verifier,
+        )
+        .await?;
     } else {
         ui::info("no new poll created — message already being verified by active verifiers");
         ui::step_header(3, TOTAL_STEPS, "Wait for poll votes + end poll");
@@ -243,43 +214,17 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
 
     // Step 4: route_messages
     ui::step_header(4, TOTAL_STEPS, "route_messages");
-    let spinner = ui::wait_spinner("Routing message...");
-    for attempt in 0..60 {
-        if attempt > 0 {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        }
-        let route_msg = json!({ "route_messages": [gmp_msg] });
-        let route_any = build_execute_msg_any(&axelar_address, &cosm_gateway, &route_msg)?;
-        match sign_and_broadcast_cosmos_tx(
-            &signing_key,
-            &axelar_address,
-            &lcd,
-            &chain_id,
-            &fee_denom,
-            gas_price,
-            vec![route_any],
-        )
-        .await
-        {
-            Ok(_) => {
-                spinner.finish_and_clear();
-                ui::success("message routed");
-                break;
-            }
-            Err(e) => {
-                let msg = format!("{e}");
-                if msg.contains("not verified") {
-                    spinner.set_message(format!(
-                        "Message not yet verified (attempt {}/60)...",
-                        attempt + 1
-                    ));
-                    continue;
-                }
-                spinner.finish_and_clear();
-                return Err(e);
-            }
-        }
-    }
+    route_messages_with_retry(
+        &gmp_msg,
+        &signing_key,
+        &axelar_address,
+        &lcd,
+        &chain_id,
+        &fee_denom,
+        gas_price,
+        &cosm_gateway,
+    )
+    .await?;
 
     // Step 5: construct_proof on MultisigProver
     ui::step_header(5, TOTAL_STEPS, "construct_proof");
