@@ -14,8 +14,47 @@
 use std::fmt;
 use std::str::FromStr;
 
-use alloy::primitives::{Address, address};
+use alloy::primitives::{Address, U256, address};
 use eyre::{Result, eyre};
+
+// ---------------------------------------------------------------------------
+// Wei / token amount helpers
+// ---------------------------------------------------------------------------
+
+/// Wei per 1 ETH (or any 18-decimal native token). 10^18.
+pub const WEI_PER_ETH: u128 = 1_000_000_000_000_000_000;
+
+/// Wei per 0.001 ETH (1 milli-ETH). 10^15. Useful for `const`-time arithmetic
+/// where the `u64`-based [`eth_milli`] helper isn't usable.
+pub const WEI_PER_MILLI_ETH: u128 = 1_000_000_000_000_000;
+
+/// `n` whole ETH expressed in wei. `eth(2) == 2 ETH`.
+pub fn eth(n: u64) -> U256 {
+    U256::from(n) * U256::from(WEI_PER_ETH)
+}
+
+/// `n` thousandths of ETH (milli-ETH) expressed in wei.
+/// `eth_milli(200) == 0.2 ETH`. Use this for sub-ETH gas budgets where
+/// `eth(N)` would force you to pick a too-coarse N.
+pub fn eth_milli(n: u64) -> U256 {
+    U256::from(n) * U256::from(WEI_PER_MILLI_ETH)
+}
+
+/// `n` whole tokens at the given decimal precision.
+/// `whole_tokens(100, 18) == 100 tokens at 18-decimal precision`.
+pub fn whole_tokens(n: u64, decimals: u8) -> U256 {
+    U256::from(n) * U256::from(10u64).pow(U256::from(decimals))
+}
+
+// ---------------------------------------------------------------------------
+// Standard burn / receiver address
+// ---------------------------------------------------------------------------
+
+/// Canonical "no-key" EOA used as a default receiver in tests and load tests.
+/// ITS happily transfers tokens here (unlike its own proxy address, which
+/// reverts EVM estimation). Picked because it's universally recognisable as
+/// "this address has no owner".
+pub const DEAD_ADDRESS: Address = address!("0x000000000000000000000000000000000000dEaD");
 
 // ---------------------------------------------------------------------------
 // ChainType — the chain's runtime model.

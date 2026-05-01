@@ -38,10 +38,11 @@ fn default_gas_value_wei(_source_chain: &str) -> u128 {
 }
 #[cfg(not(feature = "devnet-amplifier"))]
 fn default_gas_value_wei(source_chain: &str) -> u128 {
+    use crate::types::WEI_PER_MILLI_ETH;
     if source_chain.starts_with("flow") {
-        300_000_000_000_000_000 // 0.3 FLOW
+        300 * WEI_PER_MILLI_ETH // 0.3 FLOW
     } else {
-        10_000_000_000_000_000 // 0.01 ETH
+        10 * WEI_PER_MILLI_ETH // 0.01 ETH
     }
 }
 const MAX_CONCURRENT_SENDS: usize = 100;
@@ -141,12 +142,12 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     // Keep num_txs as alias for burst compat (equals num_keys in burst mode)
     let num_txs = num_keys;
     // Amount must survive ITS hub decimal truncation between EVM (18 decimals) and Solana.
-    // Use 1 full token (10^18) to ensure the truncated amount is non-zero.
-    let amount_per_tx = U256::from(1_000_000_000_000_000_000u128); // 10^18 = 1 token
+    // Use 1 full token to ensure the truncated amount is non-zero.
+    let amount_per_tx = crate::types::whole_tokens(1, 18);
     // Distribute 100x per key so cached tokens last across many runs.
     let amount_per_key = amount_per_tx * U256::from(100);
     // Mint a large fixed supply so the token can be reused across runs without redeploying.
-    let total_supply = U256::from(1_000_000) * U256::from(1_000_000_000_000_000_000u128); // 1M tokens
+    let total_supply = crate::types::whole_tokens(1_000_000, 18);
 
     let its_service = InterchainTokenService::new(its_proxy_addr, &write_provider);
 

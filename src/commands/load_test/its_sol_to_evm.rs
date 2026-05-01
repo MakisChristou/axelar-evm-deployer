@@ -121,7 +121,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
                 .map_err(|e| eyre!("invalid EVM private key for receiver derivation: {e}"))?;
             signer.address()
         }
-        None => alloy::primitives::address!("0x000000000000000000000000000000000000dEaD"),
+        None => crate::types::DEAD_ADDRESS,
     };
     ui::address("receiver", &format!("{receiver}"));
     let dest_address_bytes = receiver.as_slice().to_vec();

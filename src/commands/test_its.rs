@@ -119,7 +119,7 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
 
     let salt = generate_salt();
     let spec = crate::types::EVM_LEGACY_SPEC;
-    let initial_supply = U256::from(1000u64) * U256::from(10u64).pow(U256::from(spec.decimals));
+    let initial_supply = crate::types::whole_tokens(1000, spec.decimals);
 
     ui::kv("name", spec.name);
     ui::kv("symbol", spec.symbol);
@@ -162,7 +162,7 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
     // ── Step 2: Deploy remote interchain token to flow ──────────────────
     ui::step_header(2, TOTAL_STEPS, "Deploy remote interchain token to flow");
 
-    let gas_value = U256::from(2_000_000_000_000_000_000u64); // 2 ETH for cross-chain gas
+    let gas_value = crate::types::eth(2); // cross-chain deploy budget
     ui::kv("destination", DEST_CHAIN);
     ui::kv("gas value", &format!("{gas_value} wei"));
 
@@ -309,11 +309,10 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
     // ── Step 8: Send interchain transfer ────────────────────────────────
     ui::step_header(8, TOTAL_STEPS, "Send interchain transfer");
 
-    let transfer_amount = U256::from(100u64)
-        * U256::from(10u64).pow(U256::from(crate::types::EVM_LEGACY_SPEC.decimals));
-    let receiver: Address = "0x000000000000000000000000000000000000dEaD".parse()?;
+    let transfer_amount = crate::types::whole_tokens(100, crate::types::EVM_LEGACY_SPEC.decimals);
+    let receiver = crate::types::DEAD_ADDRESS;
     let receiver_bytes = Bytes::copy_from_slice(receiver.as_slice());
-    let transfer_gas = U256::from(200_000_000_000_000_000u64); // 0.2 ETH for gas
+    let transfer_gas = crate::types::eth_milli(200); // cross-chain transfer budget
 
     ui::kv("amount", &format!("{transfer_amount}"));
     ui::address("receiver", &format!("{receiver}"));

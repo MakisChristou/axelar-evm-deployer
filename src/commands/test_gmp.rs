@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use alloy::{
     network::TransactionBuilder,
-    primitives::{Bytes, U256, keccak256},
+    primitives::{Bytes, keccak256},
     providers::{Provider, ProviderBuilder},
     rpc::types::TransactionRequest,
     signers::local::PrivateKeySigner,
@@ -107,7 +107,7 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
             destination_address.clone(),
             message.clone(),
         )
-        .value(U256::from(1_000_000_000_000_000u64)); // 0.001 ETH for gas payment
+        .value(crate::types::eth_milli(1)); // 0.001 ETH cross-chain gas budget
 
     let pending = call.send().await?;
     let tx_hash = *pending.tx_hash();
