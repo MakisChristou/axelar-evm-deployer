@@ -10,9 +10,10 @@ use crate::timing::{
 };
 use crate::ui;
 
-/// Extract poll_id from the verify_messages tx response events.
-/// Returns None if no poll was created (e.g. message already being verified by active relayers).
-pub fn extract_poll_id(tx_resp: &serde_json::Value) -> Option<String> {
+/// Walk wasm event attributes in a cosmos tx response and return the first
+/// value whose key matches `attr_name`. None if the response is malformed,
+/// has no wasm events, or none of them carries the attribute.
+fn find_wasm_attr(tx_resp: &serde_json::Value, attr_name: &str) -> Option<String> {
     let events = tx_resp
         .pointer("/tx_response/events")
         .and_then(|v| v.as_array())?;
@@ -23,43 +24,27 @@ pub fn extract_poll_id(tx_resp: &serde_json::Value) -> Option<String> {
             && let Some(attrs) = event["attributes"].as_array()
         {
             for attr in attrs {
-                let key = attr["key"].as_str().unwrap_or("");
-                if key == "poll_id" {
-                    let val = attr["value"].as_str()?;
-                    return Some(val.trim_matches('"').to_string());
+                if attr["key"].as_str() == Some(attr_name) {
+                    return attr["value"]
+                        .as_str()
+                        .map(|v| v.trim_matches('"').to_string());
                 }
             }
         }
     }
-
     None
+}
+
+/// Extract poll_id from the verify_messages tx response events.
+/// Returns None if no poll was created (e.g. message already being verified by active relayers).
+pub fn extract_poll_id(tx_resp: &serde_json::Value) -> Option<String> {
+    find_wasm_attr(tx_resp, "poll_id")
 }
 
 /// Extract a named attribute from wasm events in a tx response.
 pub fn extract_event_attr(tx_resp: &serde_json::Value, attr_name: &str) -> Result<String> {
-    let events = tx_resp
-        .pointer("/tx_response/events")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| eyre::eyre!("no events in tx response"))?;
-
-    for event in events {
-        let event_type = event["type"].as_str().unwrap_or("");
-        if (event_type == "wasm" || event_type.starts_with("wasm-"))
-            && let Some(attrs) = event["attributes"].as_array()
-        {
-            for attr in attrs {
-                let key = attr["key"].as_str().unwrap_or("");
-                if key == attr_name {
-                    let val = attr["value"]
-                        .as_str()
-                        .ok_or_else(|| eyre::eyre!("{attr_name} attribute has no value"))?;
-                    return Ok(val.trim_matches('"').to_string());
-                }
-            }
-        }
-    }
-
-    Err(eyre::eyre!("{attr_name} not found in tx events"))
+    find_wasm_attr(tx_resp, attr_name)
+        .ok_or_else(|| eyre::eyre!("{attr_name} not found in tx events"))
 }
 
 /// Poll the MultisigProver for a proof until it's signed.
