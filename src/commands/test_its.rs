@@ -946,7 +946,9 @@ pub async fn run_config(
     gas_value: Option<u64>,
 ) -> Result<()> {
     let start = Instant::now();
-    let amount = amount.unwrap_or(1_000_000);
+    // `amount` is consumed in Phase B (interchain transfer); silence the unused
+    // binding here without dropping the CLI flag plumbing.
+    let _ = amount;
     let gas_value = gas_value.unwrap_or(10_000_000);
 
     let config_content =
@@ -1009,7 +1011,10 @@ pub async fn run_config(
 
     ui::section(&format!("ITS Test: {src} → {dst}"));
     ui::kv("source", &format!("{src} ({src_axelar_id}, {src_type})"));
-    ui::kv("destination", &format!("{dst} ({dst_axelar_id}, {dst_type})"));
+    ui::kv(
+        "destination",
+        &format!("{dst} ({dst_axelar_id}, {dst_type})"),
+    );
 
     // --- Preflight: derive Axelar wallet, fund checks ---
     let mnemonic = mnemonic_override
@@ -1070,8 +1075,10 @@ pub async fn run_config(
     // --- Resolve contract addresses ---
     let dst_its_proxy = read_contract_address(&config, &dst, "InterchainTokenService")?;
     let dst_evm_gateway = read_contract_address(&config, &dst, "AxelarGateway")?;
-    let src_cosm_gateway =
-        read_axelar_contract_field(&config, &format!("/axelar/contracts/Gateway/{src_axelar_id}/address"))?;
+    let src_cosm_gateway = read_axelar_contract_field(
+        &config,
+        &format!("/axelar/contracts/Gateway/{src_axelar_id}/address"),
+    )?;
     let voting_verifier = read_axelar_contract_field(
         &config,
         &format!("/axelar/contracts/VotingVerifier/{src_axelar_id}/address"),
@@ -1116,7 +1123,11 @@ pub async fn run_config(
         ui::error(&format!(
             "destination ITS at {dst_its_proxy} on {dst} does not trust source chain '{src_axelar_id}'"
         ));
-        let owner = Ownable::new(dst_its_proxy, &dst_provider).owner().call().await.ok();
+        let owner = Ownable::new(dst_its_proxy, &dst_provider)
+            .owner()
+            .call()
+            .await
+            .ok();
         let mut lines: Vec<String> = vec![format!(
             "Set '{src_axelar_id}' as trusted on the destination ITS:"
         )];
@@ -1175,10 +1186,16 @@ pub async fn run_config(
         None,
     )?;
     ui::tx_hash("solana tx", &local_sig);
-    ui::success(&format!("local mint deployed (initial supply {INITIAL_SUPPLY})"));
+    ui::success(&format!(
+        "local mint deployed (initial supply {INITIAL_SUPPLY})"
+    ));
 
     // Step A3: Solana — deploy remote interchain token (fires GMP)
-    ui::step_header(3, PHASE_A_STEPS, "Deploy remote interchain token (Solana → hub)");
+    ui::step_header(
+        3,
+        PHASE_A_STEPS,
+        "Deploy remote interchain token (Solana → hub)",
+    );
     let remote_sig = crate::solana::send_its_deploy_remote_interchain_token(
         &src_rpc,
         &sol_keypair,
@@ -1193,18 +1210,17 @@ pub async fn run_config(
 
     // Read the actual on-chain CallContractEvent. The verifiers will look up
     // the same fields; using on-chain values eliminates encoding-mismatch risk.
-    let (gw_sender, gw_dest_chain, gw_dest_addr, gw_payload_hash, gw_payload) =
-        crate::solana::extract_gateway_call_contract_payload(&src_rpc, &remote_sig)?;
-    ui::kv("gateway sender", &gw_sender);
-    ui::kv("gateway destination_chain", &gw_dest_chain);
-    ui::kv("gateway destination_address", &gw_dest_addr);
+    let gw = crate::solana::extract_gateway_call_contract_payload(&src_rpc, &remote_sig)?;
+    ui::kv("gateway sender", &gw.sender);
+    ui::kv("gateway destination_chain", &gw.destination_chain);
+    ui::kv("gateway destination_address", &gw.destination_address);
     ui::kv(
         "gateway payload_hash",
-        &format!("0x{}", alloy::hex::encode(gw_payload_hash)),
+        &format!("0x{}", alloy::hex::encode(gw.payload_hash)),
     );
     ui::kv(
         "gateway payload (len)",
-        &format!("{} bytes", gw_payload.len()),
+        &format!("{} bytes", gw.payload.len()),
     );
 
     // Sanity: the local reconstruction should match what the gateway actually saw.
@@ -1217,26 +1233,43 @@ pub async fn run_config(
         None,
     )?;
     let local_hash = keccak256(&local_payload);
-    if local_hash.as_slice() != gw_payload_hash {
+    if local_hash.as_slice() != gw.payload_hash {
         ui::warn("local payload reconstruction does not match on-chain payload:");
-        ui::warn(&format!("  local  : 0x{}", alloy::hex::encode(local_hash.as_slice())));
-        ui::warn(&format!("  on-chain: 0x{}", alloy::hex::encode(gw_payload_hash)));
+        ui::warn(&format!(
+            "  local  : 0x{}",
+            alloy::hex::encode(local_hash.as_slice())
+        ));
+        ui::warn(&format!(
+            "  on-chain: 0x{}",
+            alloy::hex::encode(gw.payload_hash)
+        ));
         ui::warn(&format!("  local len: {}", local_payload.len()));
-        ui::warn(&format!("  on-chain len: {}", gw_payload.len()));
-        ui::warn(&format!("  local hex: {}", alloy::hex::encode(&local_payload)));
-        ui::warn(&format!("  chain hex: {}", alloy::hex::encode(&gw_payload)));
+        ui::warn(&format!("  on-chain len: {}", gw.payload.len()));
+        ui::warn(&format!(
+            "  local hex: {}",
+            alloy::hex::encode(&local_payload)
+        ));
+        ui::warn(&format!("  chain hex: {}", alloy::hex::encode(&gw.payload)));
     }
 
     // Use the on-chain values (verifiers will read these from the same tx).
-    let first_leg_payload = gw_payload.clone();
-    let first_leg_payload_hash = FixedBytes::<32>::from(gw_payload_hash);
+    let first_leg_payload = gw.payload.clone();
+    let first_leg_payload_hash = FixedBytes::<32>::from(gw.payload_hash);
+    let gw_sender = gw.sender.clone();
     ui::kv(
         "first-leg payload_hash",
-        &format!("0x{}", alloy::hex::encode(first_leg_payload_hash.as_slice())),
+        &format!(
+            "0x{}",
+            alloy::hex::encode(first_leg_payload_hash.as_slice())
+        ),
     );
 
     // Step A4: drive source → hub via existing relay_to_hub helper
-    ui::step_header(4, PHASE_A_STEPS, "Source → hub (verify, route, hub-execute)");
+    ui::step_header(
+        4,
+        PHASE_A_STEPS,
+        "Source → hub (verify, route, hub-execute)",
+    );
     // The gateway's CallContractEvent.sender is the *caller program*, which for
     // an ITS-routed message is the Solana ITS program ID, not the user's
     // keypair. The voting verifier matches against the on-chain event, so we
@@ -1348,7 +1381,7 @@ fn encode_send_to_hub_deploy(
         destination_chain: destination_chain.to_string(),
         message: inner,
     };
-    Ok(borsh::to_vec(&hub).map_err(|e| eyre::eyre!("borsh encode failed: {e}"))?)
+    borsh::to_vec(&hub).map_err(|e| eyre::eyre!("borsh encode failed: {e}"))
 }
 
 /// Borsh-encode a HubMessage::SendToHub{ InterchainTransfer }.
@@ -1373,7 +1406,7 @@ fn encode_send_to_hub_transfer(
         destination_chain: destination_chain.to_string(),
         message: inner,
     };
-    Ok(borsh::to_vec(&hub).map_err(|e| eyre::eyre!("borsh encode failed: {e}"))?)
+    borsh::to_vec(&hub).map_err(|e| eyre::eyre!("borsh encode failed: {e}"))
 }
 
 /// ABI-encode the inner ITS deploy payload destined for the EVM ITS proxy.
@@ -1481,7 +1514,9 @@ async fn relay_to_destination<P: Provider>(
     }
     if !hub_approved {
         spinner.finish_and_clear();
-        ui::warn("hub never reported the message as approved — proceeding anyway since it may have already been forwarded");
+        ui::warn(
+            "hub never reported the message as approved — proceeding anyway since it may have already been forwarded",
+        );
     }
 
     // Discover the second-leg message_id
@@ -1491,9 +1526,15 @@ async fn relay_to_destination<P: Provider>(
     spinner.finish_and_clear();
     ui::kv("second-leg message_id", &second_leg.message_id);
     ui::kv("second-leg source_chain", &second_leg.source_chain);
-    ui::kv("second-leg destination_chain", &second_leg.destination_chain);
+    ui::kv(
+        "second-leg destination_chain",
+        &second_leg.destination_chain,
+    );
     ui::kv("second-leg source_address", &second_leg.source_address);
-    ui::kv("second-leg destination_address", &second_leg.destination_address);
+    ui::kv(
+        "second-leg destination_address",
+        &second_leg.destination_address,
+    );
     ui::kv("second-leg payload_hash", &second_leg.payload_hash);
 
     // Sanity-check our reconstruction
@@ -1535,10 +1576,7 @@ async fn relay_to_destination<P: Provider>(
             ui::success("destination cosm gateway has the message");
             break;
         }
-        spinner.set_message(format!(
-            "Waiting for routing (attempt {}/120)...",
-            i + 1
-        ));
+        spinner.set_message(format!("Waiting for routing (attempt {}/120)...", i + 1));
     }
     if !routed {
         spinner.finish_and_clear();
@@ -1548,7 +1586,11 @@ async fn relay_to_destination<P: Provider>(
     }
 
     // construct_proof on destination MultisigProver
-    ui::step_header(step_base + 3, PHASE_A_STEPS, "construct_proof on dest MultisigProver");
+    ui::step_header(
+        step_base + 3,
+        PHASE_A_STEPS,
+        "construct_proof on dest MultisigProver",
+    );
     let construct_proof_msg = json!({
         "construct_proof": [{
             "source_chain": "axelar",
@@ -1581,7 +1623,11 @@ async fn relay_to_destination<P: Provider>(
     let execute_data = alloy::hex::decode(execute_data_hex)?;
 
     // Submit to EVM gateway
-    ui::step_header(step_base + 5, PHASE_A_STEPS, "Submit proof to dest EVM gateway");
+    ui::step_header(
+        step_base + 5,
+        PHASE_A_STEPS,
+        "Submit proof to dest EVM gateway",
+    );
     let approve_tx = TransactionRequest::default()
         .to(dst_evm_gateway)
         .input(Bytes::from(execute_data).into());

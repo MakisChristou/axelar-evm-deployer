@@ -1,5 +1,4 @@
 use anchor_lang::InstructionData;
-use base64::Engine;
 use eyre::Result;
 use solana_client::rpc_client::RpcClient;
 use solana_commitment_config::CommitmentConfig;
@@ -45,9 +44,9 @@ pub fn check_solana_balance(
     min_lamports: u64,
 ) -> Result<()> {
     let rpc_client = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
-    let balance = rpc_client
-        .get_balance(pubkey)
-        .map_err(|e| eyre::eyre!("failed to query Solana balance for {pubkey} on {rpc_url}: {e}"))?;
+    let balance = rpc_client.get_balance(pubkey).map_err(|e| {
+        eyre::eyre!("failed to query Solana balance for {pubkey} on {rpc_url}: {e}")
+    })?;
 
     #[allow(clippy::cast_precision_loss)]
     let display = balance as f64 / 1_000_000_000.0;
@@ -618,45 +617,24 @@ fn fetch_confirmed_tx(
     Ok(None)
 }
 
-/// Fetch all `Program data:` log lines from a Solana tx, base64-decode them,
-/// and return the raw event payloads. Each entry is one Anchor `emit_cpi!`
-/// event (8-byte discriminator + borsh-encoded event body).
-pub fn extract_program_data_events(rpc_url: &str, signature_str: &str) -> Result<Vec<Vec<u8>>> {
-    let rpc_client = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
-    let sig: Signature = signature_str
-        .parse()
-        .map_err(|e| eyre::eyre!("invalid signature: {e}"))?;
-    let tx = fetch_confirmed_tx(&rpc_client, &sig)?
-        .ok_or_else(|| eyre::eyre!("could not fetch transaction {signature_str}"))?;
-    let meta = tx
-        .transaction
-        .meta
-        .ok_or_else(|| eyre::eyre!("transaction has no metadata"))?;
-    let logs: Vec<String> = match meta.log_messages {
-        solana_transaction_status::option_serializer::OptionSerializer::Some(logs) => logs,
-        _ => return Err(eyre::eyre!("transaction has no log messages")),
-    };
-    let mut out = Vec::new();
-    for log in &logs {
-        if let Some(b64) = log.strip_prefix("Program data: ") {
-            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64.trim()) {
-                out.push(bytes);
-            }
-        }
-    }
-    Ok(out)
+/// Decoded Solana gateway `CallContractEvent` extracted from a confirmed tx.
+/// `sender` is base58 (the caller program ID for ITS-routed messages).
+pub struct CallContractEventInfo {
+    pub sender: String,
+    pub destination_chain: String,
+    pub destination_address: String,
+    pub payload_hash: [u8; 32],
+    pub payload: Vec<u8>,
 }
 
-/// Find the gateway-emitted CallContractEvent in a Solana tx and return the
-/// raw payload bytes the gateway saw, plus a few other event fields.
-/// Anchor `emit_cpi!` writes events to the program's event-authority via a
-/// CPI whose instruction `data` is
+/// Find the gateway-emitted CallContractEvent in a Solana tx and return its
+/// fields. Anchor `emit_cpi!` writes events to the program's event-authority
+/// via a CPI whose instruction `data` is
 /// `[8-byte EVENT_IX_TAG_LE || 8-byte event-disc || borsh(event)]`.
-/// Returns `(sender_base58, destination_chain, destination_address, payload_hash, payload)`.
 pub fn extract_gateway_call_contract_payload(
     rpc_url: &str,
     signature_str: &str,
-) -> Result<(String, String, String, [u8; 32], Vec<u8>)> {
+) -> Result<CallContractEventInfo> {
     use anchor_lang::Discriminator;
     use solana_transaction_status::{
         UiInnerInstructions, UiInstruction, option_serializer::OptionSerializer,
@@ -698,20 +676,14 @@ pub fn extract_gateway_call_contract_payload(
                     .map_err(|e| eyre::eyre!("decode CallContractEvent failed: {e}"))?;
             // ii.index is the 0-based top-level instruction this group belongs to.
             // inner_pos is the 0-based position within the group.
-            eprintln!(
-                "[debug] CallContractEvent at top-level={} inner-pos={} (1-based: {}.{})",
-                ii.index,
-                inner_pos,
-                ii.index + 1,
-                inner_pos + 1
-            );
-            return Ok((
-                event.sender.to_string(),
-                event.destination_chain,
-                event.destination_contract_address,
-                event.payload_hash,
-                event.payload,
-            ));
+            let _ = inner_pos; // (kept for potential future debug; index is in `ii.index`)
+            return Ok(CallContractEventInfo {
+                sender: event.sender.to_string(),
+                destination_chain: event.destination_chain,
+                destination_address: event.destination_contract_address,
+                payload_hash: event.payload_hash,
+                payload: event.payload,
+            });
         }
     }
 
