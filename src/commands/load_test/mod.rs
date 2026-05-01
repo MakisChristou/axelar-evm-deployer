@@ -519,7 +519,7 @@ fn its_cache_path(src: &str, dst: &str) -> PathBuf {
     data_dir.join(format!("its-load-test-{src}-{dst}.json"))
 }
 
-pub fn read_its_cache(src: &str, dst: &str) -> serde_json::Value {
+pub(super) fn read_its_cache(src: &str, dst: &str) -> serde_json::Value {
     let path = its_cache_path(src, dst);
     std::fs::read_to_string(&path)
         .ok()
@@ -527,7 +527,7 @@ pub fn read_its_cache(src: &str, dst: &str) -> serde_json::Value {
         .unwrap_or_else(|| json!({}))
 }
 
-pub fn save_its_cache(src: &str, dst: &str, cache: &serde_json::Value) -> Result<()> {
+pub(super) fn save_its_cache(src: &str, dst: &str, cache: &serde_json::Value) -> Result<()> {
     let path = its_cache_path(src, dst);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -1307,7 +1307,7 @@ fn list_gateway_chains(config_root: &serde_json::Value) -> Vec<String> {
 }
 
 /// Validate that an RPC endpoint speaks EVM JSON-RPC (eth_chainId).
-pub async fn validate_evm_rpc(rpc_url: &str) -> Result<()> {
+pub(super) async fn validate_evm_rpc(rpc_url: &str) -> Result<()> {
     let provider = ProviderBuilder::new().connect_http(
         rpc_url
             .parse()
@@ -1323,7 +1323,7 @@ pub async fn validate_evm_rpc(rpc_url: &str) -> Result<()> {
 }
 
 /// Validate that an RPC endpoint speaks Solana JSON-RPC (getVersion).
-pub async fn validate_solana_rpc(rpc_url: &str) -> Result<()> {
+pub(super) async fn validate_solana_rpc(rpc_url: &str) -> Result<()> {
     let client = solana_client::nonblocking::rpc_client::RpcClient::new(rpc_url.to_string());
     client.get_version().await.map_err(|_| {
         eyre::eyre!(
