@@ -1194,8 +1194,10 @@ pub async fn verify_onchain<P: Provider>(
         .iter()
         .map(|&idx| {
             let tx = &metrics[idx];
-            let payload_hash = parse_payload_hash(&tx.payload_hash)
-                .expect("payload_hash from confirmed metrics must be 32-byte hex");
+            // Empty when source is Solana ITS (the program builds the payload via
+            // CPI and tx metrics carry no hash). HubApproved+later phases use
+            // source_chain + message_id, so the zero placeholder is fine.
+            let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
             PendingTx {
                 idx,
                 message_id: match source_type {
@@ -1257,8 +1259,10 @@ pub(super) fn tx_to_pending_solana(
     has_voting_verifier: bool,
     source_type: SourceChainType,
 ) -> PendingTx {
-    let payload_hash = parse_payload_hash(&tx.payload_hash)
-        .expect("payload_hash from confirmed metrics must be 32-byte hex");
+    // Empty when source is Solana ITS (the program builds the payload via
+    // CPI and tx metrics carry no hash). HubApproved+later phases use
+    // source_chain + message_id, so the zero placeholder is fine.
+    let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
     let message_id = match source_type {
         SourceChainType::Evm => tx.signature.clone(),
         SourceChainType::Svm => {
@@ -1406,8 +1410,10 @@ pub async fn verify_onchain_solana(
         .iter()
         .map(|&idx| {
             let tx = &metrics[idx];
-            let payload_hash = parse_payload_hash(&tx.payload_hash)
-                .expect("payload_hash from confirmed metrics must be 32-byte hex");
+            // Empty when source is Solana ITS (the program builds the payload via
+            // CPI and tx metrics carry no hash). HubApproved+later phases use
+            // source_chain + message_id, so the zero placeholder is fine.
+            let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
             let message_id = match source_type {
                 SourceChainType::Evm => tx.signature.clone(),
                 SourceChainType::Svm => {
@@ -1523,8 +1529,10 @@ pub async fn verify_onchain_solana_its(
         .iter()
         .map(|&idx| {
             let tx = &metrics[idx];
-            let payload_hash = parse_payload_hash(&tx.payload_hash)
-                .expect("payload_hash from confirmed metrics must be 32-byte hex");
+            // Empty when source is Solana ITS (the program builds the payload via
+            // CPI and tx metrics carry no hash). HubApproved+later phases use
+            // source_chain + message_id, so the zero placeholder is fine.
+            let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
             PendingTx {
                 idx,
                 message_id: tx.signature.clone(),
@@ -1618,8 +1626,10 @@ pub async fn verify_onchain_evm_its(
         .iter()
         .map(|&idx| {
             let tx = &metrics[idx];
-            let payload_hash = parse_payload_hash(&tx.payload_hash)
-                .expect("payload_hash from confirmed metrics must be 32-byte hex");
+            // Empty when source is Solana ITS (the program builds the payload via
+            // CPI and tx metrics carry no hash). HubApproved+later phases use
+            // source_chain + message_id, so the zero placeholder is fine.
+            let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
             PendingTx {
                 idx,
                 message_id: tx.signature.clone(),
