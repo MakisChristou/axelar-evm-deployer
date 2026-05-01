@@ -1147,298 +1147,358 @@ pub async fn run(txid: &str, _solana_rpc: &str) -> Result<()> {
     Ok(())
 }
 
-/// Decode instruction arguments based on the instruction name.
+/// Decode instruction arguments based on the instruction name. Each arm
+/// dispatches to a per-instruction printer so the dispatcher itself stays
+/// simple (one arm per opcode).
 fn decode_instruction_args(ix_name: &str, data: &[u8], indent: &str) {
-    use owo_colors::OwoColorize;
-
     if data.len() <= 8 {
         return;
     }
     let args = &data[8..]; // skip 8-byte discriminator
 
     match ix_name {
-        "CallContract" => {
-            if let Ok((dest_chain, rest)) = decode_borsh_string(args) {
-                println!("{indent}{} \"{dest_chain}\"", "destination_chain:".dimmed());
-                if let Ok((dest_addr, rest)) = decode_borsh_string(rest) {
-                    println!(
-                        "{indent}{} \"{dest_addr}\"",
-                        "destination_address:".dimmed()
-                    );
-                    if let Ok((payload_str, _)) = decode_borsh_bytes(rest) {
-                        let (size, content) = decode_payload(&payload_str);
-                        match content {
-                            Some(decoded) => {
-                                println!("{indent}{} {size} → {decoded}", "payload:".dimmed())
-                            }
-                            None => println!("{indent}{} {size}", "payload:".dimmed()),
-                        }
-                    }
-                }
-            }
-        }
-        "PayGas" => {
-            if let Ok((dest_chain, rest)) = decode_borsh_string(args) {
-                println!("{indent}{} \"{dest_chain}\"", "destination_chain:".dimmed());
-                if let Ok((dest_addr, rest)) = decode_borsh_string(rest) {
-                    println!(
-                        "{indent}{} \"{dest_addr}\"",
-                        "destination_address:".dimmed()
-                    );
-                    if rest.len() >= 32 {
-                        println!(
-                            "{indent}{} {}",
-                            "payload_hash:".dimmed(),
-                            hex::encode(&rest[..32])
-                        );
-                        let rest = &rest[32..];
-                        if rest.len() >= 8 {
-                            let gas = u64::from_le_bytes(rest[..8].try_into().unwrap_or_default());
-                            println!("{indent}{} {gas} lamports", "gas_amount:".dimmed());
-                        }
-                    }
-                }
-            }
-        }
-        "InitializePayloadVerificationSession" => {
-            if args.len() >= 33 {
-                println!(
-                    "{indent}{} {}",
-                    "merkle_root:".dimmed(),
-                    hex::encode(&args[..32])
-                );
-                let payload_type = match args[32] {
-                    0 => "ApproveMessages",
-                    1 => "RotateSigners",
-                    _ => "Unknown",
-                };
-                println!("{indent}{} {payload_type}", "payload_type:".dimmed());
-            }
-        }
-        "VerifySignature" => {
-            // payload_merkle_root: [u8;32]
-            // verifier_info: SigningVerifierSetInfo {
-            //   signature: [u8;65], leaf: VerifierSetLeaf { nonce: u64, quorum: u128,
-            //   signer_pubkey: [u8;33], signer_weight: u128, position: u16, set_size: u16,
-            //   domain_separator: [u8;32] }, merkle_proof: Vec<u8>, payload_type: u8 }
-            if args.len() >= 32 {
-                println!(
-                    "{indent}{} {}",
-                    "payload_merkle_root:".dimmed(),
-                    hex::encode(&args[..32])
-                );
-                let rest = &args[32..];
-                // signature (65 bytes) + leaf fields
-                if rest.len() >= 65 + 8 + 16 + 33 + 16 + 2 + 2 + 32 {
-                    let sig = &rest[..65];
-                    println!("{indent}{} 0x{}", "signature:".dimmed(), hex::encode(sig));
-                    let leaf = &rest[65..];
-                    let nonce = u64::from_le_bytes(leaf[..8].try_into().unwrap_or_default());
-                    let quorum = u128::from_le_bytes(leaf[8..24].try_into().unwrap_or_default());
-                    let signer_pubkey = hex::encode(&leaf[24..57]);
-                    let signer_weight =
-                        u128::from_le_bytes(leaf[57..73].try_into().unwrap_or_default());
-                    let position = u16::from_le_bytes(leaf[73..75].try_into().unwrap_or_default());
-                    let set_size = u16::from_le_bytes(leaf[75..77].try_into().unwrap_or_default());
-                    println!("{indent}{} 0x{signer_pubkey}", "signer:".dimmed(),);
-                    println!(
-                        "{indent}{} {signer_weight} (quorum: {quorum})",
-                        "weight:".dimmed(),
-                    );
-                    println!(
-                        "{indent}{} {position}/{set_size} (nonce: {nonce})",
-                        "position:".dimmed(),
-                    );
-                    let rest = &leaf[77 + 32..]; // skip domain_separator
-                    if let Ok((proof, rest)) = decode_borsh_bytes(rest) {
-                        println!("{indent}{} {} bytes", "merkle_proof:".dimmed(), proof.len());
-                        if !rest.is_empty() {
-                            let payload_type = match rest[0] {
-                                0 => "ApproveMessages",
-                                1 => "RotateSigners",
-                                _ => "Unknown",
-                            };
-                            println!("{indent}{} {payload_type}", "payload_type:".dimmed());
-                        }
-                    }
-                }
-            }
-        }
-        "SendMemo" => {
-            if let Ok((dest_chain, rest)) = decode_borsh_string(args) {
-                println!("{indent}{} \"{dest_chain}\"", "destination_chain:".dimmed());
-                if let Ok((dest_addr, rest)) = decode_borsh_string(rest) {
-                    println!(
-                        "{indent}{} \"{dest_addr}\"",
-                        "destination_address:".dimmed()
-                    );
-                    if let Ok((memo, _)) = decode_borsh_string(rest) {
-                        println!("{indent}{} \"{memo}\"", "memo:".dimmed());
-                    }
-                }
-            }
-        }
-        "InterchainTransfer" => {
-            if args.len() >= 32 {
-                println!(
-                    "{indent}{} {}",
-                    "token_id:".dimmed(),
-                    hex::encode(&args[..32])
-                );
-                let rest = &args[32..];
-                if let Ok((dest_chain, rest)) = decode_borsh_string(rest) {
-                    println!("{indent}{} \"{dest_chain}\"", "destination_chain:".dimmed());
-                    if let Ok((dest_addr_bytes, rest)) = decode_borsh_bytes(rest) {
-                        let dest_addr = format_address_bytes(&dest_addr_bytes);
-                        println!("{indent}{} {dest_addr}", "destination_address:".dimmed());
-                        if rest.len() >= 16 {
-                            let amount =
-                                u64::from_le_bytes(rest[..8].try_into().unwrap_or_default());
-                            let gas_value =
-                                u64::from_le_bytes(rest[8..16].try_into().unwrap_or_default());
-                            println!("{indent}{} {amount}", "amount:".dimmed());
-                            println!("{indent}{} {gas_value} lamports", "gas_value:".dimmed());
-                        }
-                    }
-                }
-            }
-        }
-        "Execute" => {
-            // Message { cc_id: CrossChainId { chain: String, id: String },
-            //   source_address: String, destination_chain: String,
-            //   destination_address: String, payload_hash: [u8;32] }
-            // payload: Vec<u8>
-            if let Ok((chain, rest)) = decode_borsh_string(args)
-                && let Ok((id, rest)) = decode_borsh_string(rest)
-            {
-                println!("{indent}{} {chain}-{id}", "cc_id:".dimmed());
-                if let Ok((source_addr, rest)) = decode_borsh_string(rest) {
-                    println!("{indent}{} \"{source_addr}\"", "source_address:".dimmed());
-                    if let Ok((dest_chain, rest)) = decode_borsh_string(rest)
-                        && let Ok((dest_addr, rest)) = decode_borsh_string(rest)
-                    {
-                        println!("{indent}{} \"{dest_chain}\"", "destination_chain:".dimmed());
-                        println!(
-                            "{indent}{} \"{dest_addr}\"",
-                            "destination_address:".dimmed()
-                        );
-                        if rest.len() >= 32 {
-                            println!(
-                                "{indent}{} {}",
-                                "payload_hash:".dimmed(),
-                                hex::encode(&rest[..32])
-                            );
-                            let rest = &rest[32..];
-                            if let Ok((payload_bytes, _)) = decode_borsh_bytes(rest) {
-                                let (size, content) = decode_payload(&payload_bytes);
-                                let payload_line = match content {
-                                    Some(decoded) => format!("{size} → {decoded}"),
-                                    None => size,
-                                };
-                                for (j, line) in payload_line.lines().enumerate() {
-                                    if j == 0 {
-                                        println!("{indent}{} {line}", "payload:".dimmed());
-                                    } else {
-                                        println!("{indent}{line}");
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        "CallContract" => print_call_contract_args(args, indent),
+        "PayGas" => print_pay_gas_args(args, indent),
+        "InitializePayloadVerificationSession" => print_init_payload_session_args(args, indent),
+        "VerifySignature" => print_verify_signature_args(args, indent),
+        "SendMemo" => print_send_memo_args(args, indent),
+        "InterchainTransfer" => print_interchain_transfer_args(args, indent),
+        "Execute" => print_execute_args(args, indent),
         "ValidateMessage" | "ApproveMessage" => {
-            // Both take a Message (or MerklizedMessage containing a Message) as first arg.
-            // MerklizedMessage: MessageLeaf { Message, position, set_size, domain_sep } + proof
-            // Message: CrossChainId { chain, id }, source_address, dest_chain, dest_addr, payload_hash
-            if let Ok((chain, rest)) = decode_borsh_string(args)
-                && let Ok((id, rest)) = decode_borsh_string(rest)
-            {
-                println!("{indent}{} {chain}-{id}", "cc_id:".dimmed());
-                if let Ok((source_addr, rest)) = decode_borsh_string(rest)
-                    && let Ok((dest_chain, rest)) = decode_borsh_string(rest)
-                    && let Ok((dest_addr, rest)) = decode_borsh_string(rest)
-                {
-                    println!("{indent}{} \"{source_addr}\"", "source_address:".dimmed());
-                    println!("{indent}{} \"{dest_chain}\"", "destination_chain:".dimmed());
-                    println!(
-                        "{indent}{} \"{dest_addr}\"",
-                        "destination_address:".dimmed()
-                    );
-                    if rest.len() >= 32 {
-                        println!(
-                            "{indent}{} {}",
-                            "payload_hash:".dimmed(),
-                            hex::encode(&rest[..32])
-                        );
-                    }
-                }
-            }
+            print_validate_or_approve_message_args(args, indent)
         }
-        "ExecuteDeployInterchainToken" => {
-            // token_id: [u8;32], name: String, symbol: String, decimals: u8, minter: Vec<u8>
-            if args.len() >= 32 {
-                println!(
-                    "{indent}{} {}",
-                    "token_id:".dimmed(),
-                    hex::encode(&args[..32])
-                );
-                let rest = &args[32..];
-                if let Ok((name, rest)) = decode_borsh_string(rest)
-                    && let Ok((symbol, rest)) = decode_borsh_string(rest)
-                    && !rest.is_empty()
-                {
-                    println!("{indent}{} \"{name}\"", "name:".dimmed());
-                    println!("{indent}{} \"{symbol}\"", "symbol:".dimmed());
-                    println!("{indent}{} {}", "decimals:".dimmed(), rest[0]);
-                }
-            }
+        "ExecuteDeployInterchainToken" => print_execute_deploy_interchain_token_args(args, indent),
+        "ExecuteInterchainTransfer" => print_execute_interchain_transfer_args(args, indent),
+        _ => print_unknown_args(args, indent),
+    }
+}
+
+fn print_call_contract_args(args: &[u8], indent: &str) {
+    let Ok((dest_chain, rest)) = decode_borsh_string(args) else {
+        return;
+    };
+    println!("{indent}{} \"{dest_chain}\"", "destination_chain:".dimmed());
+    let Ok((dest_addr, rest)) = decode_borsh_string(rest) else {
+        return;
+    };
+    println!(
+        "{indent}{} \"{dest_addr}\"",
+        "destination_address:".dimmed()
+    );
+    if let Ok((payload_str, _)) = decode_borsh_bytes(rest) {
+        let (size, content) = decode_payload(&payload_str);
+        match content {
+            Some(decoded) => println!("{indent}{} {size} → {decoded}", "payload:".dimmed()),
+            None => println!("{indent}{} {size}", "payload:".dimmed()),
         }
-        "ExecuteInterchainTransfer" => {
-            // Anchor #[instruction] order: message: Message, source_chain: String,
-            // source_address: Vec<u8>, destination_address: Pubkey,
-            // token_id: [u8;32], amount: u64, data: Vec<u8>
-            // Skip the Message struct, parse from source_chain onward
-            if let Ok((_chain, rest)) = decode_borsh_string(args)
-                && let Ok((_id, rest)) = decode_borsh_string(rest)
-                && let Ok((_src_addr, rest)) = decode_borsh_string(rest)
-                && let Ok((_dest_chain, rest)) = decode_borsh_string(rest)
-                && let Ok((_dest_addr, rest)) = decode_borsh_string(rest)
-                && rest.len() >= 32
-            {
-                // Past the Message, now: source_chain, source_address, dest, token_id, amount
-                let rest = &rest[32..]; // skip payload_hash
-                if let Ok((source_chain, rest)) = decode_borsh_string(rest) {
-                    println!("{indent}{} \"{source_chain}\"", "source_chain:".dimmed());
-                    if let Ok((source_addr, rest)) = decode_borsh_bytes(rest) {
-                        println!(
-                            "{indent}{} {}",
-                            "source_address:".dimmed(),
-                            format_address_bytes(&source_addr)
-                        );
-                        if rest.len() >= 72 {
-                            let dest = Pubkey::try_from(&rest[..32]).ok();
-                            let token_id = hex::encode(&rest[32..64]);
-                            let amount =
-                                u64::from_le_bytes(rest[64..72].try_into().unwrap_or_default());
-                            println!("{indent}{} {token_id}", "token_id:".dimmed());
-                            if let Some(dest) = dest {
-                                println!("{indent}{} {dest}", "destination:".dimmed());
-                            }
-                            println!("{indent}{} {amount}", "amount:".dimmed());
-                        }
-                    }
-                }
-            }
+    }
+}
+
+fn print_pay_gas_args(args: &[u8], indent: &str) {
+    let Ok((dest_chain, rest)) = decode_borsh_string(args) else {
+        return;
+    };
+    println!("{indent}{} \"{dest_chain}\"", "destination_chain:".dimmed());
+    let Ok((dest_addr, rest)) = decode_borsh_string(rest) else {
+        return;
+    };
+    println!(
+        "{indent}{} \"{dest_addr}\"",
+        "destination_address:".dimmed()
+    );
+    if rest.len() < 32 {
+        return;
+    }
+    println!(
+        "{indent}{} {}",
+        "payload_hash:".dimmed(),
+        hex::encode(&rest[..32])
+    );
+    let rest = &rest[32..];
+    if rest.len() >= 8 {
+        let gas = u64::from_le_bytes(rest[..8].try_into().unwrap_or_default());
+        println!("{indent}{} {gas} lamports", "gas_amount:".dimmed());
+    }
+}
+
+fn print_init_payload_session_args(args: &[u8], indent: &str) {
+    if args.len() < 33 {
+        return;
+    }
+    println!(
+        "{indent}{} {}",
+        "merkle_root:".dimmed(),
+        hex::encode(&args[..32])
+    );
+    let payload_type = match args[32] {
+        0 => "ApproveMessages",
+        1 => "RotateSigners",
+        _ => "Unknown",
+    };
+    println!("{indent}{} {payload_type}", "payload_type:".dimmed());
+}
+
+// payload_merkle_root: [u8;32]
+// verifier_info: SigningVerifierSetInfo {
+//   signature: [u8;65], leaf: VerifierSetLeaf { nonce: u64, quorum: u128,
+//   signer_pubkey: [u8;33], signer_weight: u128, position: u16, set_size: u16,
+//   domain_separator: [u8;32] }, merkle_proof: Vec<u8>, payload_type: u8 }
+fn print_verify_signature_args(args: &[u8], indent: &str) {
+    if args.len() < 32 {
+        return;
+    }
+    println!(
+        "{indent}{} {}",
+        "payload_merkle_root:".dimmed(),
+        hex::encode(&args[..32])
+    );
+    let rest = &args[32..];
+    if rest.len() < 65 + 8 + 16 + 33 + 16 + 2 + 2 + 32 {
+        return;
+    }
+    let sig = &rest[..65];
+    println!("{indent}{} 0x{}", "signature:".dimmed(), hex::encode(sig));
+    let leaf = &rest[65..];
+    let nonce = u64::from_le_bytes(leaf[..8].try_into().unwrap_or_default());
+    let quorum = u128::from_le_bytes(leaf[8..24].try_into().unwrap_or_default());
+    let signer_pubkey = hex::encode(&leaf[24..57]);
+    let signer_weight = u128::from_le_bytes(leaf[57..73].try_into().unwrap_or_default());
+    let position = u16::from_le_bytes(leaf[73..75].try_into().unwrap_or_default());
+    let set_size = u16::from_le_bytes(leaf[75..77].try_into().unwrap_or_default());
+    println!("{indent}{} 0x{signer_pubkey}", "signer:".dimmed());
+    println!(
+        "{indent}{} {signer_weight} (quorum: {quorum})",
+        "weight:".dimmed()
+    );
+    println!(
+        "{indent}{} {position}/{set_size} (nonce: {nonce})",
+        "position:".dimmed()
+    );
+    let rest = &leaf[77 + 32..]; // skip domain_separator
+    if let Ok((proof, rest)) = decode_borsh_bytes(rest) {
+        println!("{indent}{} {} bytes", "merkle_proof:".dimmed(), proof.len());
+        if !rest.is_empty() {
+            let payload_type = match rest[0] {
+                0 => "ApproveMessages",
+                1 => "RotateSigners",
+                _ => "Unknown",
+            };
+            println!("{indent}{} {payload_type}", "payload_type:".dimmed());
         }
-        _ => {
-            if args.len() <= 64 {
-                println!("{indent}{} {}", "data:".dimmed(), hex::encode(args));
+    }
+}
+
+fn print_send_memo_args(args: &[u8], indent: &str) {
+    let Ok((dest_chain, rest)) = decode_borsh_string(args) else {
+        return;
+    };
+    println!("{indent}{} \"{dest_chain}\"", "destination_chain:".dimmed());
+    let Ok((dest_addr, rest)) = decode_borsh_string(rest) else {
+        return;
+    };
+    println!(
+        "{indent}{} \"{dest_addr}\"",
+        "destination_address:".dimmed()
+    );
+    if let Ok((memo, _)) = decode_borsh_string(rest) {
+        println!("{indent}{} \"{memo}\"", "memo:".dimmed());
+    }
+}
+
+fn print_interchain_transfer_args(args: &[u8], indent: &str) {
+    if args.len() < 32 {
+        return;
+    }
+    println!(
+        "{indent}{} {}",
+        "token_id:".dimmed(),
+        hex::encode(&args[..32])
+    );
+    let rest = &args[32..];
+    let Ok((dest_chain, rest)) = decode_borsh_string(rest) else {
+        return;
+    };
+    println!("{indent}{} \"{dest_chain}\"", "destination_chain:".dimmed());
+    let Ok((dest_addr_bytes, rest)) = decode_borsh_bytes(rest) else {
+        return;
+    };
+    let dest_addr = format_address_bytes(&dest_addr_bytes);
+    println!("{indent}{} {dest_addr}", "destination_address:".dimmed());
+    if rest.len() >= 16 {
+        let amount = u64::from_le_bytes(rest[..8].try_into().unwrap_or_default());
+        let gas_value = u64::from_le_bytes(rest[8..16].try_into().unwrap_or_default());
+        println!("{indent}{} {amount}", "amount:".dimmed());
+        println!("{indent}{} {gas_value} lamports", "gas_value:".dimmed());
+    }
+}
+
+// Message { cc_id: CrossChainId { chain: String, id: String },
+//   source_address: String, destination_chain: String,
+//   destination_address: String, payload_hash: [u8;32] }
+// payload: Vec<u8>
+fn print_execute_args(args: &[u8], indent: &str) {
+    let Ok((chain, rest)) = decode_borsh_string(args) else {
+        return;
+    };
+    let Ok((id, rest)) = decode_borsh_string(rest) else {
+        return;
+    };
+    println!("{indent}{} {chain}-{id}", "cc_id:".dimmed());
+    let Ok((source_addr, rest)) = decode_borsh_string(rest) else {
+        return;
+    };
+    println!("{indent}{} \"{source_addr}\"", "source_address:".dimmed());
+    let Ok((dest_chain, rest)) = decode_borsh_string(rest) else {
+        return;
+    };
+    let Ok((dest_addr, rest)) = decode_borsh_string(rest) else {
+        return;
+    };
+    println!("{indent}{} \"{dest_chain}\"", "destination_chain:".dimmed());
+    println!(
+        "{indent}{} \"{dest_addr}\"",
+        "destination_address:".dimmed()
+    );
+    if rest.len() < 32 {
+        return;
+    }
+    println!(
+        "{indent}{} {}",
+        "payload_hash:".dimmed(),
+        hex::encode(&rest[..32])
+    );
+    let rest = &rest[32..];
+    if let Ok((payload_bytes, _)) = decode_borsh_bytes(rest) {
+        let (size, content) = decode_payload(&payload_bytes);
+        let payload_line = match content {
+            Some(decoded) => format!("{size} → {decoded}"),
+            None => size,
+        };
+        for (j, line) in payload_line.lines().enumerate() {
+            if j == 0 {
+                println!("{indent}{} {line}", "payload:".dimmed());
             } else {
-                println!("{indent}{} {} bytes", "data:".dimmed(), args.len());
+                println!("{indent}{line}");
             }
         }
+    }
+}
+
+// Both ValidateMessage and ApproveMessage take a Message (or MerklizedMessage
+// containing a Message) as first arg.
+// MerklizedMessage: MessageLeaf { Message, position, set_size, domain_sep } + proof
+// Message: CrossChainId { chain, id }, source_address, dest_chain, dest_addr, payload_hash
+fn print_validate_or_approve_message_args(args: &[u8], indent: &str) {
+    let Ok((chain, rest)) = decode_borsh_string(args) else {
+        return;
+    };
+    let Ok((id, rest)) = decode_borsh_string(rest) else {
+        return;
+    };
+    println!("{indent}{} {chain}-{id}", "cc_id:".dimmed());
+    let Ok((source_addr, rest)) = decode_borsh_string(rest) else {
+        return;
+    };
+    let Ok((dest_chain, rest)) = decode_borsh_string(rest) else {
+        return;
+    };
+    let Ok((dest_addr, rest)) = decode_borsh_string(rest) else {
+        return;
+    };
+    println!("{indent}{} \"{source_addr}\"", "source_address:".dimmed());
+    println!("{indent}{} \"{dest_chain}\"", "destination_chain:".dimmed());
+    println!(
+        "{indent}{} \"{dest_addr}\"",
+        "destination_address:".dimmed()
+    );
+    if rest.len() >= 32 {
+        println!(
+            "{indent}{} {}",
+            "payload_hash:".dimmed(),
+            hex::encode(&rest[..32])
+        );
+    }
+}
+
+// token_id: [u8;32], name: String, symbol: String, decimals: u8, minter: Vec<u8>
+fn print_execute_deploy_interchain_token_args(args: &[u8], indent: &str) {
+    if args.len() < 32 {
+        return;
+    }
+    println!(
+        "{indent}{} {}",
+        "token_id:".dimmed(),
+        hex::encode(&args[..32])
+    );
+    let rest = &args[32..];
+    let Ok((name, rest)) = decode_borsh_string(rest) else {
+        return;
+    };
+    let Ok((symbol, rest)) = decode_borsh_string(rest) else {
+        return;
+    };
+    if rest.is_empty() {
+        return;
+    }
+    println!("{indent}{} \"{name}\"", "name:".dimmed());
+    println!("{indent}{} \"{symbol}\"", "symbol:".dimmed());
+    println!("{indent}{} {}", "decimals:".dimmed(), rest[0]);
+}
+
+// Anchor #[instruction] order: message: Message, source_chain: String,
+// source_address: Vec<u8>, destination_address: Pubkey,
+// token_id: [u8;32], amount: u64, data: Vec<u8>
+// Skip the Message struct, parse from source_chain onward.
+fn print_execute_interchain_transfer_args(args: &[u8], indent: &str) {
+    let Ok((_chain, rest)) = decode_borsh_string(args) else {
+        return;
+    };
+    let Ok((_id, rest)) = decode_borsh_string(rest) else {
+        return;
+    };
+    let Ok((_src_addr, rest)) = decode_borsh_string(rest) else {
+        return;
+    };
+    let Ok((_dest_chain, rest)) = decode_borsh_string(rest) else {
+        return;
+    };
+    let Ok((_dest_addr, rest)) = decode_borsh_string(rest) else {
+        return;
+    };
+    if rest.len() < 32 {
+        return;
+    }
+    let rest = &rest[32..]; // skip payload_hash
+    let Ok((source_chain, rest)) = decode_borsh_string(rest) else {
+        return;
+    };
+    println!("{indent}{} \"{source_chain}\"", "source_chain:".dimmed());
+    let Ok((source_addr, rest)) = decode_borsh_bytes(rest) else {
+        return;
+    };
+    println!(
+        "{indent}{} {}",
+        "source_address:".dimmed(),
+        format_address_bytes(&source_addr)
+    );
+    if rest.len() < 72 {
+        return;
+    }
+    let dest = Pubkey::try_from(&rest[..32]).ok();
+    let token_id = hex::encode(&rest[32..64]);
+    let amount = u64::from_le_bytes(rest[64..72].try_into().unwrap_or_default());
+    println!("{indent}{} {token_id}", "token_id:".dimmed());
+    if let Some(dest) = dest {
+        println!("{indent}{} {dest}", "destination:".dimmed());
+    }
+    println!("{indent}{} {amount}", "amount:".dimmed());
+}
+
+fn print_unknown_args(args: &[u8], indent: &str) {
+    if args.len() <= 64 {
+        println!("{indent}{} {}", "data:".dimmed(), hex::encode(args));
+    } else {
+        println!("{indent}{} {} bytes", "data:".dimmed(), args.len());
     }
 }
 
