@@ -18,7 +18,6 @@ struct EvmContractEntry {
     network: String,
     chain_name: String,
     rpc_url: String,
-    _contract_type: String,
     label: String,
     address: Address,
 }
@@ -103,7 +102,6 @@ fn discover_contracts(
                         network: network.clone(),
                         chain_name: chain_name.clone(),
                         rpc_url: rpc_url.clone(),
-                        _contract_type: prog_type.to_string(),
                         label: label.to_string(),
                         address,
                     });
