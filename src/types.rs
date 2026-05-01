@@ -14,6 +14,7 @@
 use std::fmt;
 use std::str::FromStr;
 
+use alloy::primitives::{Address, address};
 use eyre::{Result, eyre};
 
 // ---------------------------------------------------------------------------
@@ -116,7 +117,39 @@ impl Network {
             Self::DevnetAmplifier
         }
     }
+
+    /// Axelar's canonical relayer/operator wallets for this network. Every new
+    /// EVM GMP deployment registers these with the chain's `Operators`
+    /// contract so the protocol's relayers can call `executeMessage`.
+    ///
+    /// Source of truth: `axelar-contract-deployments/releases/evm/EVM-GMP-Release-Template.md`.
+    /// Update both places together when Axelar rotates these keys.
+    pub const fn axelar_operators(self) -> &'static [Address] {
+        match self {
+            Self::Mainnet => &MAINNET_OPERATORS,
+            Self::Testnet => &TESTNET_OPERATORS,
+            Self::Stagenet => &STAGENET_OPERATORS,
+            Self::DevnetAmplifier => &DEVNET_AMPLIFIER_OPERATORS,
+        }
+    }
 }
+
+const MAINNET_OPERATORS: [Address; 2] = [
+    address!("0x0CDeE446bD3c2E0D11568eeDB859Aa7112BE657a"),
+    address!("0x1a07a2Ee043Dd3922448CD53D20Aae88a67e486E"),
+];
+const TESTNET_OPERATORS: [Address; 2] = [
+    address!("0x8f23e84c49624a22e8c252684129910509ade4e2"),
+    address!("0x3b401fa00191acb03c24ebb7754fe35d34dd1abd"),
+];
+const STAGENET_OPERATORS: [Address; 2] = [
+    address!("0x7054acf1b2d01e33b86235458edf0046cc354293"),
+    address!("0xf669ed1ebc608c48f58b6e290df566ede7fb1103"),
+];
+const DEVNET_AMPLIFIER_OPERATORS: [Address; 2] = [
+    address!("0x01c793e1F8185a2527C5a2Ef3b4a3FBCb8982690"),
+    address!("0xDb32E08fd5d6823E7f0298963E487d5df4e54b1E"),
+];
 
 impl fmt::Display for Network {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
