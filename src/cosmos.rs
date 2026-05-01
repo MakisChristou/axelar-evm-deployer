@@ -623,13 +623,23 @@ pub async fn discover_second_leg(
             get_attr("destination_chain"),
             get_attr("payload_hash"),
         ) {
+            // source_address and destination_address are required — they're
+            // used downstream by the EVM approval check. An empty fallback
+            // would silently make `isContractCallApproved` return false
+            // forever. If the wasm-routing event is missing them, fail loud.
+            let source_address = get_attr("source_address").ok_or_else(|| {
+                eyre::eyre!("wasm-routing event missing 'source_address' attribute")
+            })?;
+            let destination_address = get_attr("destination_address").ok_or_else(|| {
+                eyre::eyre!("wasm-routing event missing 'destination_address' attribute")
+            })?;
             return Ok(Some(SecondLegInfo {
                 message_id: msg_id,
                 source_chain: src,
                 destination_chain: dst,
                 payload_hash: ph,
-                source_address: get_attr("source_address").unwrap_or_default(),
-                destination_address: get_attr("destination_address").unwrap_or_default(),
+                source_address,
+                destination_address,
             }));
         }
     }
@@ -691,11 +701,12 @@ pub async fn check_hub_approved(
 pub async fn rpc_block_time(rpc: &str, height: u64) -> Result<String> {
     let url = format!("{rpc}/block?height={height}");
     let resp: Value = reqwest::get(&url).await?.json().await?;
-    Ok(resp
-        .pointer("/result/block/header/time")
+    resp.pointer("/result/block/header/time")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
-        .unwrap_or_default())
+        .ok_or_else(|| {
+            eyre::eyre!("RPC response missing /result/block/header/time at height {height}")
+        })
 }
 
 /// Fetch the current verifier set from Axelar chain via LCD REST endpoint.

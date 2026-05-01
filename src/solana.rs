@@ -667,7 +667,9 @@ pub fn extract_gateway_call_contract_payload(
                 UiInstruction::Compiled(c) => c,
                 _ => continue,
             };
-            let data = bs58::decode(&ix.data).into_vec().unwrap_or_default();
+            let data = bs58::decode(&ix.data)
+                .into_vec()
+                .map_err(|e| eyre::eyre!("inner instruction data not valid base58: {e}"))?;
             if data.len() < 16 || data[..8] != EVENT_IX_TAG_LE || &data[8..16] != want_disc {
                 continue;
             }

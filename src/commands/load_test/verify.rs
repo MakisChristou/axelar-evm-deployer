@@ -264,7 +264,12 @@ impl<P: Provider> DestinationChecker<'_, P> {
             }
             Self::Solana { rpc_client, .. } => {
                 let client = rpc_client.clone();
-                let cmd_id = tx.command_id.unwrap_or_default();
+                // command_id must be set by the time we're checking Solana approval —
+                // the GMP path derives it up front, the ITS path populates it on
+                // second-leg discovery. None here is a flow bug, not "not yet".
+                let cmd_id = tx.command_id.ok_or_else(|| {
+                    eyre::eyre!("command_id not set when checking Solana approval")
+                })?;
                 let result = tokio::task::spawn_blocking(move || {
                     check_solana_incoming_message(&client, &cmd_id)
                 })
@@ -300,7 +305,9 @@ impl<P: Provider> DestinationChecker<'_, P> {
             }
             Self::Solana { rpc_client, .. } => {
                 let client = rpc_client.clone();
-                let cmd_id = tx.command_id.unwrap_or_default();
+                let cmd_id = tx.command_id.ok_or_else(|| {
+                    eyre::eyre!("command_id not set when checking Solana execution")
+                })?;
                 let result = tokio::task::spawn_blocking(move || {
                     check_solana_incoming_message(&client, &cmd_id)
                 })
@@ -1190,7 +1197,8 @@ pub async fn verify_onchain<P: Provider>(
         .iter()
         .map(|&idx| {
             let tx = &metrics[idx];
-            let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
+            let payload_hash = parse_payload_hash(&tx.payload_hash)
+                .expect("payload_hash from confirmed metrics must be 32-byte hex");
             PendingTx {
                 idx,
                 message_id: match source_type {
@@ -1252,7 +1260,8 @@ pub(super) fn tx_to_pending_solana(
     has_voting_verifier: bool,
     source_type: SourceChainType,
 ) -> PendingTx {
-    let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
+    let payload_hash = parse_payload_hash(&tx.payload_hash)
+        .expect("payload_hash from confirmed metrics must be 32-byte hex");
     let message_id = match source_type {
         SourceChainType::Evm => tx.signature.clone(),
         SourceChainType::Svm => {
@@ -1403,7 +1412,8 @@ pub async fn verify_onchain_solana(
         .iter()
         .map(|&idx| {
             let tx = &metrics[idx];
-            let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
+            let payload_hash = parse_payload_hash(&tx.payload_hash)
+                .expect("payload_hash from confirmed metrics must be 32-byte hex");
             let message_id = match source_type {
                 SourceChainType::Evm => tx.signature.clone(),
                 SourceChainType::Svm => {
@@ -1522,7 +1532,8 @@ pub async fn verify_onchain_solana_its(
         .iter()
         .map(|&idx| {
             let tx = &metrics[idx];
-            let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
+            let payload_hash = parse_payload_hash(&tx.payload_hash)
+                .expect("payload_hash from confirmed metrics must be 32-byte hex");
             PendingTx {
                 idx,
                 message_id: tx.signature.clone(),
@@ -1616,7 +1627,8 @@ pub async fn verify_onchain_evm_its(
         .iter()
         .map(|&idx| {
             let tx = &metrics[idx];
-            let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
+            let payload_hash = parse_payload_hash(&tx.payload_hash)
+                .expect("payload_hash from confirmed metrics must be 32-byte hex");
             PendingTx {
                 idx,
                 message_id: tx.signature.clone(),
@@ -1788,7 +1800,9 @@ async fn poll_pipeline_its_hub_evm<P: Provider>(
                         Phase::Approved => {
                             let sl_id = second_leg_id.as_deref().unwrap_or("");
                             let sl_ph = second_leg_ph.as_deref().unwrap_or("");
-                            let ph = parse_payload_hash(sl_ph).unwrap_or_default();
+                            let ph = parse_payload_hash(sl_ph).expect(
+                                "second-leg payload_hash from cosmos event must be 32-byte hex",
+                            );
                             let sl_src_addr = second_leg_src.as_deref().unwrap_or("");
                             let sl_dst_addr: Address = second_leg_dst
                                 .as_deref()
@@ -1815,7 +1829,9 @@ async fn poll_pipeline_its_hub_evm<P: Provider>(
                         Phase::Executed => {
                             let sl_id = second_leg_id.as_deref().unwrap_or("");
                             let sl_ph = second_leg_ph.as_deref().unwrap_or("");
-                            let ph = parse_payload_hash(sl_ph).unwrap_or_default();
+                            let ph = parse_payload_hash(sl_ph).expect(
+                                "second-leg payload_hash from cosmos event must be 32-byte hex",
+                            );
                             let sl_src_addr = second_leg_src.as_deref().unwrap_or("");
                             let sl_dst_addr: Address = second_leg_dst
                                 .as_deref()
@@ -2116,7 +2132,8 @@ pub async fn wait_for_its_remote_deploy(
             DeployPhase::Approved => {
                 let sl_id = second_leg_id.as_deref().unwrap_or("");
                 let sl_ph_str = second_leg_ph.as_deref().unwrap_or("");
-                let ph = parse_payload_hash(sl_ph_str).unwrap_or_default();
+                let ph = parse_payload_hash(sl_ph_str)
+                    .expect("second-leg payload_hash from cosmos event must be 32-byte hex");
                 match check_evm_is_message_approved(
                     &gw_contract,
                     crate::types::HubChain::NAME,
@@ -2145,7 +2162,8 @@ pub async fn wait_for_its_remote_deploy(
             DeployPhase::Executed => {
                 let sl_id = second_leg_id.as_deref().unwrap_or("");
                 let sl_ph_str = second_leg_ph.as_deref().unwrap_or("");
-                let ph = parse_payload_hash(sl_ph_str).unwrap_or_default();
+                let ph = parse_payload_hash(sl_ph_str)
+                    .expect("second-leg payload_hash from cosmos event must be 32-byte hex");
                 match check_evm_is_message_approved(
                     &gw_contract,
                     crate::types::HubChain::NAME,
