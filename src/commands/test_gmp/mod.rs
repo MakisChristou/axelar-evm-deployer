@@ -15,16 +15,11 @@ use sender_receiver::ensure_sender_receiver_deployed;
 use source::send_evm_call_contract;
 
 use crate::cli::resolve_axelar_id;
-use crate::commands::test_helpers::{
-    extract_event_attr, extract_poll_id, wait_for_poll_votes, wait_for_proof,
-};
 use crate::cosmos::{
-    build_execute_msg_any, check_axelar_balance, derive_axelar_wallet, read_axelar_config,
-    read_axelar_contract_field, sign_and_broadcast_cosmos_tx,
+    check_axelar_balance, derive_axelar_wallet, read_axelar_config, read_axelar_contract_field,
 };
 use crate::preflight;
 use crate::state::read_state;
-use crate::timing::{AMPLIFIER_POLL_ATTEMPTS_5MIN, AMPLIFIER_POLL_INTERVAL};
 use crate::ui;
 use crate::utils::read_contract_address;
 
@@ -114,7 +109,7 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
         fee_denom: &fee_denom,
         gas_price,
         cosm_gateway: &cosm_gateway,
-        voting_verifier: &voting_verifier,
+        voting_verifier: Some(&voting_verifier),
         multisig_prover: &multisig_prover,
     };
     let execute_data_hex =
@@ -259,7 +254,6 @@ pub async fn run_config(
     } = sent;
     let payload_hash_hex = alloy::hex::encode(payload_hash);
 
-    // --- Cosmos relay (steps 2-6, chain-agnostic) ---
     let cosm_gateway =
         read_axelar_contract_field(&config, &format!("/axelar/contracts/Gateway/{src}/address"))?;
     let voting_verifier = read_axelar_contract_field(
@@ -267,6 +261,10 @@ pub async fn run_config(
         &format!("/axelar/contracts/VotingVerifier/{src}/address"),
     )
     .ok();
+    let multisig_prover = read_axelar_contract_field(
+        &config,
+        &format!("/axelar/contracts/MultisigProver/{dst}/address"),
+    )?;
 
     ui::section("Amplifier Routing");
     ui::address("cosmos gateway", &cosm_gateway);
@@ -286,157 +284,18 @@ pub async fn run_config(
         "payload_hash": payload_hash_hex,
     });
 
-    // Step 2: verify_messages
-    ui::step_header(2, 8, "verify_messages");
-    let verify_msg = json!({ "verify_messages": [gmp_msg] });
-    let verify_any = build_execute_msg_any(&axelar_address, &cosm_gateway, &verify_msg)?;
-    let verify_resp = sign_and_broadcast_cosmos_tx(
-        &signing_key,
-        &axelar_address,
-        &lcd,
-        &chain_id,
-        &fee_denom,
+    let ctx = relay::AmplifierContext {
+        signing_key: &signing_key,
+        axelar_address: &axelar_address,
+        lcd: &lcd,
+        chain_id: &chain_id,
+        fee_denom: &fee_denom,
         gas_price,
-        vec![verify_any],
-    )
-    .await?;
-
-    if let Some(poll_id) = extract_poll_id(&verify_resp) {
-        ui::kv("poll_id", &poll_id);
-
-        // Step 3: Wait for votes + end poll
-        ui::step_header(3, 8, "Wait for poll votes + end poll");
-        if let Some(ref vv) = voting_verifier {
-            wait_for_poll_votes(&lcd, vv, &poll_id).await?;
-        }
-
-        let vv_addr = voting_verifier
-            .as_ref()
-            .ok_or_else(|| eyre::eyre!("voting verifier address required to end poll"))?;
-        let spinner = ui::wait_spinner("Ending poll (waiting for block expiry)...");
-        for attempt in 0..AMPLIFIER_POLL_ATTEMPTS_5MIN {
-            if attempt > 0 {
-                tokio::time::sleep(AMPLIFIER_POLL_INTERVAL).await;
-            }
-            let end_poll_msg = json!({ "end_poll": { "poll_id": poll_id } });
-            let end_poll_any = build_execute_msg_any(&axelar_address, vv_addr, &end_poll_msg)?;
-            match sign_and_broadcast_cosmos_tx(
-                &signing_key,
-                &axelar_address,
-                &lcd,
-                &chain_id,
-                &fee_denom,
-                gas_price,
-                vec![end_poll_any],
-            )
-            .await
-            {
-                Ok(_) => {
-                    spinner.finish_and_clear();
-                    ui::success("poll ended");
-                    break;
-                }
-                Err(e) => {
-                    let msg = format!("{e}");
-                    if msg.contains("cannot tally before poll end") {
-                        spinner.set_message(format!(
-                            "Poll not expired yet (attempt {})...",
-                            attempt + 1
-                        ));
-                        continue;
-                    }
-                    spinner.finish_and_clear();
-                    return Err(e);
-                }
-            }
-        }
-    } else {
-        ui::info("no new poll — message already being verified by active verifiers");
-        ui::step_header(3, 8, "Wait for poll votes + end poll");
-        ui::info("skipped (existing poll)");
-    }
-
-    // Step 4: route_messages
-    ui::step_header(4, 8, "route_messages");
-    let _dest_gateway =
-        read_axelar_contract_field(&config, &format!("/axelar/contracts/Gateway/{dst}/address"))?;
-    let spinner = ui::wait_spinner("Routing message...");
-    for attempt in 0..AMPLIFIER_POLL_ATTEMPTS_5MIN {
-        if attempt > 0 {
-            tokio::time::sleep(AMPLIFIER_POLL_INTERVAL).await;
-        }
-        let route_msg = json!({ "route_messages": [gmp_msg] });
-        let route_any = build_execute_msg_any(&axelar_address, &cosm_gateway, &route_msg)?;
-        match sign_and_broadcast_cosmos_tx(
-            &signing_key,
-            &axelar_address,
-            &lcd,
-            &chain_id,
-            &fee_denom,
-            gas_price,
-            vec![route_any],
-        )
-        .await
-        {
-            Ok(_) => {
-                spinner.finish_and_clear();
-                ui::success("message routed");
-                break;
-            }
-            Err(e) => {
-                let msg = format!("{e}");
-                if msg.contains("not verified") {
-                    spinner.set_message(format!(
-                        "Message not yet verified (attempt {}/60)...",
-                        attempt + 1
-                    ));
-                    continue;
-                }
-                spinner.finish_and_clear();
-                return Err(e);
-            }
-        }
-    }
-
-    // Step 5: construct_proof
-    ui::step_header(5, 8, "construct_proof");
-    let multisig_prover = read_axelar_contract_field(
-        &config,
-        &format!("/axelar/contracts/MultisigProver/{dst}/address"),
-    )?;
-    ui::address("multisig prover", &multisig_prover);
-
-    let construct_proof_msg = json!({
-        "construct_proof": [{
-            "source_chain": src,
-            "message_id": message_id,
-        }]
-    });
-    let construct_any =
-        build_execute_msg_any(&axelar_address, &multisig_prover, &construct_proof_msg)?;
-    let construct_resp = sign_and_broadcast_cosmos_tx(
-        &signing_key,
-        &axelar_address,
-        &lcd,
-        &chain_id,
-        &fee_denom,
-        gas_price,
-        vec![construct_any],
-    )
-    .await?;
-
-    let session_id = extract_event_attr(&construct_resp, "multisig_session_id")?;
-    ui::kv("multisig_session_id", &session_id);
-
-    // Step 6: Wait for proof
-    ui::step_header(6, 8, "Wait for proof signing");
-    let proof = wait_for_proof(&lcd, &multisig_prover, &session_id).await?;
-    ui::success("proof ready");
-
-    // --- Steps 7-8: destination-specific ---
-    let execute_data_hex = proof["status"]["completed"]["execute_data"]
-        .as_str()
-        .ok_or_else(|| eyre::eyre!("no execute_data in proof response"))?;
+        cosm_gateway: &cosm_gateway,
+        voting_verifier: voting_verifier.as_deref(),
+        multisig_prover: &multisig_prover,
+    };
+    let execute_data_hex = relay::run_full_sequence(&ctx, &gmp_msg, &src, &message_id, 8).await?;
 
     match dst_type {
         ChainType::Svm => {
@@ -454,7 +313,7 @@ pub async fn run_config(
                 &message_id,
                 &payload_bytes,
                 payload_hash,
-                execute_data_hex,
+                &execute_data_hex,
                 7,
                 8,
                 8,

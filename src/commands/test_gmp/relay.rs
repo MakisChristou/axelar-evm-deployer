@@ -11,7 +11,9 @@ use crate::ui;
 
 /// Borrowed bundle of everything an Amplifier relay step needs to sign and
 /// broadcast cosmos txs against the source-chain Gateway, VotingVerifier,
-/// and destination-chain MultisigProver.
+/// and destination-chain MultisigProver. `voting_verifier` is optional
+/// because some chains route through gateways without a VotingVerifier; the
+/// relay then errors only if a poll actually needs ending.
 pub struct AmplifierContext<'a> {
     pub signing_key: &'a SigningKey,
     pub axelar_address: &'a str,
@@ -20,7 +22,7 @@ pub struct AmplifierContext<'a> {
     pub fee_denom: &'a str,
     pub gas_price: f64,
     pub cosm_gateway: &'a str,
-    pub voting_verifier: &'a str,
+    pub voting_verifier: Option<&'a str>,
     pub multisig_prover: &'a str,
 }
 
@@ -52,7 +54,10 @@ pub async fn run_full_sequence(
         ui::kv("poll_id", &poll_id);
 
         ui::step_header(3, total_steps, "Wait for poll votes + end poll");
-        wait_for_poll_votes(ctx.lcd, ctx.voting_verifier, &poll_id).await?;
+        let vv = ctx
+            .voting_verifier
+            .ok_or_else(|| eyre::eyre!("voting verifier address required to end poll"))?;
+        wait_for_poll_votes(ctx.lcd, vv, &poll_id).await?;
         end_poll_with_retry(
             &poll_id,
             ctx.signing_key,
@@ -61,7 +66,7 @@ pub async fn run_full_sequence(
             ctx.chain_id,
             ctx.fee_denom,
             ctx.gas_price,
-            ctx.voting_verifier,
+            vv,
         )
         .await?;
     } else {
