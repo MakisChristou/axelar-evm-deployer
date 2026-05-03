@@ -88,6 +88,19 @@ pub struct AxelarConfig {
     pub token_symbol: Option<String>,
     #[serde(rename = "unitDenom")]
     pub unit_denom: Option<String>,
+    #[serde(rename = "governanceAddress")]
+    pub governance_address: Option<String>,
+    #[serde(rename = "adminAddress")]
+    pub admin_address: Option<String>,
+    #[serde(rename = "multisigProverAdminAddress")]
+    pub multisig_prover_admin_address: Option<String>,
+    /// Stringified base-denom amount (e.g. `"2000000000"`) used as the
+    /// deposit when submitting governance proposals on the Axelar hub.
+    #[serde(rename = "govProposalDepositAmount")]
+    pub gov_proposal_deposit_amount: Option<String>,
+    /// Stringified base-denom amount used for expedited governance proposals.
+    #[serde(rename = "govProposalExpeditedDepositAmount")]
+    pub gov_proposal_expedited_deposit_amount: Option<String>,
     pub contracts: Option<HashMap<String, HashMap<String, Value>>>,
     #[serde(flatten)]
     pub extra: HashMap<String, Value>,
