@@ -31,10 +31,6 @@ pub(super) async fn run_sol_to_evm(args: LoadTestArgs, _run_start: Instant) -> R
     let dest = &args.destination_chain;
     let src = &args.source_chain;
 
-    let config_content = std::fs::read_to_string(&args.config)
-        .map_err(|e| eyre::eyre!("failed to read config {}: {e}", args.config.display()))?;
-    let config_root: serde_json::Value = serde_json::from_str(&config_content)?;
-
     let rpc_url = &args.destination_rpc;
 
     // Validate RPCs before doing any work
@@ -51,7 +47,7 @@ pub(super) async fn run_sol_to_evm(args: LoadTestArgs, _run_start: Instant) -> R
         eyre::bail!(
             "destination chain '{dest}' has no Cosmos Gateway in the config — \
              verification would fail. Pick a chain that has a Gateway entry, e.g.:\n  {}",
-            list_gateway_chains(&config_root).join(", ")
+            list_gateway_chains(&args.config).join(", ")
         );
     }
 
@@ -181,10 +177,6 @@ pub(super) async fn run_evm_to_sol(args: LoadTestArgs, _run_start: Instant) -> R
     let src = &args.source_chain;
     let dest = &args.destination_chain;
 
-    let config_content = std::fs::read_to_string(&args.config)
-        .map_err(|e| eyre::eyre!("failed to read config {}: {e}", args.config.display()))?;
-    let config_root: serde_json::Value = serde_json::from_str(&config_content)?;
-
     let evm_rpc_url = args.source_rpc.clone();
 
     // Validate RPCs before doing any work
@@ -201,7 +193,7 @@ pub(super) async fn run_evm_to_sol(args: LoadTestArgs, _run_start: Instant) -> R
         eyre::bail!(
             "destination chain '{dest}' has no Cosmos Gateway in the config — \
              verification would fail. Pick a chain that has a Gateway entry, e.g.:\n  {}",
-            list_gateway_chains(&config_root).join(", ")
+            list_gateway_chains(&args.config).join(", ")
         );
     }
 
@@ -354,10 +346,6 @@ pub(super) async fn run_evm_to_evm(args: LoadTestArgs, _run_start: Instant) -> R
     let src = &args.source_chain;
     let dest = &args.destination_chain;
 
-    let config_content = std::fs::read_to_string(&args.config)
-        .map_err(|e| eyre::eyre!("failed to read config {}: {e}", args.config.display()))?;
-    let config_root: serde_json::Value = serde_json::from_str(&config_content)?;
-
     let source_rpc_url = args.source_rpc.clone();
     let dest_rpc_url = args.destination_rpc.clone();
 
@@ -375,7 +363,7 @@ pub(super) async fn run_evm_to_evm(args: LoadTestArgs, _run_start: Instant) -> R
         eyre::bail!(
             "destination chain '{dest}' has no Cosmos Gateway in the config — \
              verification would fail. Pick a chain that has a Gateway entry, e.g.:\n  {}",
-            list_gateway_chains(&config_root).join(", ")
+            list_gateway_chains(&args.config).join(", ")
         );
     }
 
@@ -516,10 +504,6 @@ pub(super) async fn run_sol_to_sol(args: LoadTestArgs, _run_start: Instant) -> R
     validate_solana_rpc(&args.source_rpc).await?;
     validate_solana_rpc(&args.destination_rpc).await?;
 
-    let config_content = std::fs::read_to_string(&args.config)
-        .map_err(|e| eyre::eyre!("failed to read config {}: {e}", args.config.display()))?;
-    let config_root: serde_json::Value = serde_json::from_str(&config_content)?;
-
     // Check that verification contracts exist
     if read_axelar_contract_field(
         &args.config,
@@ -530,7 +514,7 @@ pub(super) async fn run_sol_to_sol(args: LoadTestArgs, _run_start: Instant) -> R
         eyre::bail!(
             "destination chain '{dest}' has no Cosmos Gateway in the config — \
              verification would fail. Pick a chain that has a Gateway entry, e.g.:\n  {}",
-            list_gateway_chains(&config_root).join(", ")
+            list_gateway_chains(&args.config).join(", ")
         );
     }
 

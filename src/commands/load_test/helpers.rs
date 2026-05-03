@@ -124,12 +124,20 @@ pub(super) fn finish_report(
 }
 
 /// List chain names that have a Cosmos Gateway address in the config.
-pub(super) fn list_gateway_chains(config_root: &serde_json::Value) -> Vec<String> {
-    config_root
-        .pointer("/axelar/contracts/Gateway")
-        .and_then(|v| v.as_object())
-        .map(|obj| {
-            obj.iter()
+/// Returns an empty vec if the config can't be loaded or has no Gateway
+/// section — callers use this only to print a remediation hint, so a quiet
+/// fallback is fine here.
+pub(super) fn list_gateway_chains(config_path: &std::path::Path) -> Vec<String> {
+    let Ok(cfg) = crate::config::ChainsConfig::load(config_path) else {
+        return Vec::new();
+    };
+    cfg.axelar
+        .contracts
+        .as_ref()
+        .and_then(|c| c.get("Gateway"))
+        .map(|gateway_map| {
+            gateway_map
+                .iter()
                 .filter(|(_, v)| v.get("address").and_then(|a| a.as_str()).is_some())
                 .map(|(k, _)| k.clone())
                 .collect()
