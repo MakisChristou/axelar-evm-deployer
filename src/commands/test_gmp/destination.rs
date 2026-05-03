@@ -4,8 +4,12 @@ use alloy::{
     rpc::types::TransactionRequest,
 };
 use eyre::Result;
+use solana_axelar_std::{CrossChainId, Message};
 
 use crate::evm::{AxelarAmplifierGateway, SenderReceiver};
+use crate::solana::{
+    approve_messages_on_gateway, decode_execute_data, execute_on_memo, load_keypair,
+};
 use crate::ui;
 
 /// Submit the Amplifier-built `execute_data` to the EVM gateway, confirm the
@@ -77,6 +81,47 @@ pub async fn approve_and_execute_evm<P: Provider>(
 
     let stored_message = sr_contract.message().call().await?;
     ui::kv("stored message", &format!("\"{stored_message}\""));
+
+    Ok(())
+}
+
+/// Submit the Amplifier-built `execute_data` to the Solana gateway, then
+/// call the destination program (memo) with the decoded GMP message and
+/// raw payload. Wraps Steps 7-8 of an SVM-destination flow.
+#[allow(clippy::too_many_arguments)]
+pub fn approve_and_execute_svm(
+    dst_rpc: &str,
+    source_chain: &str,
+    destination_chain: &str,
+    source_address: &str,
+    destination_address: &str,
+    message_id: &str,
+    payload_bytes: &[u8],
+    payload_hash: B256,
+    execute_data_hex: &str,
+    step_idx_approve: usize,
+    step_idx_execute: usize,
+    total_steps: usize,
+) -> Result<()> {
+    ui::step_header(step_idx_approve, total_steps, "Approve on Solana gateway");
+    let keypair = load_keypair(None)?;
+    let execute_data = decode_execute_data(execute_data_hex)?;
+    approve_messages_on_gateway(dst_rpc, &keypair, &execute_data)?;
+
+    ui::step_header(step_idx_execute, total_steps, "Execute on destination");
+    let gmp_message = Message {
+        cc_id: CrossChainId {
+            chain: source_chain.to_string(),
+            id: message_id.to_string(),
+        },
+        source_address: source_address.to_string(),
+        destination_chain: destination_chain.to_string(),
+        destination_address: destination_address.to_string(),
+        payload_hash: payload_hash.0,
+    };
+
+    let memo_sig = execute_on_memo(dst_rpc, &keypair, gmp_message, payload_bytes)?;
+    ui::tx_hash("execute", &memo_sig.to_string());
 
     Ok(())
 }

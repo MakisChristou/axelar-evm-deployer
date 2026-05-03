@@ -440,41 +440,25 @@ pub async fn run_config(
 
     match dst_type {
         ChainType::Svm => {
-            // Step 7: Approve on Solana gateway
-            ui::step_header(7, 8, "Approve on Solana gateway");
             let dst_rpc = chains
                 .get(&dst)
                 .and_then(|v| v.get("rpc"))
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| eyre::eyre!("no RPC for destination chain '{dst}'"))?;
-
-            let keypair = crate::solana::load_keypair(None)?;
-            let execute_data = crate::solana::decode_execute_data(execute_data_hex)?;
-            crate::solana::approve_messages_on_gateway(dst_rpc, &keypair, &execute_data)?;
-
-            // Step 8: Execute on destination (memo program)
-            ui::step_header(8, 8, "Execute on destination");
-
-            // Build the Message struct matching what was sent in step 1
-            let gmp_message = solana_axelar_std::Message {
-                cc_id: solana_axelar_std::CrossChainId {
-                    chain: src.clone(),
-                    id: message_id.clone(),
-                },
-                source_address: source_address.clone(),
-                destination_chain: dst.clone(),
-                destination_address: destination_address.clone(),
-                payload_hash: {
-                    let bytes = alloy::hex::decode(&payload_hash_hex)?;
-                    let mut arr = [0u8; 32];
-                    arr.copy_from_slice(&bytes);
-                    arr
-                },
-            };
-
-            let memo_sig =
-                crate::solana::execute_on_memo(dst_rpc, &keypair, gmp_message, &payload_bytes)?;
-            ui::tx_hash("execute", &memo_sig.to_string());
+            destination::approve_and_execute_svm(
+                dst_rpc,
+                &src,
+                &dst,
+                &source_address,
+                &destination_address,
+                &message_id,
+                &payload_bytes,
+                payload_hash,
+                execute_data_hex,
+                7,
+                8,
+                8,
+            )?;
         }
         ChainType::Evm => {
             return Err(eyre::eyre!(
