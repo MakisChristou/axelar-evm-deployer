@@ -1,8 +1,9 @@
+mod sender_receiver;
+
 use std::path::PathBuf;
 use std::time::Instant;
 
 use alloy::{
-    network::TransactionBuilder,
     primitives::{Bytes, keccak256},
     providers::{Provider, ProviderBuilder},
     rpc::types::TransactionRequest,
@@ -11,6 +12,8 @@ use alloy::{
 };
 use eyre::Result;
 use serde_json::json;
+
+use sender_receiver::ensure_sender_receiver_deployed;
 
 use crate::cli::resolve_axelar_id;
 use crate::commands::test_helpers::{
@@ -21,9 +24,9 @@ use crate::cosmos::{
     build_execute_msg_any, check_axelar_balance, derive_axelar_wallet, read_axelar_config,
     read_axelar_contract_field, sign_and_broadcast_cosmos_tx,
 };
-use crate::evm::{AxelarAmplifierGateway, ContractCall, SenderReceiver, read_artifact_bytecode};
+use crate::evm::{AxelarAmplifierGateway, ContractCall, SenderReceiver};
 use crate::preflight;
-use crate::state::{State, read_state, save_state};
+use crate::state::read_state;
 use crate::timing::{AMPLIFIER_POLL_ATTEMPTS_5MIN, AMPLIFIER_POLL_INTERVAL};
 use crate::ui;
 use crate::utils::read_contract_address;
@@ -677,55 +680,4 @@ pub async fn run_config(
     ));
 
     Ok(())
-}
-
-/// Reuse the cached SenderReceiver if its bytecode is still on chain;
-/// redeploy if it's gone (the testnet occasionally wipes contracts) or if no
-/// cached address exists. Persists the resulting address back to state.
-async fn ensure_sender_receiver_deployed<P: Provider>(
-    provider: &P,
-    state: &mut State,
-    gateway: alloy::primitives::Address,
-    gas_service: alloy::primitives::Address,
-) -> Result<alloy::primitives::Address> {
-    let addr = match state.sender_receiver_address {
-        Some(addr) if !provider.get_code_at(addr).await?.is_empty() => {
-            ui::info(&format!("SenderReceiver: reusing {addr}"));
-            addr
-        }
-        Some(addr) => {
-            ui::warn(&format!(
-                "SenderReceiver at {addr} has no code, redeploying..."
-            ));
-            deploy_sender_receiver(provider, gateway, gas_service).await?
-        }
-        None => {
-            ui::info("deploying SenderReceiver...");
-            deploy_sender_receiver(provider, gateway, gas_service).await?
-        }
-    };
-
-    state.sender_receiver_address = Some(addr);
-    save_state(state)?;
-    ui::address("SenderReceiver", &format!("{addr}"));
-    Ok(addr)
-}
-
-async fn deploy_sender_receiver<P: Provider>(
-    provider: &P,
-    gateway: alloy::primitives::Address,
-    gas_service: alloy::primitives::Address,
-) -> Result<alloy::primitives::Address> {
-    let bytecode = read_artifact_bytecode("artifacts/SenderReceiver.json")?;
-    let mut deploy_code = bytecode;
-    deploy_code.extend_from_slice(&(gateway, gas_service).abi_encode_params());
-
-    let tx = TransactionRequest::default().with_deploy_code(Bytes::from(deploy_code));
-
-    let pending = provider.send_transaction(tx).await?;
-    let receipt = crate::evm::broadcast_and_log(pending, "deploy tx").await?;
-    let addr = receipt
-        .contract_address
-        .ok_or_else(|| eyre::eyre!("no contract address in receipt"))?;
-    Ok(addr)
 }
