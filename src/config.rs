@@ -106,6 +106,18 @@ impl AxelarConfig {
             .as_str()
     }
 
+    /// Look up `axelar.contracts.<contract>.address` — the chain-agnostic
+    /// (global) form used by hub-level contracts like AxelarnetGateway,
+    /// Router, Multisig, Coordinator, etc., which don't have a per-chain
+    /// breakdown at this level.
+    pub fn global_contract_address(&self, contract: &str) -> Option<&str> {
+        self.contracts
+            .as_ref()?
+            .get(contract)?
+            .get("address")?
+            .as_str()
+    }
+
     /// Parse the raw `"0.007uaxl"`-shaped `gasPrice` into `(price, denom)`.
     /// Returns `None` if the field is missing or doesn't carry a numeric
     /// prefix; callers should `?` and produce a contextual error rather
