@@ -23,7 +23,7 @@ use crate::cosmos::{
 };
 use crate::evm::{AxelarAmplifierGateway, ContractCall, SenderReceiver, read_artifact_bytecode};
 use crate::preflight;
-use crate::state::{read_state, save_state};
+use crate::state::{State, read_state, save_state};
 use crate::timing::{AMPLIFIER_POLL_ATTEMPTS_5MIN, AMPLIFIER_POLL_INTERVAL};
 use crate::ui;
 use crate::utils::read_contract_address;
@@ -49,18 +49,7 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
         .wallet(signer)
         .connect_http(rpc_url.parse()?);
 
-    // --- Pre-flight: check deployer balance ---
-    let token_symbol = std::fs::read_to_string(&target_json)
-        .ok()
-        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
-        .and_then(|root| {
-            root.pointer(&format!("/chains/{axelar_id}/tokenSymbol"))
-                .and_then(|v| v.as_str())
-                .map(String::from)
-        })
-        .unwrap_or_else(|| "ETH".to_string());
-    preflight::check_evm_balances(&rpc_url, &[("deployer", deployer_address)], &token_symbol)
-        .await?;
+    preflight::check_deployer_balance(&rpc_url, deployer_address, &target_json, &axelar_id).await?;
 
     let gateway_addr = read_contract_address(&target_json, &axelar_id, "AxelarGateway")?;
     let gas_service_addr = read_contract_address(&target_json, &axelar_id, "AxelarGasService")?;
@@ -69,26 +58,9 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
     ui::address("gateway", &format!("{gateway_addr}"));
     ui::address("gas service", &format!("{gas_service_addr}"));
 
-    // --- Deploy SenderReceiver if needed ---
-    let sender_receiver_addr = if let Some(addr) = state.sender_receiver_address {
-        let code = provider.get_code_at(addr).await?;
-        if code.is_empty() {
-            ui::warn(&format!(
-                "SenderReceiver at {addr} has no code, redeploying..."
-            ));
-            deploy_sender_receiver(&provider, gateway_addr, gas_service_addr).await?
-        } else {
-            ui::info(&format!("SenderReceiver: reusing {addr}"));
-            addr
-        }
-    } else {
-        ui::info("deploying SenderReceiver...");
-        deploy_sender_receiver(&provider, gateway_addr, gas_service_addr).await?
-    };
-
-    state.sender_receiver_address = Some(sender_receiver_addr);
-    save_state(&state)?;
-    ui::address("SenderReceiver", &format!("{sender_receiver_addr}"));
+    let sender_receiver_addr =
+        ensure_sender_receiver_deployed(&provider, &mut state, gateway_addr, gas_service_addr)
+            .await?;
 
     // --- Send GMP message ---
     let destination_chain = axelar_id.clone();
@@ -705,6 +677,38 @@ pub async fn run_config(
     ));
 
     Ok(())
+}
+
+/// Reuse the cached SenderReceiver if its bytecode is still on chain;
+/// redeploy if it's gone (the testnet occasionally wipes contracts) or if no
+/// cached address exists. Persists the resulting address back to state.
+async fn ensure_sender_receiver_deployed<P: Provider>(
+    provider: &P,
+    state: &mut State,
+    gateway: alloy::primitives::Address,
+    gas_service: alloy::primitives::Address,
+) -> Result<alloy::primitives::Address> {
+    let addr = match state.sender_receiver_address {
+        Some(addr) if !provider.get_code_at(addr).await?.is_empty() => {
+            ui::info(&format!("SenderReceiver: reusing {addr}"));
+            addr
+        }
+        Some(addr) => {
+            ui::warn(&format!(
+                "SenderReceiver at {addr} has no code, redeploying..."
+            ));
+            deploy_sender_receiver(provider, gateway, gas_service).await?
+        }
+        None => {
+            ui::info("deploying SenderReceiver...");
+            deploy_sender_receiver(provider, gateway, gas_service).await?
+        }
+    };
+
+    state.sender_receiver_address = Some(addr);
+    save_state(state)?;
+    ui::address("SenderReceiver", &format!("{addr}"));
+    Ok(addr)
 }
 
 async fn deploy_sender_receiver<P: Provider>(

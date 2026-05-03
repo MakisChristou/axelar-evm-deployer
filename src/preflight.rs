@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use alloy::primitives::{Address, U256};
 use alloy::providers::{Provider, ProviderBuilder};
 use eyre::Result;
@@ -50,6 +52,31 @@ pub async fn check_evm_balances(
     }
 
     Ok(())
+}
+
+/// Verify the deployer's native balance on an EVM chain. Looks up the chain's
+/// `tokenSymbol` from the target config so balances render in the right unit
+/// (defaults to "ETH" if the field is missing).
+pub async fn check_deployer_balance(
+    rpc_url: &str,
+    deployer_address: Address,
+    target_json: &Path,
+    axelar_id: &str,
+) -> Result<()> {
+    let token_symbol = read_chain_token_symbol(target_json, axelar_id);
+    check_evm_balances(rpc_url, &[("deployer", deployer_address)], &token_symbol).await
+}
+
+fn read_chain_token_symbol(target_json: &Path, axelar_id: &str) -> String {
+    std::fs::read_to_string(target_json)
+        .ok()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+        .and_then(|root| {
+            root.pointer(&format!("/chains/{axelar_id}/tokenSymbol"))
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        })
+        .unwrap_or_else(|| "ETH".to_string())
 }
 
 fn wei_to_display(wei: U256) -> f64 {
