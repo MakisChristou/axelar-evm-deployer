@@ -55,28 +55,22 @@ pub async fn check_evm_balances(
 }
 
 /// Verify the deployer's native balance on an EVM chain. Looks up the chain's
-/// `tokenSymbol` from the target config so balances render in the right unit
-/// (defaults to "ETH" if the field is missing).
+/// `tokenSymbol` from the target config so balances render in the right unit;
+/// errors if the symbol is missing rather than silently defaulting (a stray
+/// "ETH" on FLOW or HBAR mid-flow used to be confusing).
 pub async fn check_deployer_balance(
     rpc_url: &str,
     deployer_address: Address,
     target_json: &Path,
     axelar_id: &str,
 ) -> Result<()> {
-    let token_symbol = read_chain_token_symbol(target_json, axelar_id);
-    check_evm_balances(rpc_url, &[("deployer", deployer_address)], &token_symbol).await
-}
-
-fn read_chain_token_symbol(target_json: &Path, axelar_id: &str) -> String {
-    std::fs::read_to_string(target_json)
-        .ok()
-        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
-        .and_then(|root| {
-            root.pointer(&format!("/chains/{axelar_id}/tokenSymbol"))
-                .and_then(|v| v.as_str())
-                .map(String::from)
-        })
-        .unwrap_or_else(|| "ETH".to_string())
+    let cfg = crate::config::ChainsConfig::load(target_json)?;
+    let token_symbol = cfg
+        .chains
+        .get(axelar_id)
+        .and_then(|c| c.token_symbol.as_deref())
+        .ok_or_else(|| eyre::eyre!("no tokenSymbol for chain '{axelar_id}' in target json"))?;
+    check_evm_balances(rpc_url, &[("deployer", deployer_address)], token_symbol).await
 }
 
 fn wei_to_display(wei: U256) -> f64 {
