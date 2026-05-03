@@ -4,7 +4,6 @@ use std::time::Instant;
 use alloy::primitives::Address;
 use alloy::signers::local::PrivateKeySigner;
 use eyre::Result;
-use serde_json::Value;
 
 use crate::cli::resolve_axelar_id;
 use crate::commands;
@@ -111,17 +110,19 @@ pub async fn run(
                 }
             }
         }
-        let token_symbol = std::fs::read_to_string(&ctx.target_json)
-            .ok()
-            .and_then(|c| serde_json::from_str::<Value>(&c).ok())
-            .and_then(|root| {
-                root.pointer(&format!("/chains/{}/tokenSymbol", ctx.axelar_id))
-                    .and_then(|v| v.as_str())
-                    .map(String::from)
-            })
-            .unwrap_or_else(|| "ETH".to_string());
+        let cfg = crate::config::ChainsConfig::load(&ctx.target_json)?;
+        let token_symbol = cfg
+            .chains
+            .get(&ctx.axelar_id)
+            .and_then(|c| c.token_symbol.as_deref())
+            .ok_or_else(|| {
+                eyre::eyre!(
+                    "no tokenSymbol for chain '{}' in target json",
+                    ctx.axelar_id
+                )
+            })?;
 
-        preflight::check_evm_balances(&ctx.rpc_url, &wallets, &token_symbol).await?;
+        preflight::check_evm_balances(&ctx.rpc_url, &wallets, token_symbol).await?;
     }
 
     loop {
