@@ -21,13 +21,14 @@ mod encoding;
 mod phase_a;
 mod phase_b;
 mod relay;
+mod remediation;
 
 use std::path::PathBuf;
 use std::time::Instant;
 
 use alloy::{
     primitives::{Bytes, FixedBytes, U256},
-    providers::{Provider, ProviderBuilder},
+    providers::ProviderBuilder,
     signers::local::PrivateKeySigner,
 };
 use eyre::Result;
@@ -41,6 +42,7 @@ use phase_b::{
     check_destination_trusts_source, poll_for_balance_on_destination, resolve_hub_address_evm_view,
 };
 use relay::{relay_to_destination, relay_to_hub};
+use remediation::print_untrusted_chain_remediation;
 
 use crate::cli::resolve_axelar_id;
 use crate::commands::event_extractors::{
@@ -52,7 +54,7 @@ use crate::commands::test_helpers::{
 };
 use crate::config::ChainsConfig;
 use crate::cosmos::derive_axelar_wallet;
-use crate::evm::{ERC20, InterchainToken, InterchainTokenFactory, InterchainTokenService, Ownable};
+use crate::evm::{ERC20, InterchainToken, InterchainTokenFactory, InterchainTokenService};
 use crate::preflight;
 use crate::state::read_state;
 use crate::types::{ChainAxelarId, ChainType};
@@ -139,6 +141,7 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
             dest_its_addr,
             &rpc_url,
             &dest_rpc,
+            DEST_CHAIN,
             &provider,
         )
         .await?;
@@ -413,64 +416,6 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
 /// Print the cast-send remediation block when DEST_CHAIN isn't trusted on the
 /// source-chain ITS (or vice versa). The owner addresses are queried so the
 /// user knows which key needs to sign the setTrustedChain calls.
-async fn print_untrusted_chain_remediation<P: Provider>(
-    axelar_id: &str,
-    its_proxy_addr: alloy::primitives::Address,
-    dest_its_addr: alloy::primitives::Address,
-    rpc_url: &str,
-    dest_rpc: &str,
-    provider: &P,
-) -> Result<()> {
-    ui::error(&format!(
-        "\"{DEST_CHAIN}\" is not a trusted chain on the ITS at {its_proxy_addr}"
-    ));
-
-    let source_owner = Ownable::new(its_proxy_addr, provider)
-        .owner()
-        .call()
-        .await
-        .ok();
-
-    let dest_provider = ProviderBuilder::new().connect_http(dest_rpc.parse()?);
-    let flow_owner = Ownable::new(dest_its_addr, &dest_provider)
-        .owner()
-        .call()
-        .await
-        .ok();
-
-    let mut lines: Vec<String> = vec![
-        format!("The ITS on {axelar_id} does not trust \"{DEST_CHAIN}\" as a destination chain."),
-        String::new(),
-        format!("1. On {axelar_id} — set \"{DEST_CHAIN}\" as trusted:"),
-    ];
-    if let Some(owner) = source_owner {
-        lines.push(format!("   owner: {owner}"));
-    }
-    lines.push(format!("   cast send {its_proxy_addr} \\"));
-    lines.push("     'setTrustedChain(string)' \\".to_string());
-    lines.push(format!("     '{DEST_CHAIN}' \\"));
-    lines.push(format!("     --rpc-url {rpc_url} \\"));
-    lines.push("     --private-key $PRIVATE_KEY".into());
-    lines.push(String::new());
-    lines.push(format!(
-        "2. On {DEST_CHAIN} — set \"{axelar_id}\" as trusted:"
-    ));
-    if let Some(owner) = flow_owner {
-        lines.push(format!("   owner: {owner}"));
-    }
-    lines.push(format!("   cast send {dest_its_addr} \\"));
-    lines.push("     'setTrustedChain(string)' \\".to_string());
-    lines.push(format!("     '{axelar_id}' \\"));
-    lines.push(format!("     --rpc-url {dest_rpc} \\"));
-    lines.push("     --private-key $PRIVATE_KEY".into());
-    lines.push(String::new());
-    lines.push("Both sides must trust each other for cross-chain ITS to work.".into());
-
-    let line_refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
-    ui::action_required(&line_refs);
-    Ok(())
-}
-
 #[allow(clippy::too_many_arguments)]
 pub async fn run_config(
     config: PathBuf,
