@@ -1,4 +1,5 @@
 mod sender_receiver;
+mod source;
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -8,12 +9,12 @@ use alloy::{
     providers::{Provider, ProviderBuilder},
     rpc::types::TransactionRequest,
     signers::local::PrivateKeySigner,
-    sol_types::{SolEvent, SolValue},
 };
 use eyre::Result;
 use serde_json::json;
 
 use sender_receiver::ensure_sender_receiver_deployed;
+use source::send_evm_call_contract;
 
 use crate::cli::resolve_axelar_id;
 use crate::commands::test_helpers::{
@@ -24,7 +25,7 @@ use crate::cosmos::{
     build_execute_msg_any, check_axelar_balance, derive_axelar_wallet, read_axelar_config,
     read_axelar_contract_field, sign_and_broadcast_cosmos_tx,
 };
-use crate::evm::{AxelarAmplifierGateway, ContractCall, SenderReceiver};
+use crate::evm::{AxelarAmplifierGateway, SenderReceiver};
 use crate::preflight;
 use crate::state::read_state;
 use crate::timing::{AMPLIFIER_POLL_ATTEMPTS_5MIN, AMPLIFIER_POLL_INTERVAL};
@@ -65,50 +66,15 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
         ensure_sender_receiver_deployed(&provider, &mut state, gateway_addr, gas_service_addr)
             .await?;
 
-    // --- Send GMP message ---
-    let destination_chain = axelar_id.clone();
-    let destination_address = format!("{sender_receiver_addr}");
-    let message = "hello from axelar evm deployer".to_string();
-
-    ui::step_header(1, TOTAL_STEPS, "Send GMP callContract");
-    ui::kv("destination chain", &destination_chain);
-    ui::kv("destination address", &destination_address);
-    ui::kv("message", &format!("\"{message}\""));
-
-    let contract = SenderReceiver::new(sender_receiver_addr, &provider);
-    let call = contract
-        .sendMessage(
-            destination_chain.clone(),
-            destination_address.clone(),
-            message.clone(),
-        )
-        .value(crate::types::eth_milli(1)); // 0.001 ETH cross-chain gas budget
-
-    let pending = call.send().await?;
-    let tx_hash = *pending.tx_hash();
-    let receipt = crate::evm::broadcast_and_log(pending, "tx").await?;
-
-    // --- Extract ContractCall event index from receipt ---
-    let event_index = receipt
-        .inner
-        .logs()
-        .iter()
-        .enumerate()
-        .find_map(|(i, log)| {
-            if log.topics().first() == Some(&ContractCall::SIGNATURE_HASH) {
-                Some(i)
-            } else {
-                None
-            }
-        })
-        .ok_or_else(|| eyre::eyre!("ContractCall event not found in receipt logs"))?;
-
-    let payload_bytes = (message,).abi_encode_params();
-    let payload_hash = keccak256(&payload_bytes);
-    let message_id = format!("{tx_hash:#x}-{event_index}");
-
-    ui::kv("message_id", &message_id);
-    ui::kv("payload_hash", &format!("{payload_hash}"));
+    let sent =
+        send_evm_call_contract(&provider, sender_receiver_addr, &axelar_id, 1, TOTAL_STEPS).await?;
+    let source::SentGmp {
+        destination_chain,
+        destination_address,
+        message_id,
+        payload_bytes,
+        payload_hash,
+    } = sent;
 
     // --- Amplifier routing ---
     ui::section("Amplifier Routing");
