@@ -21,7 +21,6 @@ struct DiscoveredProgram {
     network: String,
     chain_name: String,
     rpc_url: String,
-    _program_type: String,
     label: String,
     address: String,
 }
@@ -112,7 +111,6 @@ fn discover_programs(
                         network: network.clone(),
                         chain_name: chain_name.clone(),
                         rpc_url: rpc_url.clone(),
-                        _program_type: prog_type.to_string(),
                         label: label.to_string(),
                         address: addr.to_string(),
                     });
@@ -174,7 +172,7 @@ pub async fn run(
             Err(_) => continue,
         };
 
-        let rpc = RpcClient::new_with_commitment(&entry.rpc_url, CommitmentConfig::confirmed());
+        let rpc = crate::solana::rpc_client(&entry.rpc_url);
 
         let sigs = match rpc.get_signatures_for_address_with_config(
             &pubkey,

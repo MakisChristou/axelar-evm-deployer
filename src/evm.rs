@@ -2,12 +2,17 @@ use std::fs;
 
 use alloy::{
     hex,
+    network::{Network, ReceiptResponse},
     primitives::{Address, Bytes, FixedBytes, keccak256},
+    providers::PendingTransactionBuilder,
     sol,
     sol_types::{SolCall, SolValue},
 };
 use eyre::Result;
 use serde_json::Value;
+
+use crate::timing::EVM_TX_RECEIPT_TIMEOUT;
+use crate::ui;
 
 sol! {
     #[sol(rpc)]
@@ -142,6 +147,11 @@ sol! {
     contract InterchainTokenService {
         function interchainTokenAddress(bytes32 tokenId) external view returns (address);
         function isTrustedChain(string calldata chainName) external view returns (bool);
+        function itsHubAddress() external view returns (string memory);
+        /// Legacy ITS trust API. Returns the trusted address for a chain — for
+        /// hub-routed chains this is the literal string "hub". For "axelar"
+        /// this returns the actual hub's bech32 address. Reverts if not set.
+        function trustedAddress(string calldata chain) external view returns (string memory);
         function interchainTransfer(
             bytes32 tokenId,
             string calldata destinationChain,
@@ -150,6 +160,12 @@ sol! {
             bytes calldata metadata,
             uint256 gasValue
         ) external payable;
+        function execute(
+            bytes32 commandId,
+            string calldata sourceChain,
+            string calldata sourceAddress,
+            bytes calldata payload
+        ) external;
     }
 
     // InterchainTokenDeployed event (emitted by ITS when a token is deployed)
@@ -346,4 +362,35 @@ pub fn compute_create_address(sender: Address, nonce: u64) -> Address {
 
     let hash = keccak256(&stream);
     Address::from_slice(&hash[12..])
+}
+
+/// Print the tx hash, wait for the receipt with the standard timeout, and
+/// log the confirmation block. Replaces the 8-line broadcast-and-await block
+/// repeated across the deploy/test/load-test commands.
+///
+/// `label` controls the prefix in both the kv print (e.g. "tx" → `tx: 0x…`)
+/// and the timeout error (e.g. "{label} {tx_hash} timed out after Ns").
+pub async fn broadcast_and_log<N>(
+    pending: PendingTransactionBuilder<N>,
+    label: &str,
+) -> Result<N::ReceiptResponse>
+where
+    N: Network,
+{
+    let tx_hash = *pending.tx_hash();
+    ui::tx_hash(label, &format!("{tx_hash}"));
+    ui::info("waiting for confirmation...");
+    let receipt = tokio::time::timeout(EVM_TX_RECEIPT_TIMEOUT, pending.get_receipt())
+        .await
+        .map_err(|_| {
+            eyre::eyre!(
+                "{label} {tx_hash} timed out after {}s",
+                EVM_TX_RECEIPT_TIMEOUT.as_secs()
+            )
+        })??;
+    ui::success(&format!(
+        "confirmed in block {}",
+        receipt.block_number().unwrap_or(0)
+    ));
+    Ok(receipt)
 }

@@ -8,12 +8,11 @@ use solana_sdk::signature::Keypair;
 use solana_sdk::signer::Signer;
 use tokio::sync::Mutex;
 
+use super::LoadTestArgs;
+use super::helpers::{finish_report, validate_evm_rpc, validate_solana_rpc};
 use super::keypairs;
 use super::metrics::{LoadTestReport, TxMetrics};
-use super::{
-    LoadTestArgs, finish_report, read_its_cache, save_its_cache, validate_evm_rpc,
-    validate_solana_rpc,
-};
+use super::resolve::{read_its_cache, save_its_cache};
 use crate::cosmos::read_axelar_contract_field;
 use crate::solana;
 use crate::ui;
@@ -21,15 +20,20 @@ use crate::utils::read_contract_address;
 use alloy::primitives::Address;
 use std::path::Path;
 
-const TOKEN_NAME: &str = "AXE";
-const TOKEN_SYMBOL: &str = "AXE";
-const TOKEN_DECIMALS: u8 = 9;
+// Token spec lives in `crate::types::LOAD_TEST_SOL_SPEC`.
 const AMOUNT_PER_TX: u64 = 1_000_000_000; // 1 token (with 9 decimals)
 /// Distribute 100x per key so cached tokens last across many runs.
 const AMOUNT_PER_KEY: u64 = AMOUNT_PER_TX * 100;
 
-/// Default gas value for ITS transfer on Solana (in lamports).
+/// Default gas value for an ITS *transfer* on Solana (in lamports).
 /// devnet-amplifier doesn't require gas, stagenet/mainnet do.
+///
+/// 500k lamports (~0.0005 SOL) covers the destination-side
+/// `execute → _giveToken → ERC20.transfer` on a typical EVM relayer quote.
+/// Earlier 100k was a hair too low and the public testnet relayer reverted
+/// with `availableGasBalance.amount must be positive: -2449`. For very-high-
+/// throughput burst tests where the per-tx cost matters, override with
+/// `--gas-value`.
 fn default_gas_value() -> u64 {
     #[cfg(feature = "devnet-amplifier")]
     {
@@ -37,9 +41,17 @@ fn default_gas_value() -> u64 {
     }
     #[cfg(not(feature = "devnet-amplifier"))]
     {
-        100_000
+        500_000
     }
 }
+
+/// Multiplier applied to the per-tx gas value for the one-time `deployRemote`
+/// call. Destination-side deploys are dramatically more expensive than
+/// transfers (they CREATE2 a fresh ITS token contract on the EVM side), and
+/// the public testnet relayer was reverting with `availableGasBalance.amount
+/// must be positive: -2449` when we paid the same 100k lamports for both.
+/// 10× ≈ 0.001 SOL covers the deploy with margin.
+const DEPLOY_GAS_MULTIPLIER: u64 = 10;
 
 pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     let src = &args.source_chain;
@@ -74,20 +86,13 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
 
     // --- Solana keypair ---
     let main_keypair = solana::load_keypair(args.keypair.as_deref())?;
-    let rpc_client = solana_client::rpc_client::RpcClient::new_with_commitment(
+    solana::check_solana_balance(
         &args.source_rpc,
-        solana_commitment_config::CommitmentConfig::confirmed(),
-    );
-    let pubkey = main_keypair.pubkey();
-    let balance = rpc_client.get_balance(&pubkey).unwrap_or(0);
-    #[allow(clippy::float_arithmetic)]
-    let sol = balance as f64 / 1e9;
-    ui::kv("wallet", &format!("{pubkey} ({sol:.4} SOL)"));
-    if balance == 0 {
-        return Err(eyre!(
-            "wallet ({pubkey}) has no SOL. Fund it first:\n  solana airdrop 2 {pubkey}"
-        ));
-    }
+        "wallet",
+        &main_keypair.pubkey(),
+        solana::MIN_SOL_SEND_LAMPORTS,
+    )?;
+    let rpc_client = solana::rpc_client(&args.source_rpc);
 
     // --- Gas value ---
     let gas_value: u64 = match &args.gas_value {
@@ -96,10 +101,29 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     };
     ui::kv("gas value", &format!("{gas_value} lamports"));
 
-    // --- EVM destination address (ITS proxy on destination chain) ---
+    // --- EVM destination ITS proxy (used by the relayer to dispatch execute) ---
     let its_proxy_addr = read_contract_address(&args.config, dest, "InterchainTokenService")?;
     ui::address("destination ITS", &format!("{its_proxy_addr}"));
-    let dest_address_bytes = its_proxy_addr.as_slice().to_vec();
+
+    // --- Receiver wallet for the InterchainTransfer ---
+    // Must be an EOA on the destination chain — passing the ITS proxy here
+    // reverts EVM estimation because ITS won't transfer to its own address.
+    // Prefer the EVM_PRIVATE_KEY's derived address so test runs accumulate
+    // tokens at a wallet the user owns (no dust burn). Fall back to the
+    // canonical dEaD burn address when no key is configured — verify only
+    // checks gateway approval/execution, not the receiver's balance.
+    let receiver: Address = match args.private_key.as_deref() {
+        Some(pk) => {
+            use alloy::signers::local::PrivateKeySigner;
+            let signer: PrivateKeySigner = pk
+                .parse()
+                .map_err(|e| eyre!("invalid EVM private key for receiver derivation: {e}"))?;
+            signer.address()
+        }
+        None => crate::types::DEAD_ADDRESS,
+    };
+    ui::address("receiver", &format!("{receiver}"));
+    let dest_address_bytes = receiver.as_slice().to_vec();
 
     // --- EVM gateway for verification ---
     let evm_gateway_addr = read_contract_address(&args.config, dest, "AxelarGateway")?;
@@ -219,7 +243,8 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
                                     .unwrap_or_else(|_| format!("{}-1.4", metrics.signature));
                             metrics.source_address = source_addr;
                             metrics.send_instant = Some(submit_start);
-                            metrics.gmp_destination_chain = "axelar".to_string();
+                            metrics.gmp_destination_chain =
+                                crate::types::HubChain::NAME.to_string();
                             metrics.gmp_destination_address = gmp_dest;
                             metrics
                         }
@@ -567,20 +592,21 @@ async fn setup_its_token(
     let salt = generate_salt();
     // Mint a large fixed supply so the token can be reused across runs without redeploying.
     let total_supply: u64 = 1_000_000 * 1_000_000_000; // 1M tokens (9 decimals)
+    let spec = crate::types::LOAD_TEST_SOL_SPEC;
 
     ui::info("deploying new ITS token on Solana...");
-    ui::kv("name", TOKEN_NAME);
-    ui::kv("symbol", TOKEN_SYMBOL);
-    ui::kv("decimals", &TOKEN_DECIMALS.to_string());
+    ui::kv("name", spec.name);
+    ui::kv("symbol", spec.symbol);
+    ui::kv("decimals", &spec.decimals.to_string());
     ui::kv("supply", &total_supply.to_string());
 
     let deploy_sig = solana::send_its_deploy_interchain_token(
         solana_rpc,
         keypair,
         &salt,
-        TOKEN_NAME,
-        TOKEN_SYMBOL,
-        TOKEN_DECIMALS,
+        spec.name,
+        spec.symbol,
+        spec.decimals,
         total_supply,
         Some(&keypair.pubkey()), // deployer as minter for ongoing supply
     )?;
@@ -593,10 +619,19 @@ async fn setup_its_token(
     ui::kv("token ID", &hex::encode(token_id));
     ui::address("mint", &mint.to_string());
 
-    // Deploy remote to EVM destination
-    ui::info(&format!("deploying remote token to {dest}..."));
+    // Deploy remote to EVM destination. Deploys consume ~10× the
+    // destination-side gas of a transfer because they CREATE2 a fresh ITS
+    // token contract on the EVM chain, so multiply the per-tx gas budget.
+    let deploy_gas_value = gas_value.saturating_mul(DEPLOY_GAS_MULTIPLIER);
+    ui::info(&format!(
+        "deploying remote token to {dest} (gas: {deploy_gas_value} lamports)..."
+    ));
     let remote_sig = solana::send_its_deploy_remote_interchain_token(
-        solana_rpc, keypair, &salt, dest, gas_value,
+        solana_rpc,
+        keypair,
+        &salt,
+        dest,
+        deploy_gas_value,
     )?;
     ui::tx_hash("remote deploy tx", &remote_sig);
     ui::success("remote deploy tx confirmed on Solana");
