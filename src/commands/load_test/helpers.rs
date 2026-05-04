@@ -21,6 +21,38 @@ use super::resolve::save_cache;
 use crate::evm::{broadcast_and_log, read_artifact_bytecode};
 use crate::ui;
 
+/// One-stop wrapper around the cache → deploy/reuse → cache flow for an
+/// EVM destination. Reads the on-disk cache for `chain`, checks the cached
+/// SenderReceiver still has matching code on chain, redeploys if not, and
+/// updates the cache. Used by `test_gmp::run_config` to auto-resolve the
+/// destination address for sol→evm runs without forcing the user to deploy
+/// a SenderReceiver themselves.
+pub(crate) async fn ensure_sender_receiver_on_evm_chain(
+    chain: &str,
+    rpc_url: &str,
+    evm_private_key: &str,
+    gateway_addr: Address,
+    gas_service_addr: Address,
+) -> Result<Address> {
+    use alloy::signers::local::PrivateKeySigner;
+    let signer: PrivateKeySigner = evm_private_key.parse()?;
+    let read_provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+    let write_provider = ProviderBuilder::new()
+        .wallet(signer)
+        .connect_http(rpc_url.parse()?);
+    let cache = super::resolve::read_cache(chain);
+    deploy_or_reuse_sender_receiver(
+        &cache,
+        chain,
+        &read_provider,
+        &write_provider,
+        gateway_addr,
+        gas_service_addr,
+        chain,
+    )
+    .await
+}
+
 /// Deploy or reuse a cached SenderReceiver contract.
 pub(super) async fn deploy_or_reuse_sender_receiver<R: Provider, W: Provider>(
     cache: &serde_json::Value,

@@ -5,12 +5,12 @@
 
 pub mod evm_sender;
 mod gmp;
-mod helpers;
+pub(crate) mod helpers;
 pub mod its_evm_to_sol;
 pub mod its_sol_to_evm;
 pub mod keypairs;
 pub mod metrics;
-mod resolve;
+pub(crate) mod resolve;
 pub mod sol_sender;
 mod sustained;
 mod verify;

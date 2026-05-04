@@ -225,6 +225,43 @@ pub async fn run_config(
         }
     }
 
+    // For sol→evm without an explicit `--destination-address`, reuse the
+    // load-test SenderReceiver cache and auto-deploy a fresh receiver on the
+    // destination chain if needed. Same logic the sol-to-evm load-test
+    // already uses, so the cache is shared between the two commands.
+    let destination_address: Option<String> = if src_type == ChainType::Svm
+        && dst_type == ChainType::Evm
+        && destination_address.is_none()
+    {
+        let dst_rpc = dst_cfg
+            .rpc
+            .as_deref()
+            .ok_or_else(|| eyre::eyre!("no RPC for destination chain '{dst}'"))?;
+        let evm_pk = std::env::var("EVM_PRIVATE_KEY").map_err(|_| {
+            eyre::eyre!(
+                "EVM_PRIVATE_KEY env var required to deploy/reuse SenderReceiver on '{dst}'"
+            )
+        })?;
+        let gateway_addr: alloy::primitives::Address =
+            dst_cfg.contract_address("AxelarGateway", &dst)?.parse()?;
+        let gas_service_addr: alloy::primitives::Address = dst_cfg
+            .contract_address("AxelarGasService", &dst)?
+            .parse()?;
+        ui::section(&format!("Destination SenderReceiver ({dst})"));
+        let addr = crate::commands::load_test::helpers::ensure_sender_receiver_on_evm_chain(
+            &dst,
+            dst_rpc,
+            &evm_pk,
+            gateway_addr,
+            gas_service_addr,
+        )
+        .await?;
+        ui::address("SenderReceiver", &format!("{addr}"));
+        Some(format!("{addr}"))
+    } else {
+        destination_address
+    };
+
     let sent = match src_type {
         ChainType::Svm => {
             source::send_svm_call_contract(src_rpc, &dst, destination_address.as_deref(), 1, 8)?
