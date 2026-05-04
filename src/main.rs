@@ -85,6 +85,7 @@ async fn main() -> Result<()> {
                 config,
                 source_chain,
                 destination_chain,
+                destination_address,
                 mnemonic,
             } => {
                 if let Some(config) = config {
@@ -92,6 +93,7 @@ async fn main() -> Result<()> {
                         config,
                         source_chain,
                         destination_chain,
+                        destination_address,
                         mnemonic,
                     )
                     .await

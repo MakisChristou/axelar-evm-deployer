@@ -14,13 +14,17 @@ use crate::ui;
 
 /// Submit the Amplifier-built `execute_data` to the EVM gateway, confirm the
 /// message is approved, then call `execute` on the SenderReceiver and read
-/// back the stored message. Wraps Steps 7-8 of the EVM-loopback flow.
+/// back the stored message. `source_address` is the original sender's
+/// address (a SenderReceiver address for the EVM-loopback flow, a Solana
+/// keypair pubkey for sol→evm) — the EVM gateway validates the approval
+/// against this value, so it must match what was emitted at the source.
 #[allow(clippy::too_many_arguments)]
 pub async fn approve_and_execute_evm<P: Provider>(
     provider: &P,
     gateway: Address,
     sender_receiver: Address,
     source_chain: &str,
+    source_address: &str,
     execute_data_hex: &str,
     payload_bytes: &[u8],
     payload_hash: B256,
@@ -56,7 +60,7 @@ pub async fn approve_and_execute_evm<P: Provider>(
         .isContractCallApproved(
             command_id,
             source_chain.to_string(),
-            format!("{sender_receiver}"),
+            source_address.to_string(),
             sender_receiver,
             payload_hash,
         )
@@ -73,7 +77,7 @@ pub async fn approve_and_execute_evm<P: Provider>(
     let exec_call = sr_contract.execute(
         command_id,
         source_chain.to_string(),
-        format!("{sender_receiver}"),
+        source_address.to_string(),
         Bytes::from(payload_bytes.to_vec()),
     );
     let pending_exec = exec_call.send().await?;

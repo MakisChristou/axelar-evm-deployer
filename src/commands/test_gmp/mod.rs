@@ -113,6 +113,7 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
         gateway_addr,
         sender_receiver_addr,
         &axelar_id,
+        &source_address,
         &execute_data_hex,
         &payload_bytes,
         payload_hash,
@@ -139,6 +140,7 @@ pub async fn run_config(
     config: PathBuf,
     source_chain: Option<String>,
     destination_chain: Option<String>,
+    destination_address: Option<String>,
     mnemonic_override: Option<String>,
 ) -> Result<()> {
     let cfg = ChainsConfig::load(&config)?;
@@ -224,7 +226,9 @@ pub async fn run_config(
     }
 
     let sent = match src_type {
-        ChainType::Svm => source::send_svm_call_contract(src_rpc, &dst, 1, 8)?,
+        ChainType::Svm => {
+            source::send_svm_call_contract(src_rpc, &dst, destination_address.as_deref(), 1, 8)?
+        }
         ChainType::Evm => {
             return Err(eyre::eyre!(
                 "EVM source not yet supported in config mode. Use --axelar-id for EVM chains."
@@ -298,9 +302,39 @@ pub async fn run_config(
             )?;
         }
         ChainType::Evm => {
-            return Err(eyre::eyre!(
-                "EVM destination not yet supported in config mode. Use --axelar-id for EVM chains."
-            ));
+            let dst_rpc = dst_cfg
+                .rpc
+                .as_deref()
+                .ok_or_else(|| eyre::eyre!("no RPC for destination chain '{dst}'"))?;
+            let sender_receiver: alloy::primitives::Address = destination_address
+                .parse()
+                .map_err(|e| eyre::eyre!("invalid --destination-address: {e}"))?;
+            let evm_pk = std::env::var("EVM_PRIVATE_KEY").map_err(|_| {
+                eyre::eyre!("EVM_PRIVATE_KEY env var required for sol→evm GMP destination")
+            })?;
+            let evm_signer: PrivateKeySigner = evm_pk.parse()?;
+            let dst_provider = ProviderBuilder::new()
+                .wallet(evm_signer)
+                .connect_http(dst_rpc.parse()?);
+            let gateway_addr: alloy::primitives::Address =
+                dst_cfg.contract_address("AxelarGateway", &dst)?.parse()?;
+            ui::address("destination EVM gateway", &format!("{gateway_addr}"));
+            ui::address("destination SenderReceiver", &format!("{sender_receiver}"));
+
+            approve_and_execute_evm(
+                &dst_provider,
+                gateway_addr,
+                sender_receiver,
+                &src,
+                &source_address,
+                &execute_data_hex,
+                &payload_bytes,
+                payload_hash,
+                7,
+                8,
+                8,
+            )
+            .await?;
         }
     }
 

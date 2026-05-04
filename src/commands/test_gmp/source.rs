@@ -89,22 +89,39 @@ pub async fn send_evm_call_contract<P: Provider>(
 }
 
 /// Step 1 for an SVM source: call the gateway's `call_contract` from the
-/// loaded keypair, addressed to the SVM memo program with an executable
-/// payload. The message id comes back from the gateway log via
+/// loaded keypair. With `destination_address = None` the call targets the
+/// SVM memo program with an `make_executable_payload` (sol→sol loopback).
+/// With `destination_address = Some(addr)` the call targets that address
+/// (typically a `SenderReceiver` deployed on an EVM destination) with an
+/// ABI-encoded `(string,)` payload the EVM contract can decode.
+///
+/// The message id comes back from the gateway log via
 /// `extract_its_message_id`, falling back to `<sig>-1.1` if the log isn't
 /// indexable yet.
 pub fn send_svm_call_contract(
     src_rpc: &str,
     destination_chain: &str,
+    destination_address: Option<&str>,
     step_idx: usize,
     total_steps: usize,
 ) -> Result<SentGmp> {
     let keypair = load_keypair(None)?;
-    let memo_program = memo_program_id();
-    let destination_address = memo_program.to_string();
 
-    let counter_pda = Pubkey::find_program_address(&[b"counter"], &memo_program).0;
-    let payload_bytes = make_executable_payload(&None, &counter_pda);
+    let (destination_address, payload_bytes) = match destination_address {
+        None => {
+            let memo_program = memo_program_id();
+            let counter_pda = Pubkey::find_program_address(&[b"counter"], &memo_program).0;
+            let payload = make_executable_payload(&None, &counter_pda);
+            (memo_program.to_string(), payload)
+        }
+        Some(addr) => {
+            // ABI-encoded `(string,)` so an EVM SenderReceiver can decode it
+            // back via `abi.decode(payload, (string))` in `_execute(...)`.
+            let message = "hello from solana mainnet manual gmp test".to_string();
+            let payload = (message,).abi_encode_params();
+            (addr.to_string(), payload)
+        }
+    };
     let payload_hash = keccak256(&payload_bytes);
 
     ui::step_header(step_idx, total_steps, "Send callContract");

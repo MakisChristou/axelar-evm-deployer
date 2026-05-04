@@ -117,6 +117,13 @@ pub enum TestCommands {
         #[arg(long)]
         destination_chain: Option<String>,
 
+        /// Destination contract address (required for sol→evm; defaults to the
+        /// SVM memo program for sol→sol). For EVM destinations this should
+        /// point at a deployed `SenderReceiver` so the test can call
+        /// `execute(...)` and read back the stored message.
+        #[arg(long)]
+        destination_address: Option<String>,
+
         /// Cosmos mnemonic for relay transactions
         #[arg(long, env = "MNEMONIC")]
         mnemonic: Option<String>,
