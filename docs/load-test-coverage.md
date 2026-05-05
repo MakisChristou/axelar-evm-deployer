@@ -93,6 +93,34 @@ Auto-detect runs through these steps in order:
 | `AXELAR_LCD_URL` | Axelar Cosmos REST endpoint | from chain config; auto-falls back to `lavenderfive` and `publicnode` on 5xx |
 | `AXELAR_RPC_URL` | Axelar Tendermint RPC endpoint | from chain config; auto-falls back to `axelar-rpc.publicnode.com` and `rpc.cosmos.directory/axelar` on 5xx |
 
+## All `axe test load-test` flags
+
+Every flag (other than `--config`) is optional. Defaults are picked from the chain config + env feature flag.
+
+| Flag | Type | Notes |
+|---|---|---|
+| `--config <path>` | path | **required**. Picks the env (`mainnet.json`, `testnet.json`, `stagenet.json`, `devnet-amplifier.json`). Binary's compiled feature must match. |
+| `--source-chain <axelarId>` | string | Auto-detected when only one chain of the source type exists. Required for Sui pairs and any ambiguous cases. |
+| `--destination-chain <axelarId>` | string | Same as source. |
+| `--test-type <enum>` | one of `sol-to-evm \| evm-to-sol \| evm-to-evm \| sol-to-sol \| xrpl-to-evm \| evm-to-xrpl \| stellar-to-evm \| evm-to-stellar \| stellar-to-sol \| sol-to-stellar \| sui-to-evm \| evm-to-sui \| sol-to-sui \| sui-to-sol \| stellar-to-sui \| sui-to-stellar \| xrpl-to-sui \| sui-to-xrpl` | Auto-detected from the chain types — only set this if you want to override. |
+| `--protocol <gmp \| its \| its-with-data>` | enum | Default `gmp`. `its-with-data` only supports `evm-to-sol`. |
+| `--num-txs <N>` | u64 | Burst-mode tx count (default 5). |
+| `--tps <N>` + `--duration-secs <N>` | u64 | Sustained-mode (EVM↔Solana only today). Pool size = `tps × key_cycle`. |
+| `--key-cycle <N>` | u64 | Sustained-mode wallet rotation (default 3). Higher reduces per-address mempool pressure. |
+| `--source-rpc <url>` / `--destination-rpc <url>` | string | Override the per-chain RPC URLs from config. Also via `SOURCE_RPC` / `DESTINATION_RPC` env. |
+| `--private-key <hex>` | string | EVM key. Also via `EVM_PRIVATE_KEY` env. |
+| `--keypair <path>` | path | Solana JSON keypair. Also via `SOLANA_PRIVATE_KEY` env. Defaults to `~/.config/solana/id.json`. |
+| `--gas-value <wei/lamports/stroops/mist>` | string | Cross-chain gas attached to the source-side message. Default per source chain. |
+| `--token-id <hex>` | string | Skip auto-token-deploy and use an existing ITS token id (e.g. canonical XRP `0xba5a21ca…`). |
+| `--payload <hex>` | string | Override the auto-generated payload. |
+| `--extra-accounts <N>` | u32 | Solana ITS-with-data only — extra accounts in the executable payload. |
+
+## Solana commitment level
+
+All Solana RPC clients in load-test paths (sender, verifier, keypairs) use `CommitmentConfig::finalized` since [src/solana.rs](../src/solana.rs) and the load-test modules. Earlier we used `confirmed` (faster ~5 s vs ~13–30 s) but this caused vote splits on mainnet: some Axelar verifiers query Solana at `confirmed`, others at `finalized`, so a tx confirmed-but-not-finalized could be voted on at mixed visibility — leading to `5Y / 5N` polls expiring as `Failed`. Finalized adds latency to the source confirm step but eliminates the race; net end-to-end time is roughly unchanged because the Axelar voter pass is faster when all queries see consistent state.
+
+The `decode sol-tx` and `decode sol-activity` subcommands stay on `confirmed` — read-only diagnostic paths where the lower-latency commitment doesn't risk consistency.
+
 ## Building per environment
 
 The binary feature-gates the Axelar amplifier program IDs at compile time. Pick exactly one of `mainnet | testnet | stagenet | devnet-amplifier`:
