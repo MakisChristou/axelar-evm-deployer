@@ -1081,7 +1081,7 @@ async fn poll_pipeline_its_hub(
         ItsHubDest::Solana { rpc_url } => Some(Arc::new(
             solana_client::rpc_client::RpcClient::new_with_commitment(
                 rpc_url.clone(),
-                solana_commitment_config::CommitmentConfig::confirmed(),
+                solana_commitment_config::CommitmentConfig::finalized(),
             ),
         )),
         _ => None,
@@ -2182,6 +2182,7 @@ pub(super) fn tx_to_pending_its(tx: &TxMetrics, has_voting_verifier: bool) -> Pe
 /// (`MessageApproved` / `MessageExecuted` on the AxelarGateway events module)
 /// for the destination-side phases.
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 pub async fn verify_onchain_sui_gmp_streaming(
     config: &Path,
     source_chain: &str,
@@ -2372,7 +2373,7 @@ pub async fn verify_onchain_solana_streaming(
 
     let rpc_client = Arc::new(solana_client::rpc_client::RpcClient::new_with_commitment(
         solana_rpc,
-        solana_commitment_config::CommitmentConfig::confirmed(),
+        solana_commitment_config::CommitmentConfig::finalized(),
     ));
 
     let checker: DestinationChecker<'_, alloy::providers::RootProvider> =
@@ -2495,7 +2496,7 @@ pub async fn verify_onchain_solana(
 
     let rpc_client = Arc::new(solana_client::rpc_client::RpcClient::new_with_commitment(
         solana_rpc,
-        solana_commitment_config::CommitmentConfig::confirmed(),
+        solana_commitment_config::CommitmentConfig::finalized(),
     ));
 
     let checker: DestinationChecker<'_, alloy::providers::RootProvider> =
@@ -3729,7 +3730,7 @@ pub async fn wait_for_its_remote_deploy_to_solana(
 
     let sol_rpc_client = solana_client::rpc_client::RpcClient::new_with_commitment(
         solana_rpc,
-        solana_commitment_config::CommitmentConfig::confirmed(),
+        solana_commitment_config::CommitmentConfig::finalized(),
     );
 
     ui::kv("deploy message ID", deploy_message_id);
@@ -3848,7 +3849,12 @@ pub async fn wait_for_its_remote_deploy_to_solana(
 /// destination Soroban gateway via `is_message_executed` for the second-leg
 /// id. Stellar gateway state is small (mint+associate) so we poll
 /// `is_message_executed` rather than tracking PDAs.
+///
+/// Staged: not yet wired into a runner. Lives here so the `*_to_stellar`
+/// ITS modules (currently bailed at dispatch pending Stellar trusted-chain
+/// upstream config) can pick it up unchanged.
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 pub async fn wait_for_its_remote_deploy_to_stellar(
     config: &Path,
     source_chain: &str,

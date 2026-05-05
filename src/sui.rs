@@ -25,7 +25,7 @@ use ed25519_dalek::{Signer as EdSigner, SigningKey as EdSigningKey, VerifyingKey
 use eyre::{Result, eyre};
 use libsecp256k1::{Message as SecpMessage, PublicKey as SecpPub, SecretKey as SecpSecret};
 use serde_json::{Value, json};
-use sha2::{Digest as Sha2Digest, Sha256};
+use sha2::Sha256;
 use sui_sdk_types::{
     Address as SuiAddress, Argument, Command, Digest, GasPayment, Identifier, Input, MoveCall,
     ObjectReference, ProgrammableTransaction, SharedInput, SplitCoins, Transaction,
@@ -41,7 +41,12 @@ const SECP256K1_PK_LEN: usize = 33; // compressed
 /// Sui's intent scope for a TransactionData payload: [scope=0, version=0, app_id=0].
 const TX_INTENT: [u8; 3] = [0, 0, 0];
 
+/// Polling cadence + timeout for `wait_for_tx`. Used by Sui ITS work that
+/// is staged but not yet wired into a runner; kept here so the
+/// `SuiClient::wait_for_tx` helper has its constants colocated.
+#[allow(dead_code)]
 const POLL_INTERVAL: Duration = Duration::from_millis(750);
+#[allow(dead_code)]
 const TX_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Public Sui RPCs used as silent fallbacks if the configured endpoint errors.
@@ -169,6 +174,10 @@ impl SuiWallet {
         format!("0x{}", hex::encode(self.address.as_bytes()))
     }
 
+    /// Diagnostic label for the keypair scheme. Useful when surfacing
+    /// "you signed with X but the chain config expected Y" errors; not
+    /// referenced by the current GMP runners.
+    #[allow(dead_code)]
     pub fn scheme_label(&self) -> &'static str {
         match self.keypair {
             SuiKeypair::Ed25519 { .. } => "ed25519",
@@ -227,16 +236,6 @@ fn blake2b256(input: &[u8]) -> [u8; 32] {
     a
 }
 
-fn address_from_pubkey(pk: &EdVerifyingKey) -> Result<SuiAddress> {
-    // Sui address = blake2b256(flag || pubkey).
-    let mut buf = Vec::with_capacity(1 + ED25519_PK_LEN);
-    buf.push(ED25519_FLAG);
-    buf.extend_from_slice(pk.as_bytes());
-    let h = blake2b256(&buf);
-    SuiAddress::from_hex(format!("0x{}", hex::encode(h)))
-        .map_err(|e| eyre!("address derivation failed: {e:?}"))
-}
-
 // ---------------------------------------------------------------------------
 // Client (JSON-RPC with auto-fallback)
 // ---------------------------------------------------------------------------
@@ -274,6 +273,7 @@ impl SuiClient {
         }
     }
 
+    #[allow(dead_code)]
     pub fn rpc_url(&self) -> &str {
         &self.primary
     }
@@ -433,6 +433,9 @@ impl SuiClient {
     }
 
     /// Fetch ObjectReference for an owned object (used as ImmutableOrOwned input).
+    /// Staged for the deferred Sui ITS source-side PTB construction (needs
+    /// owned `Coin<T>` object refs). Not yet wired.
+    #[allow(dead_code)]
     pub async fn get_owned_object_ref(&self, object_id: &SuiAddress) -> Result<ObjectReference> {
         let r = self
             .call(
@@ -502,6 +505,10 @@ impl SuiClient {
     }
 
     /// Wait for a transaction to be confirmed and return its full details.
+    /// Staged for the deferred Sui ITS work (used to wait for a remote-deploy
+    /// or interchain-transfer tx before its events become queryable). Not
+    /// yet wired into the GMP runners.
+    #[allow(dead_code)]
     pub async fn wait_for_tx(&self, digest: &str) -> Result<Value> {
         let start = std::time::Instant::now();
         loop {
@@ -526,7 +533,10 @@ impl SuiClient {
         }
     }
 
-    /// Query events emitted by a specific transaction digest.
+    /// Query events emitted by a specific transaction digest. Staged for
+    /// Sui ITS work (the source-side runner inspects its own ContractCall
+    /// event indices); not yet wired.
+    #[allow(dead_code)]
     pub async fn query_tx_events(&self, digest: &str) -> Result<Vec<Value>> {
         let tx = self.wait_for_tx(digest).await?;
         Ok(tx
@@ -537,7 +547,10 @@ impl SuiClient {
     }
 
     /// `suix_queryEvents` filtered by Move event type. Returns the freshest
-    /// event matching the filter, or None.
+    /// event matching the filter, or None. Staged for Sui ITS work; the
+    /// GMP destination verifier uses `has_matching_event` (paginated)
+    /// instead.
+    #[allow(dead_code)]
     pub async fn find_event_by_move_type(
         &self,
         move_event_type: &str,
@@ -782,6 +795,11 @@ impl PtbBuilder {
         Argument::Input(idx)
     }
 
+    /// Add an immutable-or-owned object input to the PTB. Staged for the
+    /// deferred Sui ITS work (passing `Coin<T>` objects into
+    /// `interchain_transfer<T>`); the GMP runner only uses split-coin via
+    /// `Argument::Gas`.
+    #[allow(dead_code)]
     pub fn owned_object(&mut self, obj_ref: ObjectReference) -> Argument {
         let idx = self.inputs.len() as u16;
         self.inputs.push(Input::ImmutableOrOwned(obj_ref));

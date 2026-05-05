@@ -64,7 +64,7 @@ Whether a pair works also depends on whether both chains are deployed on the cho
 | **testnet** | many | `solana` | `stellar-2026-q1-2` | `sui` | `xrpl` | `xrpl-evm` | most coverage |
 | **stagenet** | many | `solana-stagenet-3` | none | `sui` | `xrpl` | `xrpl-evm` | no Stellar |
 | **devnet-amplifier** | `avalanche-fuji`, others | `solana-18` | none | `sui-2` | `xrpl-dev` | `xrpl-evm-devnet` ⚠️ | no Stellar; xrpl-evm-devnet AxelarGateway/ITS not deployed at configured addresses (`eth_getCode` returns `0x`) — GMP/ITS to it falls through pre-flight bytecode check |
-| **mainnet** | many | none | `stellar` | `sui` | `xrpl` | `xrpl-evm` | no Solana — drop SVM flows |
+| **mainnet** | many | `solana` | `stellar` | `sui` | `xrpl` | `xrpl-evm` | full coverage; Solana program IDs are feature-gated and resolve to mainnet (`gtwqvLL…`, `gaszjG…`, `memtaCu…`, `itsAUdH…`) when built `--features mainnet --no-default-features` |
 
 ## Resolving how a `--protocol`/`--source-chain`/`--destination-chain` triple is dispatched
 

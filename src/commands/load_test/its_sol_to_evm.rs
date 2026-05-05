@@ -76,7 +76,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     let main_keypair = solana::load_keypair(args.keypair.as_deref())?;
     let rpc_client = solana_client::rpc_client::RpcClient::new_with_commitment(
         &args.source_rpc,
-        solana_commitment_config::CommitmentConfig::confirmed(),
+        solana_commitment_config::CommitmentConfig::finalized(),
     );
     let pubkey = main_keypair.pubkey();
     let balance = rpc_client.get_balance(&pubkey).unwrap_or(0);
@@ -85,7 +85,12 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     ui::kv("wallet", &format!("{pubkey} ({sol:.4} SOL)"));
     if balance == 0 {
         return Err(eyre!(
-            "wallet ({pubkey}) has no SOL. Fund it first:\n  solana airdrop 2 {pubkey}"
+            "wallet ({pubkey}) has no SOL. {}",
+            if cfg!(feature = "mainnet") {
+                format!("Fund {pubkey} with mainnet SOL (no faucet) before retrying.")
+            } else {
+                format!("Fund it first:\n  solana airdrop 2 {pubkey}")
+            }
         ));
     }
 
@@ -716,7 +721,7 @@ fn distribute_its_tokens(
 
     let rpc_client = solana_client::rpc_client::RpcClient::new_with_commitment(
         solana_rpc,
-        solana_commitment_config::CommitmentConfig::confirmed(),
+        solana_commitment_config::CommitmentConfig::finalized(),
     );
 
     let token_program =

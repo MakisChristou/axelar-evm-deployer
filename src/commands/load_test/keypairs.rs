@@ -51,7 +51,7 @@ pub fn derive_keypairs(main: &Keypair, count: usize) -> Result<Vec<Keypair>> {
 /// Shows a progress bar during funding. Returns the per-key balance after funding.
 #[allow(clippy::cast_precision_loss, clippy::float_arithmetic)]
 pub fn ensure_funded(rpc_url: &str, main: &Keypair, derived: &[Keypair]) -> Result<Vec<u64>> {
-    let rpc = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+    let rpc = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::finalized());
     let main_balance = rpc.get_balance(&main.pubkey()).unwrap_or(0);
 
     // Check which keys need funding
@@ -146,7 +146,7 @@ pub fn ensure_funded_for_sustained(
         .max(TARGET_LAMPORTS_PER_KEY);
     let min_needed = target / 2; // top up when below half
 
-    let rpc = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+    let rpc = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::finalized());
     let main_balance = rpc.get_balance(&main.pubkey()).unwrap_or(0);
 
     let mut balances: Vec<u64> = Vec::with_capacity(derived.len());

@@ -311,7 +311,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         use solana_sdk::signer::Signer;
         let sol_rpc = solana_client::rpc_client::RpcClient::new_with_commitment(
             &args.destination_rpc,
-            solana_commitment_config::CommitmentConfig::confirmed(),
+            solana_commitment_config::CommitmentConfig::finalized(),
         );
         if sol_rpc.get_account_data(&ata).is_err() {
             ui::info("creating ATA on Solana for memo program...");
